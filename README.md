@@ -4,9 +4,8 @@
 
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/vitkuz573/skillstate/ci.yml?branch=main&label=CI)](https://github.com/vitkuz573/skillstate/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/vitkuz573/skillstate/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-299%20passing-brightgreen)](https://github.com/vitkuz573/skillstate/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
+[![Tests](https://img.shields.io/badge/tests-299%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![node](https://img.shields.io/node/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)

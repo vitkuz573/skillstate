@@ -39,7 +39,7 @@ lands.
 ## The 100% coverage rule
 
 `npm run test:coverage` enforces **100% on branches, functions, lines, and
-statements** (see `vitest.config.ts`). CI fails below the threshold.
+statements** (see `vitest.config.ts`). PRs below the threshold are rejected.
 
 - No `// istanbul ignore` / `/* v8 ignore */` suppression comments without a
   written justification in the PR description.
@@ -69,7 +69,6 @@ Common types:
 | `perf` | Performance improvement |
 | `docs` | Documentation only |
 | `chore` | Tooling, config, dependencies |
-| `ci` | CI workflow changes |
 
 Example: `feat(core): add maxValidationRetries option to SkillStateRuntime`
 
@@ -83,7 +82,7 @@ Example: `feat(core): add maxValidationRetries option to SkillStateRuntime`
    npm run typecheck && npm test && npm run test:coverage && npm run build
    ```
 4. Push and open a PR against `main`. The PR must:
-   - pass CI (typecheck, tests, 100% coverage, build) on Node 20 and 22;
+   - pass the full local gate (typecheck, tests, 100% coverage, build);
    - include tests for every new behavior;
    - keep every code example in `README.md` consistent with real exports —
      if you change a public signature, update the README in the same PR;
