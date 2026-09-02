@@ -1,0 +1,74 @@
+{
+  "name": "skillstate",
+  "version": "1.0.0",
+  "description": "O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state (SKILL.state) instead of append-only conversation history.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "default": "./dist/core/index.js"
+    },
+    "./claude": {
+      "types": "./dist/claude/claude-adapter.d.ts",
+      "default": "./dist/claude/claude-adapter.js"
+    },
+    "./opencode": {
+      "types": "./dist/opencode/opencode-adapter.d.ts",
+      "default": "./dist/opencode/opencode-adapter.js"
+    },
+    "./schemas": {
+      "types": "./dist/schemas/index.d.ts",
+      "default": "./dist/schemas/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "llm-agents",
+    "agent-skills",
+    "context-management",
+    "claude-code",
+    "opencode",
+    "token-optimization",
+    "state-machine",
+    "typescript",
+    "arxiv"
+  ],
+  "author": "Vitaly Kuzyaev <vitkuz573@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vitkuz573/skillstate.git"
+  },
+  "homepage": "https://github.com/vitkuz573/skillstate#readme",
+  "bugs": {
+    "url": "https://github.com/vitkuz573/skillstate/issues"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
