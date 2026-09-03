@@ -43,6 +43,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * True when `args` requests help via `--help` or `-h`. Used by {@link main}
+ * to print {@link CLI_USAGE} and exit 0, and by the `parse*Args` helpers to
+ * signal a help request (via {@link HelpRequestedError}) instead of treating
+ * help as an unknown flag.
+ */
+export function wantsHelp(args: string[]): boolean {
+  return args.includes('--help') || args.includes('-h');
+}
+
+/**
+ * Thrown by `parseRunArgs`/`parseReportArgs` when `--help`/`-h` is requested.
+ * {@link main} catches it, prints {@link CLI_USAGE}, and returns exit code 0.
+ */
+export class HelpRequestedError extends Error {
+  constructor() {
+    super('help requested');
+    this.name = 'HelpRequestedError';
+  }
+}
+
 /** Resolve `p` against `cwd` (absolute paths pass through). */
 export function resolveInCwd(cwd: string, p: string): string {
   return path.isAbsolute(p) ? p : path.join(cwd, p);
@@ -59,6 +80,9 @@ function readJsonFile(absPath: string): unknown {
  * `--config` value.
  */
 export function parseRunArgs(args: string[]): RunFlags {
+  if (wantsHelp(args)) {
+    throw new HelpRequestedError();
+  }
   let configPath: string | undefined;
   let resume = false;
   for (let i = 0; i < args.length; i += 1) {
@@ -90,6 +114,9 @@ export function parseRunArgs(args: string[]): RunFlags {
  * Throws an `Error` with {@link CLI_USAGE} on unknown/invalid flags.
  */
 export function parseReportArgs(args: string[]): ReportFlags {
+  if (wantsHelp(args)) {
+    throw new HelpRequestedError();
+  }
   let format: 'json' | 'md' = 'json';
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
@@ -312,8 +339,18 @@ async function cmdReport(cwd: string, flags: ReportFlags): Promise<number> {
 export async function main(argv: string[], cwd?: string): Promise<number> {
   const dir = cwd ?? process.cwd();
   const [command, ...rest] = argv;
+
+  if (command === '--help' || command === '-h') {
+    console.log(CLI_USAGE);
+    return 0;
+  }
+
   try {
     if (command === 'init') {
+      if (wantsHelp(rest)) {
+        console.log(CLI_USAGE);
+        return 0;
+      }
       if (rest.length > 0) {
         console.error(`Unknown flag for init: ${rest[0] as string}\n${CLI_USAGE}`);
         return 2;
@@ -329,6 +366,10 @@ export async function main(argv: string[], cwd?: string): Promise<number> {
     console.error(CLI_USAGE);
     return 2;
   } catch (error) {
+    if (error instanceof HelpRequestedError) {
+      console.log(CLI_USAGE);
+      return 0;
+    }
     console.error(error instanceof Error ? error.message : String(error));
     return 2;
   }

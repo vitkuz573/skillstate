@@ -12,6 +12,8 @@ import {
   loadResumeState,
   resolveInCwd,
   stubLlmResponse,
+  wantsHelp,
+  HelpRequestedError,
   CLI_USAGE,
 } from '@skillstate/cli';
 import { CONFIG_FILE_NAME } from '@skillstate/core';
@@ -435,6 +437,28 @@ describe('main report', () => {
   });
 });
 
+describe('wantsHelp', () => {
+  it('detects --help and -h', () => {
+    expect(wantsHelp(['--help'])).toBe(true);
+    expect(wantsHelp(['-h'])).toBe(true);
+    expect(wantsHelp(['run', '--help'])).toBe(true);
+    expect(wantsHelp(['--bogus'])).toBe(false);
+    expect(wantsHelp([])).toBe(false);
+  });
+});
+
+describe('parseRunArgs/parseReportArgs help (FIX 2)', () => {
+  it('parseRunArgs throws HelpRequestedError for --help/-h', () => {
+    expect(() => parseRunArgs(['--help'])).toThrow(HelpRequestedError);
+    expect(() => parseRunArgs(['-h'])).toThrow(HelpRequestedError);
+  });
+
+  it('parseReportArgs throws HelpRequestedError for --help/-h', () => {
+    expect(() => parseReportArgs(['--help'])).toThrow(HelpRequestedError);
+    expect(() => parseReportArgs(['-h'])).toThrow(HelpRequestedError);
+  });
+});
+
 describe('main usage', () => {
   it('returns 2 for unknown commands', async () => {
     expect(await main(['frobnicate'], makeTmp())).toBe(2);
@@ -457,6 +481,53 @@ describe('main usage', () => {
     });
     expect(await main(['init'], dir)).toBe(2);
     expect(errorSpy.mock.calls.join('\n')).toContain('string-boom');
+  });
+});
+
+describe('main --help (FIX 2)', () => {
+  it('prints usage and exits 0 for a bare --help / -h', async () => {
+    logSpy.mockClear();
+    expect(await main(['--help'], makeTmp())).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+
+    logSpy.mockClear();
+    expect(await main(['-h'], makeTmp())).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+  });
+
+  it('prints usage and exits 0 for init --help / init -h', async () => {
+    logSpy.mockClear();
+    expect(await main(['init', '--help'], makeTmp())).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+
+    logSpy.mockClear();
+    expect(await main(['init', '-h'], makeTmp())).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+  });
+
+  it('prints usage and exits 0 for run --help / run -h without executing', async () => {
+    const dir = makeTmp();
+    logSpy.mockClear();
+    expect(await main(['run', '--help'], dir)).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+
+    // Help must NOT run the benchmark/state machinery.
+    expect(fs.existsSync(path.join(dir, '.skillstate.json'))).toBe(false);
+
+    logSpy.mockClear();
+    expect(await main(['run', '-h'], dir)).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+  });
+
+  it('prints usage and exits 0 for report --help / report -h', async () => {
+    const dir = makeTmp();
+    logSpy.mockClear();
+    expect(await main(['report', '--help'], dir)).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
+
+    logSpy.mockClear();
+    expect(await main(['report', '-h'], dir)).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
   });
 });
 
