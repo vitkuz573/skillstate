@@ -177,7 +177,12 @@ export const SkillStatePlugin: Plugin = async ({ project, client, $ }) => {
   return {
     "tool.execute.before": async (input, output) => {
       // Inject current skill state into the tool call prompt/args.
-      output.args = injectStateIntoArgs(output.args);
+      // NOTE: opencode ignores reassignment of output.args — the hook contract
+      // requires mutating the args object IN PLACE.
+      const patched = injectStateIntoArgs(output.args as Record<string, unknown>);
+      for (const key of Object.keys(patched)) {
+        (output.args as Record<string, unknown>)[key] = patched[key];
+      }
       return output.args;
     },
   };

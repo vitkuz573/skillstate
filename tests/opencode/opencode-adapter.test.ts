@@ -228,6 +228,18 @@ describe('OpenCodeAdapter.generatePluginCode', () => {
     const plugin = adapter.generatePluginCode(statePath);
     expect(plugin).toContain(statePath);
   });
+
+  it('mutates output.args in place (opencode hook contract: reassignment does not propagate)', () => {
+    const plugin = adapter.generatePluginCode(statePath);
+    // The hook must copy patched keys back onto output.args IN PLACE.
+    // Verified live: reassigning output.args is silently ignored by opencode.
+    expect(plugin).toMatch(/\(output\.args[^)]*\)\[key\]\s*=/);
+  });
+
+  it('does NOT reassign output.args (reassignment is broken in opencode)', () => {
+    const plugin = adapter.generatePluginCode(statePath);
+    expect(plugin).not.toContain('output.args = injectStateIntoArgs');
+  });
 });
 
 // ─── describeSchema (via injectState) ───────────────────────────────────────
