@@ -1,6 +1,6 @@
 {
   "name": "skillstate",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state (SKILL.state) instead of append-only conversation history.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
