@@ -393,13 +393,18 @@ re-exports — import exactly the package you need:
 
 | Package | Contents |
 | --- | --- |
-| `@skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, `instrumentation` (@non-paper estimates), all types. Subpath `@skillstate/core/schemas` exports `INTERCODE_CTF_SPEC`. |
+| `@skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer` (`formatPaper`), all types, plus the `@non-paper` additive helpers (`instrumentation`, `resilience`, `validate`, `redaction`, `atomic-write`, `state-store`, `migrations`, `events`, `logger`, `clock`, `provider`, `config`, `shutdown`). Subpath `@skillstate/core/schemas` exports `INTERCODE_CTF_SPEC`. |
 | `@skillstate/claude` | `ClaudeAdapter` |
-| `@skillstate/opencode` | `OpenCodeAdapter` |
+| `@skillstate/opencode` | `OpenCodeAdapter`, `SkillStatePlugin` (+ default export) |
 | `@skillstate/codex` | `CodexAdapter` |
 | `@skillstate/mcp` | `McpAdapter`, `McpServer`, `launch` |
 | `@skillstate/cli` | `main`, `parseRunArgs`, `parseReportArgs`, `loadCliConfig`, `loadCliSpec`, `loadResumeState`, `resolveInCwd`, `stubLlmResponse`, `CLI_USAGE`, dashboard helpers. Ships the `skillstate` bin (`init \| run \| report`). |
 | `@skillstate/bench` | deterministic benchmark harness (`npm run bench` in the repo) |
+
+Every package exposes its root export path `@skillstate/<pkg>` (`.`).
+`@skillstate/core` additionally exposes the schema subpath
+`@skillstate/core/schemas`, and every package exposes its metadata via
+`@skillstate/<pkg>/package.json`.
 
 Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 `skillstate-mcp`.

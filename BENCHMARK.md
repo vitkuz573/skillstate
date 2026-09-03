@@ -33,10 +33,10 @@
 
 | T   | state/step (chars) | conv avg/step (chars) | state cumulative | conv cumulative | response cumulative | reduction (conv/state) | formula (T+1)/2 | state slope | conv slope |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 10  | 589 | 3239.5  | 5890   | 32395    | 930   | **5.5x**   | 5.5   | 0 | 5301   |
-| 50  | 589 | 15019.5 | 29450  | 750975   | 4650  | **25.5x**  | 25.5  | 0 | 28861  |
-| 100 | 589 | 29744.5 | 58900  | 2974450  | 9300  | **50.5x**  | 50.5  | 0 | 58311  |
-| 200 | 589 | 59194.5 | 117800 | 11838900 | 18600 | **100.5x** | 100.5 | 0 | 117211 |
+| 10  | 593 | 3261.5  | 5930   | 32615    | 930   | **5.5x**   | 5.5   | 0 | 5337   |
+| 50  | 593 | 15121.5 | 29650  | 756075   | 4650  | **25.5x**  | 25.5  | 0 | 29057  |
+| 100 | 593 | 29946.5 | 59300  | 2994650  | 9300  | **50.5x**  | 50.5  | 0 | 58707  |
+| 200 | 593 | 59596.5 | 118600 | 11919300 | 18600 | **100.5x** | 100.5 | 0 | 118007 |
 
 Machine-readable: `tests/bench/expected.json` (full per-step arrays).
 Guarded by `tests/bench/benchmark.test.ts` (formula-range assertions —
@@ -57,7 +57,7 @@ stdout; two runs are byte-identical.)
 | Aspect | Paper (Table 1 / §5.2) | Our harness |
 | --- | --- | --- |
 | Workload | Real Warehousing / CTF rollouts (Gemini-3-Flash, Gemma) | Minimal synthetic fixed-size turns |
-| State prompt size | ~1.8k chars (Table 1) | 589 chars (one-field spec, 64-char obs) |
+| State prompt size | ~1.8k chars (Table 1) | 593 chars (one-field spec, 64-char obs) |
 | Baseline | Stateful / Memory agents carrying raw tool spam and growing transcripts | Minimal equal-turn model (prefix sums of our own state prompts) |
 | T=100 reduction | **16.24x** vs Stateful (1062387/65408, §5.2) | **50.5x** = (100+1)/2 |
 | T=200 reduction | **~50.46x** vs Memory (6175509/122384, Table 1, worst baseline at max T) | **100.5x** = (200+1)/2 |

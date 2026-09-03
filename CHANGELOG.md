@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-09-03
+
+**Breaking:** the project was split from the single monolithic `skillstate`
+package into an npm **workspaces monorepo** of independently published scoped
+packages under the `@skillstate/*` scope. The root package is now `private`
+and ships no code. Every public import path moved — there is no legacy `skillstate`
+compat re-export, so all `skillstate/...` imports must be updated.
+
+### Changed
+
+- **Package split.** One package → seven scoped packages, one per workspace in
+  `packages/*`: `@skillstate/core`, `@skillstate/claude`, `@skillstate/opencode`,
+  `@skillstate/codex`, `@skillstate/mcp`, `@skillstate/cli`, `@skillstate/bench`.
+  Imports change from `skillstate/...` to the matching `@skillstate/...` package.
+- **Core API lives in `@skillstate/core`.** The runtime, state manager, prompt
+  transformer (`formatPaper`), token tracker, types, and all `@non-paper` helpers
+  (instrumentation, resilience, validate, redaction, atomic-write, state-store,
+  migrations, events, logger, clock, provider, config, shutdown) moved here. The
+  canonical CTF spec is available via the `@skillstate/core/schemas` subpath.
+- **Adapters.** `ClaudeAdapter` → `@skillstate/claude`, `OpenCodeAdapter` +
+  `SkillStatePlugin` → `@skillstate/opencode`, `CodexAdapter` →
+  `@skillstate/codex`, `McpAdapter` + `McpServer` + `launch` →
+  `@skillstate/mcp`. Each adapter package depends on `@skillstate/core` `^2.0.0`.
+- **CLI & MCP.** `skillstate` bin (`init | run | report`) now ships from
+  `@skillstate/cli`; the new `skillstate-mcp` bin ships from `@skillstate/mcp`.
+- **Benchmark.** The deterministic harness is published as `@skillstate/bench`
+  (entry-only) and run in the repo with `npm run bench`.
+- **Versioning.** All scoped packages are released together at `2.0.0`
+  (previous release: `1.1.2`).
+
 ## [1.0.0] - 2026-09-03
 
 Initial release — the SKILL.state runtime from
@@ -70,3 +100,4 @@ Initial release — the SKILL.state runtime from
 - TypeScript strict mode, ESM, bundled `.d.ts` for every entry point.
 
 [1.0.0]: https://github.com/vitkuz573/skillstate/releases/tag/v1.0.0
+[2.0.0]: https://github.com/vitkuz573/skillstate/releases/tag/v2.0.0
