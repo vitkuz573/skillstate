@@ -2,34 +2,35 @@
 // baseline comparisons, step history, and budget progress.
 //
 // All formatters return strings (pure) — callers decide whether to print.
+//
+// Units are raw string CHARS throughout (paper §4.3: Average Prompt Size =
+// mean char length per call, Total Token Cost = cumulative char burn).
 /// <reference types="node" />
-import type { ExecutionStep, TokenSavings } from '../core/types.js';
+import type { ExecutionStep } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 // Metrics shape produced by TokenTracker.getMetrics(), relaxed where the
-// dashboard only needs a subset (totalPromptTokens/lastStepTimestamp optional).
+// dashboard only needs a subset (totalPromptChars/lastStepTimestamp optional).
 export interface DashboardMetrics {
   sessionName: string;
-  totalTokens: number;
-  totalPromptTokens?: number;
+  totalChars: number;
+  totalPromptChars?: number;
   stepCount: number;
   averagePromptSize: number;
   /** Task Accuracy (paper §4.3). Null/undefined renders as 'n/a'. */
   accuracy?: number | null;
-  savingsPercent?: number;
-  savings: TokenSavings;
   lastStepTimestamp?: number | null;
 }
 
-// Comparison shape produced by TokenTracker.compareWithBaseline().
+// Comparison shape produced by TokenTracker.compareWithBaseline()
+// (measured chars, paper Table 1 methodology).
 export interface BaselineComparison {
-  conversationTokens: number;
-  stateTokens: number;
+  conversationChars: number;
+  stateChars: number;
   reductionFactor: number;
-  costSavings: number;
 }
 
 // Session metadata. startedAt is an epoch ms number from TokenTracker, but a
@@ -132,9 +133,6 @@ function renderTable(title: string, headers: string[], rows: string[][]): string
 // ---------------------------------------------------------------------------
 
 export function formatMetricsTable(metrics: DashboardMetrics): string {
-  const savingsPercent =
-    metrics.savingsPercent ?? metrics.savings?.savingsPercent ?? 0;
-
   // Task Accuracy (paper §4.3): '75.0%' when actionable steps exist, 'n/a'
   // otherwise (null from TokenTracker, or absent on legacy metric shapes).
   const accuracyText =
@@ -144,12 +142,10 @@ export function formatMetricsTable(metrics: DashboardMetrics): string {
 
   const rows: string[][] = [
     ['Session', metrics.sessionName],
-    ['Total Tokens', fmtNum(metrics.totalTokens)],
+    ['Total Chars', fmtNum(metrics.totalChars)],
     ['Steps', fmtNum(metrics.stepCount)],
     ['Accuracy', accuracyText],
-    ['Avg Prompt Size', fmtNum(metrics.averagePromptSize)],
-    ['Savings', `${fmtNum(savingsPercent)}%`],
-    ['Cumulative Savings', `${fmtNum(metrics.savings?.cumulativeSavings ?? 0)} tokens`],
+    ['Avg Prompt Size', `${fmtNum(metrics.averagePromptSize)} chars`],
   ];
 
   return renderTable(
@@ -165,10 +161,9 @@ export function formatMetricsTable(metrics: DashboardMetrics): string {
 
 export function formatComparisonTable(comparison: BaselineComparison): string {
   const rows: string[][] = [
-    ['Conversation Tokens', fmtNum(comparison.conversationTokens)],
-    ['State Tokens', fmtNum(comparison.stateTokens)],
+    ['Conversation Chars', fmtNum(comparison.conversationChars)],
+    ['State Chars', fmtNum(comparison.stateChars)],
     ['Reduction Factor', `${comparison.reductionFactor.toFixed(1)}x`],
-    ['Cost Savings', `$${comparison.costSavings.toFixed(3)}`],
   ];
 
   return renderTable(
@@ -187,12 +182,16 @@ export function formatStepHistory(steps: ExecutionStep[]): string {
     ? steps.map((s) => [
         String(s.step),
         truncate(s.action ?? '', 24),
-        fmtNum(s.tokensUsed),
-        fmtNum(s.promptSize),
+        fmtNum(s.promptChars),
+        fmtNum(s.responseChars),
       ])
     : [['-', '(no steps recorded)', '-', '-']];
 
-  return renderTable('Step History', ['Step', 'Action', 'Tokens', 'Prompt Size'], rows);
+  return renderTable(
+    'Step History',
+    ['Step', 'Action', 'Prompt Chars', 'Response Chars'],
+    rows,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +277,7 @@ export function printDashboard(input: DashboardInput): string {
 
   if (progress) {
     parts.push('');
-    parts.push(`Budget: ${formatProgressBar(progress)} (${progress.used}/${progress.budget} tokens)`);
+    parts.push(`Budget: ${formatProgressBar(progress)} (${progress.used}/${progress.budget} chars)`);
   }
 
   parts.push('');

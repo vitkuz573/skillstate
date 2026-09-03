@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   formatMetricsTable,
   formatComparisonTable,
@@ -7,36 +7,28 @@ import {
   generateReport,
   printDashboard,
 } from '../../src/cli/dashboard.js';
-import type { ExecutionStep, TokenSavings } from '../../src/core/types.js';
+import type { ExecutionStep } from '../../src/core/types.js';
 
 // ---------------------------------------------------------------------------
-// Fixtures
+// Fixtures — all sizes are raw string CHARS (paper §4.3)
 // ---------------------------------------------------------------------------
 
 function makeMetrics(overrides: Record<string, unknown> = {}) {
   return {
     sessionName: 'test-session',
-    totalTokens: 4500,
-    savingsPercent: 62.5,
+    totalChars: 4500,
+    totalPromptChars: 3300,
     averagePromptSize: 1100,
     stepCount: 5,
-    savings: {
-      promptReduction: 45,
-      cumulativeSavings: 3200,
-      savingsPercent: 62.5,
-      historyTokens: 8500,
-      stateTokens: 5300,
-    } satisfies TokenSavings,
     ...overrides,
   };
 }
 
 function makeComparison(overrides: Record<string, unknown> = {}) {
   return {
-    conversationTokens: 15000,
-    stateTokens: 5000,
+    conversationChars: 15000,
+    stateChars: 5000,
     reductionFactor: 3.0,
-    costSavings: 0.042,
     ...overrides,
   };
 }
@@ -48,8 +40,8 @@ function makeStep(overrides: Partial<ExecutionStep> = {}): ExecutionStep {
     reasoning: 'think',
     statePatch: { mood: 'happy' },
     action: 'respond',
-    tokensUsed: 150,
-    promptSize: 1000,
+    promptChars: 1000,
+    responseChars: 150,
     timestamp: Date.now(),
     ...overrides,
   };
@@ -73,7 +65,7 @@ function makeProgress(overrides: Record<string, unknown> = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. formatMetricsTable — format metrics as table
+// 1. formatMetricsTable — format metrics as table (§4.3 fields)
 // ---------------------------------------------------------------------------
 
 describe('formatMetricsTable', () => {
@@ -88,62 +80,40 @@ describe('formatMetricsTable', () => {
     expect(result).toContain('my-session');
   });
 
-  it('includes total tokens', () => {
-    const result = formatMetricsTable(makeMetrics({ totalTokens: 4500 }));
+  it('includes total chars (cumulative burn)', () => {
+    const result = formatMetricsTable(makeMetrics({ totalChars: 4500 }));
     expect(result).toContain('4500');
   });
 
-  it('includes savings percent', () => {
-    const result = formatMetricsTable(makeMetrics({ savingsPercent: 62.5 }));
-    expect(result).toContain('62.5');
-  });
-
-  it('includes average prompt size', () => {
+  it('includes average prompt size in chars', () => {
     const result = formatMetricsTable(makeMetrics({ averagePromptSize: 1100 }));
     expect(result).toContain('1100');
   });
 
-  it('falls back to savings.savingsPercent when top-level savingsPercent is absent', () => {
-    const metrics = makeMetrics();
-    delete (metrics as Record<string, unknown>)['savingsPercent'];
-
-    const result = formatMetricsTable(metrics);
-    expect(result).toContain('62.5%');
-  });
-
-  it('falls back to 0% when neither savingsPercent nor savings exist', () => {
-    const metrics = makeMetrics();
-    delete (metrics as Record<string, unknown>)['savingsPercent'];
-    delete (metrics as Record<string, unknown>)['savings'];
-
-    const result = formatMetricsTable(metrics);
-    expect(result).toContain('0%');
+  it('formats fractional sizes with one decimal', () => {
+    const result = formatMetricsTable(makeMetrics({ averagePromptSize: 1100.5 }));
+    expect(result).toContain('1100.5 chars');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 2. formatComparisonTable — format comparison vs baseline
+// 2. formatComparisonTable — format comparison vs baseline (measured chars)
 // ---------------------------------------------------------------------------
 
 describe('formatComparisonTable', () => {
-  it('shows conversation-based token count', () => {
-    const result = formatComparisonTable(makeComparison({ conversationTokens: 15000 }));
+  it('shows conversation-based char count', () => {
+    const result = formatComparisonTable(makeComparison({ conversationChars: 15000 }));
     expect(result).toContain('15000');
   });
 
-  it('shows state-based token count', () => {
-    const result = formatComparisonTable(makeComparison({ stateTokens: 5000 }));
+  it('shows state-based char count', () => {
+    const result = formatComparisonTable(makeComparison({ stateChars: 5000 }));
     expect(result).toContain('5000');
   });
 
   it('shows reduction factor', () => {
     const result = formatComparisonTable(makeComparison({ reductionFactor: 3.0 }));
     expect(result).toContain('3');
-  });
-
-  it('shows cost savings in dollars', () => {
-    const result = formatComparisonTable(makeComparison({ costSavings: 0.042 }));
-    expect(result).toContain('0.042');
   });
 });
 
@@ -153,25 +123,25 @@ describe('formatComparisonTable', () => {
 
 describe('formatStepHistory', () => {
   it('shows step number', () => {
-    const steps = [makeStep({ step: 3, action: 'respond', tokensUsed: 150, promptSize: 1000 })];
+    const steps = [makeStep({ step: 3, action: 'respond', promptChars: 1000, responseChars: 150 })];
     const result = formatStepHistory(steps);
     expect(result).toContain('3');
   });
 
   it('shows action taken', () => {
-    const steps = [makeStep({ step: 1, action: 'summarize', tokensUsed: 200, promptSize: 800 })];
+    const steps = [makeStep({ step: 1, action: 'summarize', promptChars: 800, responseChars: 200 })];
     const result = formatStepHistory(steps);
     expect(result).toContain('summarize');
   });
 
-  it('shows tokens used at step', () => {
-    const steps = [makeStep({ step: 1, action: 'respond', tokensUsed: 320, promptSize: 1000 })];
+  it('shows response chars at step', () => {
+    const steps = [makeStep({ step: 1, action: 'respond', promptChars: 1000, responseChars: 320 })];
     const result = formatStepHistory(steps);
     expect(result).toContain('320');
   });
 
-  it('shows prompt size at step', () => {
-    const steps = [makeStep({ step: 1, action: 'respond', tokensUsed: 150, promptSize: 2400 })];
+  it('shows prompt chars at step', () => {
+    const steps = [makeStep({ step: 1, action: 'respond', promptChars: 2400, responseChars: 150 })];
     const result = formatStepHistory(steps);
     expect(result).toContain('2400');
   });
@@ -277,8 +247,8 @@ describe('generateReport', () => {
     metrics: makeMetrics(),
     comparison: makeComparison(),
     history: [
-      makeStep({ step: 1, action: 'respond', tokensUsed: 150, promptSize: 1000 }),
-      makeStep({ step: 2, action: 'summarize', tokensUsed: 200, promptSize: 1200 }),
+      makeStep({ step: 1, action: 'respond', promptChars: 1000, responseChars: 150 }),
+      makeStep({ step: 2, action: 'summarize', promptChars: 1200, responseChars: 200 }),
     ],
     session: makeSession(),
   };
@@ -336,7 +306,7 @@ describe('printDashboard', () => {
     metrics: makeMetrics(),
     comparison: makeComparison(),
     history: [
-      makeStep({ step: 1, action: 'respond', tokensUsed: 150, promptSize: 1000 }),
+      makeStep({ step: 1, action: 'respond', promptChars: 1000, responseChars: 150 }),
     ],
     session: makeSession(),
     progress: makeProgress(),

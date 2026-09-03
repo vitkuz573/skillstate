@@ -4,7 +4,6 @@ import type {
   StateSchema,
   SchemaField,
   ValidationResult,
-  TokenSavings,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -129,30 +128,7 @@ export function validatePatch(
 }
 
 // ---------------------------------------------------------------------------
-// 4. computeTokenSavings — measure prompt reduction from state vs history
-// ---------------------------------------------------------------------------
-
-export function computeTokenSavings(
-  historyTokens: number,
-  stateTokens: number,
-  steps: number = 1,
-): TokenSavings {
-  const promptReduction = historyTokens - stateTokens;
-  const cumulativeSavings = promptReduction * steps;
-  const savingsPercent =
-    historyTokens === 0 ? 0 : Math.round((promptReduction / historyTokens) * 100);
-
-  return {
-    promptReduction,
-    cumulativeSavings,
-    savingsPercent,
-    historyTokens,
-    stateTokens,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 5. serializeState / deserializeState — JSON round-trip
+// 4. serializeState / deserializeState — JSON round-trip
 // ---------------------------------------------------------------------------
 
 export function serializeState(
@@ -170,20 +146,19 @@ export function deserializeState(json: string): SkillState {
 }
 
 // ---------------------------------------------------------------------------
-// 6. StateManager class — convenience wrapper with static methods
+// 5. StateManager class — convenience wrapper with static methods
 // ---------------------------------------------------------------------------
 
 export class StateManager {
   static createInitialState = createInitialState;
   static mergeState = mergeState;
   static validatePatch = validatePatch;
-  static computeTokenSavings = computeTokenSavings;
   static serializeState = serializeState;
   static deserializeState = deserializeState;
 }
 
 // ---------------------------------------------------------------------------
-// 7. createStateManager — factory function
+// 6. createStateManager — factory function
 // ---------------------------------------------------------------------------
 
 export function createStateManager() {
@@ -191,7 +166,6 @@ export function createStateManager() {
     createInitialState,
     mergeState,
     validatePatch,
-    computeTokenSavings,
     serializeState,
     deserializeState,
   };

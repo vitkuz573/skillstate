@@ -1,28 +1,44 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type {
-  TrackerConfig,
-  ExecutionStep,
-  TokenSavings,
-} from './types.js';
+import type { TrackerConfig, ExecutionStep } from './types.js';
 
+/**
+ * Paper §4.3 metrics, measured in raw string CHARS:
+ * - Task Accuracy: accepted patches / actionable steps (null when none).
+ * - Average Prompt Size: mean prompt char length per call.
+ * - Total Token Cost: cumulative char burn (prompts + responses).
+ *
+ * No tokenizer lives here: `recordStep` consumes the char counts the
+ * runtime measured (`promptChars` / `responseChars`). Anything estimated
+ * (len/4 heuristics, dollar pricing) belongs to `./instrumentation.js`
+ * and is explicitly marked @non-paper.
+ */
 interface Metrics {
-  totalTokens: number;
-  totalPromptTokens: number;
   stepCount: number;
+  /** Mean prompt char length per recorded call (§4.3 Average Prompt Size). */
   averagePromptSize: number;
-  /** Task Accuracy (paper §4.3): accepted patches / actionable steps. Null when no step was actionable. */
+  /** Cumulative prompt chars across all steps. */
+  totalPromptChars: number;
+  /** Cumulative burn: prompt chars + response chars (§4.3 Total Token Cost). */
+  totalChars: number;
+  /** Task Accuracy (§4.3). Null when no step was actionable. */
   accuracy: number | null;
-  savings: TokenSavings;
   sessionName: string;
   lastStepTimestamp: number | null;
 }
 
+/**
+ * Baseline comparison from MEASURED chars (paper Table 1 methodology):
+ * the conversation baseline re-sends every prior turn at each step
+ * (O(T²) cumulative), SKILL sends only the current Σt (O(T)).
+ */
 interface BaselineComparison {
-  conversationTokens: number;
-  stateTokens: number;
+  /** Σ(t=1..T) Σ(i=1..t) promptChars[i] — the O(T²) conversation model. */
+  conversationChars: number;
+  /** Σ(t=1..T) promptChars[t] — the O(T) state model. */
+  stateChars: number;
+  /** conversationChars / stateChars (0 when nothing was recorded). */
   reductionFactor: number;
-  costSavings: number;
 }
 
 interface Report {
@@ -35,14 +51,14 @@ interface Report {
   };
 }
 
-const COST_PER_TOKEN = 3 / 1_000_000; // $3 per 1M input tokens
-
 export class TokenTracker {
   private config: TrackerConfig;
   private steps: ExecutionStep[] = [];
-  private totalTokens = 0;
-  private totalPromptTokens = 0;
-  private cumulativePromptTokens = 0; // Σ(promptSize * stepIndex) for O(T²) conversation model
+  private totalPromptChars = 0;
+  private totalResponseChars = 0;
+  // Σ(t=1..N) Σ(i=1..t) promptChars[i], built incrementally: each new
+  // step adds the running prompt-char total (paper §3.3 eq.5: |C_t| = O(t)).
+  private cumulativePromptChars = 0;
   private lastStepTimestamp: number | null = null;
   private startedAt: number;
 
@@ -57,51 +73,16 @@ export class TokenTracker {
 
   recordStep(step: ExecutionStep): void {
     this.steps.push(step);
-    this.totalTokens += step.tokensUsed;
-    this.totalPromptTokens += step.promptSize;
-    // Conversation model: at step t (1-indexed), the prompt includes all prior turns.
-    // Cumulative prompt tokens = Σ(i=1..t) i * avgPromptSize for equal prompts,
-    // but with varying prompts it's the running sum of accumulated history.
-    // We track: at step t, conversation sends sum(step[1..t].promptSize) tokens.
-    // So cumulativePromptTokens = Σ(t=1..N) Σ(i=1..t) promptSize[i]
-    // = Σ(i=1..N) promptSize[i] * (N - i + 1)
-    // We compute this incrementally: each new step adds totalPromptTokens to the cumulative.
-    this.cumulativePromptTokens += this.totalPromptTokens;
+    this.totalPromptChars += step.promptChars;
+    this.totalResponseChars += step.responseChars;
+    this.cumulativePromptChars += this.totalPromptChars;
     this.lastStepTimestamp = step.timestamp;
   }
 
   getMetrics(): Metrics {
     const stepCount = this.steps.length;
-    const averagePromptSize = stepCount > 0
-      ? this.totalPromptTokens / stepCount
-      : 0;
-
-    // historyTokens: accumulated history overhead in conversation model
-    // = cumulativePromptTokens - totalPromptTokens (removes the base prompt)
-    const historyTokens = this.cumulativePromptTokens - this.totalPromptTokens;
-    const stateTokens = this.totalPromptTokens;
-
-    // savingsPercent: fraction of conversation tokens that are history overhead
-    const conversationTokens = this.cumulativePromptTokens;
-    const savingsPercent = conversationTokens > 0
-      ? (historyTokens / conversationTokens) * 100
-      : 0;
-
-    // promptReduction: average per-step reduction vs conversation
-    const promptReduction = stepCount > 0
-      ? historyTokens / stepCount
-      : 0;
-
-    // cumulativeSavings: total token savings
-    const cumulativeSavings = historyTokens;
-
-    const savings: TokenSavings = {
-      promptReduction,
-      cumulativeSavings,
-      savingsPercent,
-      historyTokens,
-      stateTokens,
-    };
+    const averagePromptSize =
+      stepCount > 0 ? this.totalPromptChars / stepCount : 0;
 
     // Task Accuracy (paper §4.3): fraction of actionable steps whose patch
     // was accepted. Steps with success === undefined are not actionable and
@@ -115,47 +96,34 @@ export class TokenTracker {
           actionableSteps.length;
 
     return {
-      totalTokens: this.totalTokens,
-      totalPromptTokens: this.totalPromptTokens,
       stepCount,
       averagePromptSize,
+      totalPromptChars: this.totalPromptChars,
+      totalChars: this.totalPromptChars + this.totalResponseChars,
       accuracy,
-      savings,
       sessionName: this.config.sessionName ?? `session-${this.startedAt}`,
       lastStepTimestamp: this.lastStepTimestamp,
     };
   }
 
   compareWithBaseline(): BaselineComparison {
-    const T = this.steps.length;
-    if (T === 0) {
+    if (this.steps.length === 0) {
       return {
-        conversationTokens: 0,
-        stateTokens: 0,
+        conversationChars: 0,
+        stateChars: 0,
         reductionFactor: 0,
-        costSavings: 0,
       };
     }
 
-    // Conversation: at step t (1-indexed), prompt includes all t prior turns.
-    // Total conversation tokens = Σ(t=1..T) Σ(i=1..t) promptSize[i]
-    // = cumulativePromptTokens (computed incrementally in recordStep)
-    const conversationTokens = this.cumulativePromptTokens;
-
-    // State-based: just the current state each time
-    const stateTokens = this.totalPromptTokens;
-
-    const reductionFactor = stateTokens > 0
-      ? conversationTokens / stateTokens
-      : 0;
-
-    const costSavings = (conversationTokens - stateTokens) * COST_PER_TOKEN;
+    const conversationChars = this.cumulativePromptChars;
+    const stateChars = this.totalPromptChars;
+    const reductionFactor =
+      stateChars > 0 ? conversationChars / stateChars : 0;
 
     return {
-      conversationTokens,
-      stateTokens,
+      conversationChars,
+      stateChars,
       reductionFactor,
-      costSavings,
     };
   }
 
@@ -188,6 +156,69 @@ export class TokenTracker {
     fs.writeFileSync(filePath, report, 'utf-8');
   }
 
+  /**
+   * @non-paper best-effort persist: returns the current report and writes
+   * it to `overridePath ?? persistPath` when a path is available. Unlike
+   * `save`, NEVER throws for a missing path — teardown/flush call sites
+   * must be safe to run unconditionally.
+   */
+  flush(overridePath?: string): string {
+    const report = this.exportReport();
+    const filePath = overridePath ?? this.config.persistPath;
+    if (filePath !== undefined) {
+      const dir = path.dirname(filePath);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(filePath, report, 'utf-8');
+    }
+    return report;
+  }
+
+  /**
+   * @non-paper archive-and-reset: returns the current report, persists it
+   * to `archivePath ?? persistPath` when a path is available, then resets
+   * step history and char counters to zero. Session identity
+   * (`sessionName`/`platform`) is kept; `startedAt` restarts at now so the
+   * next segment reads as a fresh session tail.
+   */
+  rotate(archivePath?: string): string {
+    const report = this.exportReport();
+    const filePath = archivePath ?? this.config.persistPath;
+    if (filePath !== undefined) {
+      const dir = path.dirname(filePath);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(filePath, report, 'utf-8');
+    }
+    this.steps = [];
+    this.totalPromptChars = 0;
+    this.totalResponseChars = 0;
+    this.cumulativePromptChars = 0;
+    this.lastStepTimestamp = null;
+    this.startedAt = Date.now();
+    return report;
+  }
+
+  /**
+   * @non-paper rollback helper for budget enforcement: keep only the first
+   * `keep` steps and rebuild every counter through the single `recordStep`
+   * accounting path, so `compareWithBaseline` stays exact after truncation.
+   * `keep >= stepCount` is a no-op; negatives clamp to zero.
+   */
+  truncateTo(keep: number): void {
+    const clamped = Math.max(0, keep);
+    if (clamped >= this.steps.length) {
+      return;
+    }
+    const kept = this.steps.slice(0, clamped);
+    this.steps = [];
+    this.totalPromptChars = 0;
+    this.totalResponseChars = 0;
+    this.cumulativePromptChars = 0;
+    this.lastStepTimestamp = null;
+    for (const step of kept) {
+      this.recordStep(step);
+    }
+  }
+
   load(overridePath?: string): void {
     const filePath = overridePath ?? this.config.persistPath;
     if (!filePath) {
@@ -198,20 +229,15 @@ export class TokenTracker {
       const data = fs.readFileSync(filePath, 'utf-8');
       const report = JSON.parse(data) as Report;
 
-      // Restore steps
-      this.steps = report.steps ?? [];
-
-      // Restore cumulative state from steps
-      this.totalTokens = 0;
-      this.totalPromptTokens = 0;
-      this.cumulativePromptTokens = 0;
+      // Restore steps through the single accounting path
+      this.steps = [];
+      this.totalPromptChars = 0;
+      this.totalResponseChars = 0;
+      this.cumulativePromptChars = 0;
       this.lastStepTimestamp = null;
 
-      for (const step of this.steps) {
-        this.totalTokens += step.tokensUsed;
-        this.totalPromptTokens += step.promptSize;
-        this.cumulativePromptTokens += this.totalPromptTokens;
-        this.lastStepTimestamp = step.timestamp;
+      for (const step of report.steps ?? []) {
+        this.recordStep(step);
       }
 
       // Restore session metadata
@@ -224,9 +250,9 @@ export class TokenTracker {
     } catch {
       // Gracefully handle missing or corrupted files — reset to defaults
       this.steps = [];
-      this.totalTokens = 0;
-      this.totalPromptTokens = 0;
-      this.cumulativePromptTokens = 0;
+      this.totalPromptChars = 0;
+      this.totalResponseChars = 0;
+      this.cumulativePromptChars = 0;
       this.lastStepTimestamp = null;
     }
   }

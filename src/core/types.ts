@@ -1,7 +1,7 @@
-// SkillState - the mutable execution state (Σt in the paper)
+// SkillState - the mutable execution state (Σt in the paper, §3)
 export type SkillState = Record<string, unknown>;
 
-// StatePatch - the ΔΣt the LLM produces. Values can be anything or null (for deletion)
+// StatePatch - the ΔΣt the LLM produces. Values can be anything or null (for deletion, §3.2)
 export type StatePatch = Record<string, unknown | null>;
 
 // Schema field definition
@@ -14,7 +14,7 @@ export interface SchemaField {
 // Schema - defines valid state keys and their types
 export type StateSchema = Record<string, SchemaField>;
 
-// Procedural specification (P) - immutable skill definition
+// Procedural specification (P) - immutable skill definition (paper §3.1)
 export interface ProceduralSpec {
   id: string;
   name: string;
@@ -23,7 +23,8 @@ export interface ProceduralSpec {
   version: string;
 }
 
-// Observation (Ot) - latest env observation
+// Observation (Ot) - latest env observation. The model NEVER receives
+// previous observations (§3): only the latest Ot is passed per step.
 export interface Observation {
   content: string;
   timestamp: number;
@@ -45,26 +46,22 @@ export type ValidationResult =
   | { valid: true }
   | { valid: false; error: string; field?: string };
 
-// Token savings metrics
-export interface TokenSavings {
-  promptReduction: number;
-  cumulativeSavings: number;
-  savingsPercent: number;
-  historyTokens: number;
-  stateTokens: number;
-}
-
-// Execution step record
+// Execution step record. All sizes are raw string CHARS per paper §4.3
+// (Average Prompt Size = mean char length per call) — never tokenizer
+// output and never a len/4 estimate.
 export interface ExecutionStep {
   step: number;
   observation: Observation;
   reasoning: string;
   statePatch: StatePatch;
   action: string;
-  tokensUsed: number;
-  promptSize: number;
+  /** Char length of the step's prompt At = (P, Σt, Ot). */
+  promptChars: number;
+  /** Char length of the raw LLM response(s) for this step. */
+  responseChars: number;
   timestamp: number;
-  // True when the step's patch was accepted (not exhausted by retries)
+  // True when the step's patch was accepted (not exhausted by retries).
+  // Feeds Task Accuracy (§4.3); undefined = not actionable (excluded).
   success?: boolean;
 }
 

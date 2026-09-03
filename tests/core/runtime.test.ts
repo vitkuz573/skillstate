@@ -194,7 +194,7 @@ describe('SkillStateRuntime.step — Algorithm 1 core', () => {
     await h.runtime.step(obs('o2'));
 
     expect(tracker.getMetrics().stepCount).toBe(2);
-    expect(tracker.getMetrics().totalPromptTokens).toBeGreaterThan(0);
+    expect(tracker.getMetrics().totalPromptChars).toBeGreaterThan(0);
   });
 
   it('executes the action and returns the executor observation', async () => {

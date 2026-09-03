@@ -3,7 +3,6 @@ import {
   createInitialState,
   mergeState,
   validatePatch,
-  computeTokenSavings,
   serializeState,
   deserializeState,
   StateManager,
@@ -13,7 +12,6 @@ import type {
   StateSchema,
   SkillState,
   StatePatch,
-  ExecutionStep,
 } from '../../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -382,75 +380,7 @@ describe('validatePatch type-system edge cases', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. computeTokenSavings
-// ---------------------------------------------------------------------------
-
-describe('computeTokenSavings', () => {
-  const makeStep = (overrides: Partial<ExecutionStep> = {}): ExecutionStep => ({
-    step: 1,
-    observation: { content: 'obs', timestamp: Date.now() },
-    reasoning: 'reason',
-    statePatch: {},
-    action: 'act',
-    tokensUsed: 100,
-    promptSize: 500,
-    timestamp: Date.now(),
-    ...overrides,
-  });
-
-  it('calculates prompt reduction correctly', () => {
-    const historyTokens = 800;
-    const stateTokens = 200;
-
-    const result = computeTokenSavings(historyTokens, stateTokens);
-
-    // promptReduction = historyTokens - stateTokens
-    expect(result.promptReduction).toBe(600);
-  });
-
-  it('calculates cumulative savings over multiple steps', () => {
-    // Without state, each step replays full history: 800 tokens each
-    // With state, each step sends compact state: 200 tokens each
-    // Over 3 steps: savings = 3 * (800 - 200) = 1800
-    const historyTokens = 800;
-    const stateTokens = 200;
-    const steps = 3;
-
-    const result = computeTokenSavings(historyTokens, stateTokens, steps);
-
-    expect(result.cumulativeSavings).toBe(1800);
-  });
-
-  it('calculates savings percent', () => {
-    const historyTokens = 1000;
-    const stateTokens = 250;
-
-    const result = computeTokenSavings(historyTokens, stateTokens);
-
-    expect(result.savingsPercent).toBe(75);
-  });
-
-  it('handles single step (default)', () => {
-    const result = computeTokenSavings(500, 100);
-
-    expect(result.promptReduction).toBe(400);
-    expect(result.cumulativeSavings).toBe(400);
-    expect(result.savingsPercent).toBe(80);
-    expect(result.historyTokens).toBe(500);
-    expect(result.stateTokens).toBe(100);
-  });
-
-  it('handles empty history (zero savings)', () => {
-    const result = computeTokenSavings(0, 0);
-
-    expect(result.promptReduction).toBe(0);
-    expect(result.cumulativeSavings).toBe(0);
-    expect(result.savingsPercent).toBe(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 5. serializeState / deserializeState — round-trip through JSON
+// 4. serializeState / deserializeState — round-trip through JSON
 // ---------------------------------------------------------------------------
 
 describe('serializeState / deserializeState', () => {
@@ -519,11 +449,6 @@ describe('StateManager class', () => {
     expect(result.valid).toBe(false);
   });
 
-  it('exposes computeTokenSavings via static wrapper', () => {
-    const result = StateManager.computeTokenSavings(800, 200, 2);
-    expect(result.cumulativeSavings).toBe(1200);
-  });
-
   it('exposes serializeState/deserializeState via static wrappers', () => {
     const json = StateManager.serializeState({ mood: 'calm' });
     expect(StateManager.deserializeState(json)).toEqual({ mood: 'calm' });
@@ -537,7 +462,6 @@ describe('createStateManager factory', () => {
     expect(typeof manager.createInitialState).toBe('function');
     expect(typeof manager.mergeState).toBe('function');
     expect(typeof manager.validatePatch).toBe('function');
-    expect(typeof manager.computeTokenSavings).toBe('function');
     expect(typeof manager.serializeState).toBe('function');
     expect(typeof manager.deserializeState).toBe('function');
   });
@@ -552,9 +476,6 @@ describe('createStateManager factory', () => {
     expect(merged).toEqual({});
 
     expect(manager.validatePatch(minimalSchema, { value: 1 }).valid).toBe(true);
-
-    const savings = manager.computeTokenSavings(1000, 250);
-    expect(savings.savingsPercent).toBe(75);
 
     const json = manager.serializeState({ a: 1 });
     expect(manager.deserializeState(json)).toEqual({ a: 1 });

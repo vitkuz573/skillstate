@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-299%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-306%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![node](https://img.shields.io/node/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -16,17 +16,20 @@
 
 Agent skills today run on an **append-only conversation history**: every step re-sends the entire transcript, so token cost grows quadratically — **O(T²)** cumulative for a T-step task. Long histories also *poison* the agent: stale hypotheses, dead ends, and raw tool spam crowd out the instructions, and accuracy degrades as the context fills.
 
-`skillstate` implements the **SKILL.state** runtime from the paper [*SKILL.state: Scalable Long-Horizon Agent Skills*](https://arxiv.org/abs/2608.26263) (arXiv:2608.26263). Instead of replaying history, the agent maintains a compact, structured **execution state Σₜ** — a fixed-schema JSON object that is read once per step and patched between steps. The prompt footprint stays **O(1)** per step (a flat ~1.8k tokens regardless of progress), cumulative cost drops to **O(T)**, and the agent always sees exactly what it knows.
+`skillstate` implements the **SKILL.state** runtime from the paper [*SKILL.state: Scalable Long-Horizon Agent Skills*](https://arxiv.org/abs/2608.26263) (arXiv:2608.26263). Instead of replaying history, the agent maintains a compact, structured **execution state Σₜ** — a fixed-schema JSON object that is read once per step and patched between steps. The prompt footprint stays **O(1)** per step (a flat ~1.8k chars regardless of progress — Table 1 reports ~1800 characters, not tokens), cumulative cost drops to **O(T)**, and the agent always sees exactly what it knows.
 
 ## Results reported by the paper
 
 | Metric | Conversation baseline | SKILL.state |
 | --- | --- | --- |
-| Cumulative prompt tokens (T = 100 steps) | O(T²) | **16.2× lower** |
-| Prompt size per step | grows with history | **flat ~1.8k tokens** |
+| Cumulative prompt chars, Warehouse Gemini-3-Flash T=100 vs Stateful (1062387 vs 65408, §5.2) | O(T²) | **16.2× lower (paper-reported, not re-measured)** |
+| Prompt size per step | grows with history | **flat ~1.8k chars (Table 1, not tokens)** |
+| Worst baseline at max T: cumulative chars, T=200 Memory vs SKILL (6175509 vs 122384, Table 1) | O(T²) | **~50× (derived from Table 1 cells — worst baseline at max T, not a paper claim; "50x" appears nowhere in the text)** |
 | pass@1, InterCode CTF benchmark | 43.2% | **54.2%** |
 
-Numbers are as reported in the paper, not re-measured by this implementation.
+CTF/τ-Bench save only −60%/−40% — the large multiples come from the long-horizon Warehousing runs, not from every benchmark. Numbers are as reported in the paper, not re-measured by this implementation.
+
+> Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "до ~50x vs Memory на T=200 6175509 vs 122384 Table 1 — худший baseline на max T, не claim пейпера; CTF/τ-Bench −60%/−40%"; "§5.7/§7/A.4 как упрощенная имплементация, адаптеры non-paper/additive без очистки истории хостом экономии нет."
 
 ## How it works
 
@@ -144,7 +147,7 @@ I should check for hidden files in /home first.
 | **⊕ merge** | `Σₜ₊₁ = Σₜ ⊕ ΔΣₜ` | Null-deletion merge (`StateManager.mergeState`). Never mutates the input state — merged states are fresh objects. |
 | **Reasoning discard** | `Rₜ` | Everything before the JSON fence. Returned in `StepResult.reasoning` for debugging, but never persisted into Σₜ. |
 
-Standalone state utilities are also exported: `StateManager.createInitialState`, `StateManager.mergeState`, `StateManager.validatePatch`, `StateManager.computeTokenSavings`, `StateManager.serializeState`, `StateManager.deserializeState` (plus a `createStateManager()` factory with the same functions).
+Standalone state utilities are also exported: `StateManager.createInitialState`, `StateManager.mergeState`, `StateManager.validatePatch`, `StateManager.serializeState`, `StateManager.deserializeState` (plus a `createStateManager()` factory with the same functions).
 
 ## Platform integrations
 
@@ -197,59 +200,60 @@ const plugin = adapter.generatePluginCode('./.skillstate.json');
 
 ## Metrics
 
-`TokenTracker` implements the paper's §4.3 measurement methodology:
+`TokenTracker` implements exactly the paper's §4.3 methodology — three metrics, measured in raw string chars (never tokenizer output, never a len/4 estimate):
 
 ```ts
 const tracker = new TokenTracker({ platform: 'claude', sessionName: 'eval' });
 
 // After steps have been recorded (automatically when passed to a runtime):
 const metrics = tracker.getMetrics();
-metrics.totalTokens;        // prompt + response tokens across all steps
+metrics.totalChars;           // Total Token Cost (§4.3): cumulative char burn (prompts + responses)
+metrics.totalPromptChars;     // cumulative prompt chars
 metrics.stepCount;
-metrics.averagePromptSize;  // should stay ~flat across steps
-metrics.accuracy;           // Task Accuracy (§4.3): accepted patches / actionable
-                            // steps; null when no step was actionable
-metrics.savings;            // { promptReduction, cumulativeSavings,
-                            //   savingsPercent, historyTokens, stateTokens }
+metrics.averagePromptSize;    // Average Prompt Size (§4.3): mean prompt char length per call — flat, that's the point
+metrics.accuracy;             // Task Accuracy (§4.3): accepted patches / actionable
+                              // steps; null when no step was actionable
 
-const baseline = tracker.compareWithBaseline();
-baseline.conversationTokens;  // Σₜ Σᵢ promptSize[i] — the O(T²) conversation model
-baseline.stateTokens;         // Σₜ promptSize[t] — the O(T) state model
-baseline.reductionFactor;     // conversationTokens / stateTokens
-baseline.costSavings;         // USD at $3 per 1M input tokens
+const baseline = tracker.compareWithBaseline();  // Table 1 methodology on measured chars
+baseline.conversationChars;   // Σₜ Σᵢ promptChars[i] — the O(T²) conversation model
+baseline.stateChars;          // Σₜ promptChars[t] — the O(T) state model
+baseline.reductionFactor;     // conversationChars / stateChars
 
 tracker.exportReport();       // full JSON report (metrics + steps + session)
 tracker.save('./report.json');// persist; tracker.load() restores
 ```
 
-The tracker models the conversation baseline exactly: at step *t* the transcript re-sends every prior turn, so cumulative conversation tokens are `Σ(t=1..T) Σ(i=1..t) promptSize[i]`, while the state runtime sends only the current Σₜ each time.
+The tracker models the conversation baseline exactly: at step *t* the transcript re-sends every prior turn, so cumulative conversation chars are `Σ(t=1..T) Σ(i=1..t) promptChars[i]`, while the state runtime sends only the current Σₜ each time. For constant-size prompts the closed form is `reductionFactor = (T+1)/2` (paper §3.3 eq.5–7).
+
+Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics — use the explicitly-marked `@non-paper` helpers in `skillstate/core` (`instrumentation`: `CharDiv4Counter`, `estimateCostSavings`) and label the result as estimated.
 
 ## Package exports
 
 | Path | Contents |
 | --- | --- |
 | `skillstate` | Everything (core + adapters + schemas) |
-| `skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, all types |
+| `skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, `instrumentation` (@non-paper estimates), all types |
 | `skillstate/claude` | `ClaudeAdapter` |
 | `skillstate/opencode` | `OpenCodeAdapter` |
 | `skillstate/schemas` | `INTERCODE_CTF_SPEC` |
 
 ## Paper fidelity
 
-- [x] Algorithm 1 loop — prompt `(P, Σₜ, Oₜ)` → LLM → validate ΔΣₜ → merge ⊕ → execute aₜ
+- [x] Algorithm 1 loop — prompt `(P, Σₜ, Oₜ)` → LLM → validate ΔΣₜ → merge ⊕ → execute aₜ. The model never receives previous observations, actions, or reasoning (§3); Rₜ is discarded permanently (§3.2)
 - [x] ⊕ null-deletion merge (nested-object aware, non-mutating)
-- [x] Appendix A.4 verbatim paper prompt format (`PromptTransformer.formatPaper`)
-- [x] §7 rollback-retry cycle with corrective feedback; deterministic fallback after retries
-- [x] §5.7 error taxonomy — parse/validation failures classified (`no_block`, `malformed_json`, `missing_state_patch`, `missing_action`) and fed back to the model
+- [x] Appendix A.4 verbatim paper prompt format (`PromptTransformer.formatPaper`) — simplified implementation of the A.4 skeleton (Instructions / Skill Execution State ```json compact / Latest Observation / reasoning-will-be-discarded + two-key JSON fence); all other formatters (`formatForClaude`, `formatForOpenCode`, generic) are `@non-paper` adapter conveniences
+- [x] §7 rollback-retry cycle with corrective feedback; deterministic fallback after retries — simplified (fixed retry count); malformed outputs never touch state per the Limitations paragraph
+- [x] §5.7 failure-mode taxonomy is paper log analysis (68% Premature Overwrite/Deletion, 20% Schema/Type Coercion, 12% JSON Syntax on Gemma-4-31B T=100 logs) — NOT parser codes. Our parse-failure reasons (`no_block`, `malformed_json`, `missing_state_patch`, `missing_action`) are implementation-internal (`@non-paper`) and only feed the §7 retry feedback
 - [x] O(1)/O(T) property test — prompt size stays constant modulo observation growth (`tests/core/runtime-footprint.test.ts`)
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
-- [x] Task Accuracy metric per §4.3 (`TokenTracker.getMetrics().accuracy`)
+- [x] All three §4.3 metrics in chars — Task Accuracy, Average Prompt Size (mean chars), Total Token Cost (cumulative burn) (`TokenTracker`); Table 1 ratios pinned as fixtures (`tests/core/paper-fidelity.test.ts`)
+- [ ] Claude/OpenCode adapters are `@non-paper` (no adapters in the paper) and ADDITIVE: they inject state on top of host history without trimming it, so alone they yield no economy — the saving needs the host to stop re-sending history
 
 ## Development
 
 ```bash
 npm install
-npm test                # 299 tests
+npm test                # 306 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc --noEmit
 npm run build           # emit dist/

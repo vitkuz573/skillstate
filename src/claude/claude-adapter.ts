@@ -1,3 +1,17 @@
+/**
+ * @non-paper adapter — no adapters exist in arXiv 2608.26263v3.
+ *
+ * This file bridges the paper-exact core (Algorithm 1 prompt, ⊕ merge,
+ * §7 rollback-retry rejection) into Claude Code sessions via hook scripts
+ * and prompt boilerplate.
+ *
+ * HONEST LIMITATION: the generated hooks are ADDITIVE — they inject the
+ * persisted state on top of the host's full conversation history. Nothing
+ * here trims or clears that history, so on its own this adapter does NOT
+ * reproduce the paper's O(1) prompt footprint. The O(1)/O(T) economy holds
+ * only when the host stops re-sending history (or the operator clears it):
+ * the saving comes from never re-sending history, not from appending state.
+ */
 import type {
   SkillState,
   StatePatch,
@@ -6,6 +20,11 @@ import type {
   PlatformAdapter,
 } from '../core/types.js';
 import { PromptTransformer } from '../core/prompt-transformer.js';
+import {
+  atomicWriteFile,
+  resolveStatePath,
+} from '../core/atomic-write.js';
+import type { StatePathRef } from '../core/atomic-write.js';
 
 export class ClaudeAdapter implements PlatformAdapter {
   readonly name = 'claude';
@@ -53,6 +72,10 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
     return this.transformer.extractAction(response);
   }
 
+  /**
+   * @non-paper — adapter convenience (delegates to the transformer).
+   * Paper-exact callers use `PromptTransformer.formatPaper` (Appendix A.4).
+   */
   formatPrompt(
     state: SkillState,
     observation: Observation,
@@ -65,13 +88,35 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
     eventType: 'PreToolUse' | 'PostToolUse',
     statePath: string,
     schema?: ProceduralSpec['schema'],
+  ): string;
+  /**
+   * @non-paper additive overload: accept a `{ root, name }` ref confined
+   * via `resolveStatePath` — `..` escapes throw instead of embedding an
+   * unsafe path into the generated script. The string overload above is
+   * byte-identical to the pre-wave-2 codegen.
+   */
+  generateHookScript(
+    eventType: 'PreToolUse' | 'PostToolUse',
+    stateRef: StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): string;
+  generateHookScript(
+    eventType: 'PreToolUse' | 'PostToolUse',
+    statePathOrRef: string | StatePathRef,
+    schema?: ProceduralSpec['schema'],
   ): string {
+    const statePath =
+      typeof statePathOrRef === 'string'
+        ? statePathOrRef
+        : resolveStatePath(statePathOrRef.root, statePathOrRef.name);
     const sp = JSON.stringify(statePath);
 
     if (eventType === 'PreToolUse') {
       return [
         '// Claude hook: PreToolUse',
-        '// Reads skill state and injects it into the tool\'s additionalContext',
+        '// Reads skill state and injects it into the tool\'s additionalContext.',
+        '// ADDITIVE: the host history is left untouched, so this alone does not',
+        '// reproduce the paper O(1) footprint (see module doc).',
         'const fs = require("fs");',
         'const stateFilePath = ' + sp + ';',
         'let state = {};',
@@ -90,10 +135,11 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
       ].join('\n');
     }
 
-    // PostToolUse — paper-conformant: schema-validated null-deletion merge.
-    // Self-contained CommonJS (hook scripts run via `node script.cjs`).
-    // The schema is embedded so unknown keys / wrong types are rejected here
-    // instead of corrupting the persisted state.
+    // PostToolUse — schema-validated null-deletion merge. Malformed outputs
+    // are rejected and never persisted (paper Limitations: malformed outputs
+    // cannot corrupt Σt). Self-contained CommonJS (hook scripts run via
+    // `node script.cjs`). The schema is embedded so unknown keys / wrong
+    // types are rejected here instead of corrupting the persisted state.
     const fence = '`' + '`' + '`';
     const schemaJson = JSON.stringify(schema ?? {});
 
@@ -146,7 +192,7 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
       '    else if (expected === "array") ok = Array.isArray(value);',
       '    else if (expected === "object") ok = isPlainObject(value);',
       '    if (!ok) {',
-      '      return "Invalid type for field \'" + key + "\': expected " + expected +', 
+      '      return "Invalid type for field \'" + key + "\': expected " + expected +',
       '        ", got " + (Array.isArray(value) ? "array" : typeof value);',
       '    }',
       '  }',
@@ -198,6 +244,32 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
       '  process.stdout.write(JSON.stringify(output));',
       '});',
     ].join('\n');
+  }
+
+  /**
+   * @non-paper additive helper: generate a hook script and persist it via
+   * `atomicWriteFile` (tmp + fsync + rename). Both the destination and the
+   * embedded state path accept raw strings (legacy behavior) or
+   * `{ root, name }` refs confined by `resolveStatePath`. Returns the
+   * absolute destination path.
+   */
+  async saveHookScript(
+    target: string | StatePathRef,
+    eventType: 'PreToolUse' | 'PostToolUse',
+    statePath: string | StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): Promise<string> {
+    const dest =
+      typeof target === 'string'
+        ? target
+        : resolveStatePath(target.root, target.name);
+    const resolvedState =
+      typeof statePath === 'string'
+        ? statePath
+        : resolveStatePath(statePath.root, statePath.name);
+    const script = this.generateHookScript(eventType, resolvedState, schema);
+    await atomicWriteFile(dest, script);
+    return dest;
   }
 
   generateAppendPrompt(): string {

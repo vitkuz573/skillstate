@@ -12,6 +12,11 @@ export interface PromptTransformerOptions {
 
 /**
  * Reason a parseResponse call failed.
+ *
+ * @non-paper — implementation-internal codes. These are NOT the paper's
+ * §5.7 taxonomy: §5.7 reports log-analysis categories from the Gemma-4-31B
+ * T=100 runs (68% Premature Overwrite/Deletion, 20% Schema/Type Coercion,
+ * 12% JSON Syntax), not parser result codes.
  */
 export type ParseFailureReason =
   | 'no_block'
@@ -37,6 +42,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Transforms skill state, observations, and specs into formatted prompts
  * for LLM consumption, and parses structured responses back.
+ *
+ * Only {@link PromptTransformer.formatPaper} is paper-exact (Appendix A.4).
+ * Every other formatter here is an implementation convenience for the
+ * platform adapters — the paper defines no per-platform prompt templates.
  */
 export class PromptTransformer {
   private platform: 'claude' | 'opencode' | 'generic';
@@ -47,6 +56,9 @@ export class PromptTransformer {
 
   /**
    * Format the full prompt. Delegates to platform-specific formatter.
+   *
+   * @non-paper — adapter convenience. Paper-exact callers must use
+   * {@link PromptTransformer.formatPaper}.
    */
   formatPrompt(
     spec: ProceduralSpec,
@@ -67,6 +79,8 @@ export class PromptTransformer {
   /**
    * Claude-specific prompt format: markdown with system prompt section,
    * state section, observation section, instruction for reasoning + JSON.
+   *
+   * @non-paper — adapter convenience; the paper defines no Claude template.
    */
   formatForClaude(
     spec: ProceduralSpec,
@@ -111,6 +125,8 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
 
   /**
    * OpenCode-specific prompt format adapted for the opencode skill system.
+   *
+   * @non-paper — adapter convenience; the paper defines no OpenCode template.
    */
   formatForOpenCode(
     spec: ProceduralSpec,
@@ -172,6 +188,9 @@ Provide your response with:
 
   /**
    * Generic prompt format (no platform prefix).
+   *
+   * @non-paper — adapter convenience; the paper-exact template is
+   * {@link PromptTransformer.formatPaper} (Appendix A.4).
    */
   private formatGeneric(
     spec: ProceduralSpec,
@@ -229,10 +248,17 @@ In \`state_patch\`, set keys to null to delete them.`;
   /**
    * Parse an LLM response into a typed result: either a valid
    * { patch, action } pair or a structured failure with a reason.
+   *
+   * Malformed outputs can never corrupt Σt: callers (runtime §7
+   * rollback-retry, adapter hook scripts) must reject `ok: false` results
+   * without touching state (paper Limitations).
    */
   parseResponse(response: string): ParseResponseResult {
-    // Prefer a closed ```json fence; fall back to an unterminated fence
-    // (common with truncated LLM output) and attempt to parse the rest.
+    // Prefer a closed ```json fence.
+    //
+    // @non-paper extension: fall back to an unterminated fence (common
+    // with truncated LLM output) and attempt to parse the rest. The paper
+    // specifies only the fenced JSON block; lenient recovery is ours.
     const closed = response.match(/```json[ \t]*\n?([\s\S]*?)\n?[ \t]*```/);
     const opened = closed ? null : response.match(/```json[ \t]*\n?([\s\S]*)$/);
     const block = closed ? closed[1] : opened ? opened[1] : null;

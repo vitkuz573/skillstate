@@ -20,8 +20,8 @@ function makeStep(overrides: Partial<ExecutionStep> = {}): ExecutionStep {
     reasoning: 'think',
     statePatch: { mood: 'happy' },
     action: 'respond',
-    tokensUsed: 150,
-    promptSize: 1000,
+    promptChars: 1000,
+    responseChars: 150,
     timestamp: Date.now(),
     ...overrides,
   };
