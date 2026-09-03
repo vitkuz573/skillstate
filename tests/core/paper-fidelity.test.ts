@@ -2,10 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { SkillStateRuntime } from '../../src/core/runtime.js';
 import type { LLMFn, ActionExecutor } from '../../src/core/runtime.js';
 import { TokenTracker } from '../../src/core/token-tracker.js';
+import { PromptTransformer } from '../../src/core/prompt-transformer.js';
 import type {
   ProceduralSpec,
   Observation,
   StatePatch,
+  SkillState,
 } from '../../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -188,15 +190,16 @@ describe('§4.3 metrics end-to-end through the runtime (chars, not estimates)', 
     await runtime.step(obs('o2'));
 
     const metrics = tracker.getMetrics();
+    const bookkeeping = tracker.getBookkeeping();
     const expectedPrompts = prompts.map((p) => p.length);
-    expect(metrics.stepCount).toBe(2);
+    expect(bookkeeping.stepCount).toBe(2);
     expect(metrics.averagePromptSize).toBe(
       (expectedPrompts[0] + expectedPrompts[1]) / 2,
     );
-    expect(metrics.totalPromptChars).toBe(
+    expect(bookkeeping.totalPromptChars).toBe(
       expectedPrompts[0] + expectedPrompts[1],
     );
-    expect(metrics.totalChars).toBe(
+    expect(metrics.totalTokens).toBe(
       expectedPrompts[0] +
         expectedPrompts[1] +
         responses[0].length +
@@ -226,5 +229,139 @@ describe('§4.3 metrics end-to-end through the runtime (chars, not estimates)', 
     const sizes = report.steps.map((s: { promptChars: number }) => s.promptChars);
     expect(new Set(sizes).size).toBe(1);
     expect(tracker.getMetrics().averagePromptSize).toBe(sizes[0]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Appendix A.4 byte-verbatim fidelity — blank lines, compact JSON, verbatim
+// response directive. No schema description, no platform padding on top.
+// ---------------------------------------------------------------------------
+
+describe('formatPaper — byte-verbatim Appendix A.4', () => {
+  const a4Spec: ProceduralSpec = {
+    id: 'a4-skill',
+    name: 'A4Skill',
+    instructions: 'You are a paper-fidelity skill.\nFollow Section A.4 exactly.',
+    schema: {
+      mood: { type: 'string', default: 'neutral' },
+    },
+    version: '1.0.0',
+  };
+
+  const a4State: SkillState = { mood: 'calm', count: 7 };
+  const a4Obs: Observation = {
+    content: 'The build failed with exit code 1.',
+    timestamp: 1700000000000,
+  };
+
+  it('matches the A.4 template byte-for-byte (blank lines + compact JSON preserved)', () => {
+    const prompt = new PromptTransformer().formatPaper(a4Spec, a4State, a4Obs);
+
+    const expected = `Instructions:
+
+${a4Spec.instructions}
+
+Skill Execution State:
+
+\`\`\`json
+${JSON.stringify(a4State)}
+\`\`\`
+Latest Observation: ${a4Obs.content}
+
+Provide your response with:
+
+1. Step-by-step reasoning (will be discarded after execution)
+
+2. A JSON block fenced with json ...  containing both your State Patch and your Action. The JSON block MUST have exactly these two keys: { "state_patch": { <dict: your state updates, set keys to null to delete> }, "action": "<string: the exact command you want to execute>" }`;
+
+    expect(prompt).toBe(expected);
+  });
+
+  it('renders state as compact JSON — json.dumps(state, separators=(",", ":")) semantics', () => {
+    const prompt = new PromptTransformer().formatPaper(a4Spec, a4State, a4Obs);
+    const stateJson = prompt.match(/```json\n([\s\S]*?)\n```/);
+    expect(stateJson).not.toBeNull();
+    expect(stateJson![1]).toBe(JSON.stringify(a4State));
+    expect(stateJson![1]).not.toContain(': ');
+    expect(stateJson![1]).not.toContain(', ');
+  });
+
+  it('adds no schema description and no platform padding on top of A.4', () => {
+    const prompt = new PromptTransformer().formatPaper(a4Spec, a4State, a4Obs);
+    expect(prompt).not.toContain('## Schema');
+    expect(prompt).not.toContain('<skill');
+    expect(prompt).not.toContain('# System');
+    expect(prompt).not.toContain('# Current State');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §4.3 primary metrics are EXACTLY three; bookkeeping is separate.
+// ---------------------------------------------------------------------------
+
+describe('§4.3 primary metrics — exactly three fields (bookkeeping separate)', () => {
+  it('getMetrics returns exactly { accuracy, averagePromptSize, totalTokens }', () => {
+    const tracker = new TokenTracker({ platform: 'generic' });
+    tracker.recordStep({
+      step: 1,
+      observation: obs('o'),
+      reasoning: 'r',
+      statePatch: { mood: 'a' },
+      action: 'act',
+      promptChars: 500,
+      responseChars: 100,
+      timestamp: 0,
+      success: true,
+    });
+
+    const metrics = tracker.getMetrics();
+    expect(Object.keys(metrics).sort()).toEqual([
+      'accuracy',
+      'averagePromptSize',
+      'totalTokens',
+    ]);
+    // No §4.3-contaminating bookkeeping leaks into the primary object.
+    expect(metrics).not.toHaveProperty('stepCount');
+    expect(metrics).not.toHaveProperty('totalPromptChars');
+    expect(metrics).not.toHaveProperty('totalChars');
+    expect(metrics).not.toHaveProperty('sessionName');
+    expect(metrics).not.toHaveProperty('lastStepTimestamp');
+
+    // The §4.3 triple is populated correctly.
+    expect(metrics.averagePromptSize).toBe(500);
+    expect(metrics.totalTokens).toBe(600);
+    expect(metrics.accuracy).toBe(1);
+  });
+
+  it('bookkeeping stays available and separate via getBookkeeping()', () => {
+    const tracker = new TokenTracker({ platform: 'generic' });
+    tracker.recordStep({
+      step: 1,
+      observation: obs('o'),
+      reasoning: 'r',
+      statePatch: { mood: 'a' },
+      action: 'act',
+      promptChars: 500,
+      responseChars: 100,
+      timestamp: 0,
+      success: true,
+    });
+
+    const bookkeeping = tracker.getBookkeeping();
+    expect(Object.keys(bookkeeping).sort()).toEqual([
+      'lastStepTimestamp',
+      'sessionName',
+      'stepCount',
+      'totalChars',
+      'totalPromptChars',
+    ]);
+    expect(bookkeeping.stepCount).toBe(1);
+    expect(bookkeeping.totalPromptChars).toBe(500);
+    expect(bookkeeping.totalChars).toBe(600);
+    // report.metrics merges both worlds for report/dashboard consumers.
+    const report = JSON.parse(tracker.exportReport());
+    expect(report.metrics.totalTokens).toBe(600);
+    expect(report.metrics.totalChars).toBe(600);
+    expect(report.metrics.stepCount).toBe(1);
   });
 });

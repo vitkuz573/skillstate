@@ -51,7 +51,7 @@ describe('TokenTracker.flush', () => {
       JSON.parse(report),
     );
     // Flush changes nothing: metrics keep accumulating afterwards.
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
   });
 
   it('prefers an explicit override path', () => {
@@ -96,11 +96,12 @@ describe('TokenTracker.rotate', () => {
     ).toBe(2);
 
     const fresh = tracker.getMetrics();
-    expect(fresh.stepCount).toBe(0);
-    expect(fresh.totalChars).toBe(0);
-    expect(fresh.totalPromptChars).toBe(0);
+    const freshBook = tracker.getBookkeeping();
+    expect(freshBook.stepCount).toBe(0);
+    expect(freshBook.totalChars).toBe(0);
+    expect(freshBook.totalPromptChars).toBe(0);
     expect(fresh.averagePromptSize).toBe(0);
-    expect(fresh.sessionName).toBe('rotate-session');
+    expect(freshBook.sessionName).toBe('rotate-session');
     expect(tracker.compareWithBaseline()).toEqual({
       conversationChars: 0,
       stateChars: 0,
@@ -109,8 +110,8 @@ describe('TokenTracker.rotate', () => {
 
     // The next segment accumulates from zero with the same identity.
     tracker.recordStep(makeStep({ step: 1, promptChars: 50, responseChars: 5 }));
-    expect(tracker.getMetrics().totalChars).toBe(55);
-    expect(tracker.getMetrics().sessionName).toBe('rotate-session');
+    expect(tracker.getBookkeeping().totalChars).toBe(55);
+    expect(tracker.getBookkeeping().sessionName).toBe('rotate-session');
   });
 
   it('writes to an explicit archive path, leaving the config path alone', () => {
@@ -123,7 +124,7 @@ describe('TokenTracker.rotate', () => {
     tracker.rotate(archivePath);
     expect(fs.existsSync(archivePath)).toBe(true);
     expect(fs.existsSync(persistPath)).toBe(false);
-    expect(tracker.getMetrics().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
   });
 
   it('resets cleanly without any path configured', () => {
@@ -131,7 +132,7 @@ describe('TokenTracker.rotate', () => {
     tracker.recordStep(makeStep());
     const archived = tracker.rotate();
     expect(JSON.parse(archived).metrics.stepCount).toBe(1);
-    expect(tracker.getMetrics().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
   });
 });
 
@@ -143,7 +144,7 @@ describe('TokenTracker.truncateTo', () => {
     tracker.recordStep(makeStep({ step: 3, promptChars: 300, responseChars: 30 }));
 
     tracker.truncateTo(2);
-    const metrics = tracker.getMetrics();
+    const metrics = tracker.getBookkeeping();
     expect(metrics.stepCount).toBe(2);
     expect(metrics.totalPromptChars).toBe(300);
     expect(metrics.totalChars).toBe(330);
@@ -160,12 +161,12 @@ describe('TokenTracker.truncateTo', () => {
     tracker.recordStep(makeStep());
 
     tracker.truncateTo(5);
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
     tracker.truncateTo(1);
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
 
     tracker.truncateTo(-3);
-    expect(tracker.getMetrics().stepCount).toBe(0);
-    expect(tracker.getMetrics().totalChars).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().totalChars).toBe(0);
   });
 });

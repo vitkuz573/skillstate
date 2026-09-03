@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-306%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-630%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![node](https://img.shields.io/node/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -31,7 +31,7 @@ CTF/τ-Bench save only −60%/−40% — the large multiples come from the long-
 
 ## Our measurements (reproducible, `npm run bench`)
 
-Local deterministic harness (`src/bench/harness.ts`): fixed 589-char
+Local deterministic harness (`src/bench/harness.ts`): fixed 593-char
 `formatPaper` turns, fixed 64-char observations, fixed mock-LLM replies —
 no Gemini, no warehouse. Conversation baseline = prefix sums of our own
 state prompts (the `TokenTracker.compareWithBaseline` model, paper §3.3
@@ -40,12 +40,12 @@ not a deployment claim:
 
 | T | state cumulative (chars) | conv cumulative (chars) | reduction (ours) | formula (T+1)/2 |
 | --- | --- | --- | --- | --- |
-| 10 | 5890 | 32395 | **5.5x** | 5.5 |
-| 50 | 29450 | 750975 | **25.5x** | 25.5 |
-| 100 | 58900 | 2974450 | **50.5x** | 50.5 |
-| 200 | 117800 | 11838900 | **100.5x** | 100.5 |
+| 10 | 5930 | 32615 | **5.5x** | 5.5 |
+| 50 | 29650 | 756075 | **25.5x** | 25.5 |
+| 100 | 59300 | 2994650 | **50.5x** | 50.5 |
+| 200 | 118600 | 11919300 | **100.5x** | 100.5 |
 
-State slope is 0 (flat 589 chars/step); conv slope grows linearly. Do NOT
+State slope is 0 (flat 593 chars/step); conv slope grows linearly. Do NOT
 confuse these with the paper rows above: e.g. our T=100 50.5x is
 numerically close to the paper's T=200 ~50.46x by coincidence (different T,
 different method — their §5.2 Stateful turns average only ~210 chars vs
@@ -53,7 +53,7 @@ their ~654-char SKILL step, hence 16.24x at T=100). Full method, tables,
 and limitations: [`BENCHMARK.md`](./BENCHMARK.md); machine-readable
 fixture: [`tests/bench/expected.json`](./tests/bench/expected.json).
 
-> Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "~50x vs Memory at T=200 6175509 vs 122384 Table 1 — worst baseline at max T, not a paper claim; CTF/τ-Bench -60%/-40%"; "§5.7/§7/A.4 as simplified implementation, @non-paper/additive adapters with no host history trimming yield no saving."
+> Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "~50x vs Memory at T=200 6175509 vs 122384 Table 1 — worst baseline at max T, not a paper claim; CTF/τ-Bench -60%/-40%"; "§5.7/§7 as simplified implementation, A.4 as byte-verbatim template, @non-paper/additive adapters with no host history trimming yield no saving."
 
 ## How it works
 
@@ -199,6 +199,11 @@ const post = adapter.generateHookScript(
 // -> extracts state_patch from the response, validates it against the
 //    embedded schema, applies the null-deletion merge, saves the state file
 
+// Compact hooks for O(1)-friendly session management:
+const hooks = adapter.generateAllHooksScripts('./.skillstate.json', INTERCODE_CTF_SPEC.schema);
+// hooks.preCompact: injects state + diff into compaction summary
+// hooks.sessionStartCompact: re-injects state after compaction
+
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
 ```
@@ -214,36 +219,85 @@ const adapter = new OpenCodeAdapter();
 // pointing at the persisted state file) and the state-based process body:
 const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate.json');
 
-// Plugin that hooks tool.execute.before, reads the persisted state, and
-// injects it into every tool call:
+// Plugin with real O(1) history trimming via experimental.chat.messages.transform,
+// compaction context injection, and state persistence via tool.execute.after:
 const plugin = adapter.generatePluginCode('./.skillstate.json');
 
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
 ```
 
+## Real-world usage
+
+### OpenCode — real O(1) via `experimental.chat.messages.transform`
+
+The generated plugin hooks OpenCode's `experimental.chat.messages.transform` to trim history **before** each LLM call. Old messages are dropped — only the last N non-system messages plus an injected state message are sent to the model. This is real O(1) prompt footprint.
+
+```ts
+const adapter = new OpenCodeAdapter();
+
+// Default: keeps last 3 non-system messages + state injection
+const plugin = adapter.generatePluginCode('./.skillstate.json');
+
+// Or configure history depth:
+const plugin = adapter.generatePluginCode('./.skillstate.json', {
+  maxHistoryMessages: 5,  // keep last 5 non-system messages
+});
+```
+
+The plugin also hooks:
+- `experimental.session.compacting`: injects state into compaction context so the summary preserves it.
+- `tool.execute.after`: persists state patches from LLM responses to disk.
+
+### Claude Code — best available strategy
+
+Claude Code hooks are **append-only** — history cannot be trimmed from hooks. The best strategy uses two hooks:
+
+```ts
+const adapter = new ClaudeAdapter();
+
+// PreCompact: injects current state + diff into compaction summary
+const preCompact = adapter.generateCompactHookScript('./.skillstate.json', schema);
+
+// SessionStart (source: compact): re-injects state after compaction
+const sessionStart = adapter.generateSessionStartHookScript('./.skillstate.json');
+
+// Or generate both at once:
+const hooks = adapter.generateAllHooksScripts('./.skillstate.json', schema);
+// hooks.preCompact, hooks.sessionStartCompact
+```
+
+**Honest limitation**: True O(1) is not possible in Claude Code without host-side trimming. The hooks inject state into the compaction summary and re-inject after compaction, but the conversation history itself continues to grow until the host trims it.
+
 ## Metrics
 
-`TokenTracker` implements exactly the paper's §4.3 methodology — three metrics, measured in raw string chars (never tokenizer output, never a len/4 estimate):
+`TokenTracker` implements exactly the paper's §4.3 methodology — a clean **three-metric** primary object, measured in raw string chars (never tokenizer output, never a len/4 estimate):
 
 ```ts
 const tracker = new TokenTracker({ platform: 'claude', sessionName: 'eval' });
 
 // After steps have been recorded (automatically when passed to a runtime):
+// §4.3 primary metrics — EXACTLY three fields.
 const metrics = tracker.getMetrics();
-metrics.totalChars;           // Total Token Cost (§4.3): cumulative char burn (prompts + responses)
-metrics.totalPromptChars;     // cumulative prompt chars
-metrics.stepCount;
-metrics.averagePromptSize;    // Average Prompt Size (§4.3): mean prompt char length per call — flat, that's the point
-metrics.accuracy;             // Task Accuracy (§4.3): accepted patches / actionable
-                              // steps; null when no step was actionable
+metrics.averagePromptSize;     // Average Prompt Size (§4.3): mean prompt char length per call — flat, that's the point
+metrics.totalTokens;           // Total Token Cost (§4.3): cumulative char burn (prompts + responses)
+metrics.accuracy;              // Task Accuracy (§4.3): accepted patches / actionable
+                               // steps; null when no step was actionable
+
+// Session bookkeeping is kept SEPARATE so the §4.3 object stays clean:
+const bookkeeping = tracker.getBookkeeping();
+bookkeeping.stepCount;
+bookkeeping.totalPromptChars;
+bookkeeping.totalChars;        // same value as totalTokens (cumulative burn)
+bookkeeping.sessionName;
+bookkeeping.lastStepTimestamp;
 
 const baseline = tracker.compareWithBaseline();  // Table 1 methodology on measured chars
 baseline.conversationChars;   // Σₜ Σᵢ promptChars[i] — the O(T²) conversation model
 baseline.stateChars;          // Σₜ promptChars[t] — the O(T) state model
 baseline.reductionFactor;     // conversationChars / stateChars
 
-tracker.exportReport();       // full JSON report (metrics + steps + session)
+tracker.exportReport();       // full JSON report (metrics + bookkeeping + steps + session)
 tracker.save('./report.json');// persist; tracker.load() restores
 ```
 
@@ -265,19 +319,21 @@ Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics
 
 - [x] Algorithm 1 loop — prompt `(P, Σₜ, Oₜ)` → LLM → validate ΔΣₜ → merge ⊕ → execute aₜ. The model never receives previous observations, actions, or reasoning (§3); Rₜ is discarded permanently (§3.2)
 - [x] ⊕ null-deletion merge (nested-object aware, non-mutating)
-- [x] Appendix A.4 verbatim paper prompt format (`PromptTransformer.formatPaper`) — simplified implementation of the A.4 skeleton (Instructions / Skill Execution State ```json compact / Latest Observation / reasoning-will-be-discarded + two-key JSON fence); all other formatters (`formatForClaude`, `formatForOpenCode`, generic) are `@non-paper` adapter conveniences
+- [x] Appendix A.4 **byte-verbatim** paper prompt format (`PromptTransformer.formatPaper`) — the exact A.4 template (Instructions / `Skill Execution State` ```json compact [= `json.dumps(state, separators=(",",":"))`] / `Latest Observation` / blank-line-padded `Provide your response with:` → `1.` → `2.` two-key JSON fence), no schema description and no platform padding added; all other formatters (`formatForClaude`, `formatForOpenCode`, generic) are `@non-paper` adapter conveniences
 - [x] §7 rollback-retry cycle with corrective feedback; deterministic fallback after retries — simplified (fixed retry count); malformed outputs never touch state per the Limitations paragraph
 - [x] §5.7 failure-mode taxonomy is paper log analysis (68% Premature Overwrite/Deletion, 20% Schema/Type Coercion, 12% JSON Syntax on Gemma-4-31B T=100 logs) — NOT parser codes. Our parse-failure reasons (`no_block`, `malformed_json`, `missing_state_patch`, `missing_action`) are implementation-internal (`@non-paper`) and only feed the §7 retry feedback
 - [x] O(1)/O(T) property test — prompt size stays constant modulo observation growth (`tests/core/runtime-footprint.test.ts`)
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
-- [x] All three §4.3 metrics in chars — Task Accuracy, Average Prompt Size (mean chars), Total Token Cost (cumulative burn) (`TokenTracker`); Table 1 ratios pinned as fixtures (`tests/core/paper-fidelity.test.ts`)
-- [ ] Claude/OpenCode adapters are `@non-paper` (no adapters in the paper) and ADDITIVE: they inject state on top of host history without trimming it, so alone they yield no economy — the saving needs the host to stop re-sending history
+- [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios pinned as fixtures (`tests/core/paper-fidelity.test.ts`)
+- [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
+- [x] Claude adapter: `PreCompact` hook injects state + diff into compaction summary; `SessionStart(compact)` re-injects after compaction
+- [ ] Claude Code limitation: history is append-only from hooks — true O(1) requires host-side trimming
 
 ## Development
 
 ```bash
 npm install
-npm test                # 306 tests
+npm test                # 630 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc --noEmit
 npm run build           # emit dist/

@@ -67,7 +67,7 @@ describe('SkillStateRuntime — LLMProvider usage preferred over measuring', () 
     const result = await runtime.step(obs('o1'));
     expect(result.promptChars).toBe(111);
     expect(result.responseChars).toBe(222);
-    expect(tracker.getMetrics().totalChars).toBe(111 + 222);
+    expect(tracker.getBookkeeping().totalChars).toBe(111 + 222);
   });
 
   it('falls back to measuring when usage is absent', async () => {

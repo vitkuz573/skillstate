@@ -335,7 +335,7 @@ export class SkillStateRuntime {
 
   /** @non-paper: tracker total when tracked, local tally otherwise. */
   private currentTotalChars(localTotal: number): number {
-    return this.tracker?.getMetrics().totalChars ?? localTotal;
+    return this.tracker?.getBookkeeping().totalChars ?? localTotal;
   }
 
   /**
@@ -525,7 +525,7 @@ export class SkillStateRuntime {
         throw new BudgetExceededError(maxChars, total, results);
       }
 
-      const trackerCountBefore = this.tracker?.getMetrics().stepCount ?? 0;
+      const trackerCountBefore = this.tracker?.getBookkeeping().stepCount ?? 0;
       const stateBefore = clone(this.currentState);
       const result = await this.step(observation);
       const totalAfter = this.currentTotalChars(

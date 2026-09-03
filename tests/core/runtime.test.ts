@@ -111,7 +111,7 @@ describe('SkillStateRuntime.step — Algorithm 1 core', () => {
     expect(h.prompts).toHaveLength(1);
     const prompt = h.prompts[0];
     // Paper-exact formatPaper template
-    expect(prompt.startsWith(`Instructions:\n${spec.instructions}`)).toBe(true);
+    expect(prompt.startsWith(`Instructions:\n\n${spec.instructions}`)).toBe(true);
     // Serialized current state (Σt) with schema defaults
     expect(prompt).toContain('"mood":"neutral"');
     expect(prompt).toContain('"stepsCompleted":0');
@@ -193,8 +193,8 @@ describe('SkillStateRuntime.step — Algorithm 1 core', () => {
     await h.runtime.step(obs('o1'));
     await h.runtime.step(obs('o2'));
 
-    expect(tracker.getMetrics().stepCount).toBe(2);
-    expect(tracker.getMetrics().totalPromptChars).toBeGreaterThan(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(2);
+    expect(tracker.getBookkeeping().totalPromptChars).toBeGreaterThan(0);
   });
 
   it('executes the action and returns the executor observation', async () => {

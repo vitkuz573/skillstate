@@ -216,7 +216,7 @@ async function cmdRun(cwd: string, flags: RunFlags): Promise<number> {
   const reportAbs = resolveInCwd(cwd, config.reportPath);
   fs.mkdirSync(path.dirname(reportAbs), { recursive: true });
   tracker.save(reportAbs);
-  console.log(`Ran ${tracker.getMetrics().stepCount} steps`);
+  console.log(`Ran ${tracker.getBookkeeping().stepCount} steps`);
   return 0;
 }
 

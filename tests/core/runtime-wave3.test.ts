@@ -238,7 +238,7 @@ describe('SkillStateRuntime — @non-paper clock', () => {
     });
 
     await runtime.step(obs('o1'));
-    expect(tracker.getMetrics().lastStepTimestamp).toBe(777);
+    expect(tracker.getBookkeeping().lastStepTimestamp).toBe(777);
   });
 
   it('stamps the synthesized invalid-patch observation from the clock', async () => {
@@ -307,8 +307,8 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
     // Exactly one LLM call (deterministic stop), state + tracker rolled back.
     expect(h.llmCalls()).toBe(1);
     expect(h.runtime.state).toEqual(before);
-    expect(tracker.getMetrics().stepCount).toBe(0);
-    expect(tracker.getMetrics().totalChars).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().totalChars).toBe(0);
   });
 
   it('runOpts.tokenBudget alias trips identically', async () => {
@@ -324,7 +324,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
       );
     expect(failure).toBeInstanceOf(BudgetExceededError);
     expect(h.runtime.state.stepsCompleted).toBe(0);
-    expect(tracker.getMetrics().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
   });
 
   it('runOpts.charsBudget alias trips identically', async () => {
@@ -339,7 +339,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
         (e) => e,
       );
     expect(failure).toBeInstanceOf(BudgetExceededError);
-    expect(tracker.getMetrics().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
   });
 
   it('constructor tokenBudget is the default cap for run()', async () => {
@@ -359,7 +359,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
       BudgetExceededError,
     );
     expect(llmCalls).toBe(1);
-    expect(tracker.getMetrics().stepCount).toBe(0);
+    expect(tracker.getBookkeeping().stepCount).toBe(0);
   });
 
   it('constructor charsBudget is the default cap for run()', async () => {
@@ -451,7 +451,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
       msg: 'budget:exceeded',
     });
     // Pre-existing tracker history is untouched.
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
   });
 
   it('pre-check without events/logger still stops silently', async () => {
@@ -494,7 +494,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
     );
     // isDone fires on the first result; budget never interferes.
     expect(results).toHaveLength(1);
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
 
     const untracked = threeStepHarness();
     const results2 = await untracked.runtime.run(
@@ -517,7 +517,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
       tracker: probeTracker,
     });
     await probe.run(obs('start'), () => false, 1);
-    const firstTotal = probeTracker.getMetrics().totalChars;
+    const firstTotal = probeTracker.getBookkeeping().totalChars;
     expect(firstTotal).toBeGreaterThan(0);
 
     const tracker = new TokenTracker({ platform: 'generic' });
@@ -542,7 +542,7 @@ describe('SkillStateRuntime.run — @non-paper char budget', () => {
     expect(calls).toBe(2);
     expect(failure?.partialResults).toHaveLength(1);
     expect(runtime.state.mood).toBe('m');
-    expect(tracker.getMetrics().stepCount).toBe(1);
+    expect(tracker.getBookkeeping().stepCount).toBe(1);
   });
 });
 

@@ -54,10 +54,11 @@ describe('TokenTracker', () => {
     it('initializes with zero metrics', () => {
       const tracker = new TokenTracker(defaultConfig);
       const metrics = tracker.getMetrics();
+      const bookkeeping = tracker.getBookkeeping();
 
-      expect(metrics.totalChars).toBe(0);
-      expect(metrics.totalPromptChars).toBe(0);
-      expect(metrics.stepCount).toBe(0);
+      expect(bookkeeping.totalChars).toBe(0);
+      expect(bookkeeping.totalPromptChars).toBe(0);
+      expect(bookkeeping.stepCount).toBe(0);
       expect(metrics.averagePromptSize).toBe(0);
       expect(metrics.accuracy).toBeNull();
     });
@@ -68,7 +69,7 @@ describe('TokenTracker', () => {
       const tracker = new TokenTracker({ platform: 'claude', sessionName: undefined });
       tracker.recordStep(makeStep());
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.sessionName).toMatch(/^session-\d+$/);
 
       const report = JSON.parse(tracker.exportReport());
@@ -91,7 +92,7 @@ describe('TokenTracker', () => {
     it('records step char counts into the cumulative burn', () => {
       tracker.recordStep(makeStep({ promptChars: 1000, responseChars: 150 }));
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.totalChars).toBe(1150);
       expect(metrics.totalPromptChars).toBe(1000);
       expect(metrics.stepCount).toBe(1);
@@ -102,7 +103,7 @@ describe('TokenTracker', () => {
       tracker.recordStep(makeStep({ step: 2, promptChars: 200, responseChars: 20 }));
       tracker.recordStep(makeStep({ step: 3, promptChars: 150, responseChars: 30 }));
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.totalChars).toBe(450 + 60);
       expect(metrics.totalPromptChars).toBe(450);
       expect(metrics.stepCount).toBe(3);
@@ -113,7 +114,7 @@ describe('TokenTracker', () => {
       tracker.recordStep(makeStep({ step: 1, timestamp: before }));
       const after = Date.now();
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.lastStepTimestamp).toBeGreaterThanOrEqual(before);
       expect(metrics.lastStepTimestamp).toBeLessThanOrEqual(after);
     });
@@ -134,7 +135,7 @@ describe('TokenTracker', () => {
       tracker.recordStep(makeStep({ step: 1 }));
       tracker.recordStep(makeStep({ step: 2 }));
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.stepCount).toBe(2);
       expect(metrics.sessionName).toBeDefined();
     });
@@ -151,7 +152,7 @@ describe('TokenTracker', () => {
       tracker.recordStep(makeStep({ promptChars: 800, responseChars: 100 }));
       tracker.recordStep(makeStep({ promptChars: 1200, responseChars: 200 }));
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.totalPromptChars).toBe(2000);
       expect(metrics.totalChars).toBe(2300);
     });
@@ -336,8 +337,9 @@ describe('TokenTracker', () => {
       tracker2.load();
 
       const metrics = tracker2.getMetrics();
-      expect(metrics.totalChars).toBe(4000);
-      expect(metrics.stepCount).toBe(2);
+      const bookkeeping = tracker2.getBookkeeping();
+      expect(bookkeeping.totalChars).toBe(4000);
+      expect(bookkeeping.stepCount).toBe(2);
       expect(metrics.averagePromptSize).toBe(1750);
     });
 
@@ -351,7 +353,7 @@ describe('TokenTracker', () => {
       expect(() => tracker.load()).not.toThrow();
 
       // Metrics should remain at defaults
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.totalChars).toBe(0);
       expect(metrics.stepCount).toBe(0);
     });
@@ -367,7 +369,7 @@ describe('TokenTracker', () => {
       // Should not throw on corrupted data
       expect(() => tracker.load()).not.toThrow();
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.totalChars).toBe(0);
       expect(metrics.stepCount).toBe(0);
     });
@@ -384,7 +386,7 @@ describe('TokenTracker', () => {
       // Should return early without touching state or throwing
       expect(() => tracker.load()).not.toThrow();
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.stepCount).toBe(0);
       expect(metrics.sessionName).toMatch(/^session-/);
     });
@@ -410,7 +412,7 @@ describe('TokenTracker', () => {
       const reader = new TokenTracker(defaultConfig);
       reader.load(overridePath);
 
-      const metrics = reader.getMetrics();
+      const metrics = reader.getBookkeeping();
       expect(metrics.totalChars).toBe(77);
       expect(metrics.stepCount).toBe(1);
     });
@@ -430,7 +432,7 @@ describe('TokenTracker', () => {
       });
       tracker2.load();
 
-      const metrics = tracker2.getMetrics();
+      const metrics = tracker2.getBookkeeping();
       expect(metrics.sessionName).toBe('named-session');
 
       const report2 = JSON.parse(tracker2.exportReport());
@@ -451,7 +453,7 @@ describe('TokenTracker', () => {
       });
       tracker.load();
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.stepCount).toBe(0);
       expect(metrics.totalChars).toBe(0);
       // Session metadata still restored
@@ -470,7 +472,7 @@ describe('TokenTracker', () => {
       });
       tracker.load();
 
-      const metrics = tracker.getMetrics();
+      const metrics = tracker.getBookkeeping();
       expect(metrics.stepCount).toBe(0);
       expect(metrics.totalChars).toBe(0);
       // sessionName and startedAt untouched

@@ -160,21 +160,28 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
   }
 
   /**
-   * Paper-exact prompt format (Appendix A.4): minimal template with the
-   * state fenced as ```json, compact JSON, and the verbatim response
-   * directive from the paper.
+   * Paper-exact prompt format — byte-verbatim Appendix A.4.
+   *
+   * The template is reproduced exactly as printed in the paper (blank lines
+   * and indentation preserved): instructions start after a blank line, the
+   * state is fenced as ```json with compact JSON (`JSON.stringify(state)` —
+   * the paper's `json.dumps(state, separators=(',', ':'))`), and the response
+   * directive carries the two-key JSON contract verbatim. No schema
+   * description and no platform padding is added on top of A.4.
    */
   formatPaper(
     spec: ProceduralSpec,
     state: SkillState,
     observation: Observation,
   ): string {
-    const stateJson = this.serializeState(state, undefined, spec.schema);
+    const stateJson = JSON.stringify(state);
 
     return `Instructions:
+
 ${spec.instructions}
 
 Skill Execution State:
+
 \`\`\`json
 ${stateJson}
 \`\`\`
@@ -183,7 +190,8 @@ Latest Observation: ${observation.content}
 Provide your response with:
 
 1. Step-by-step reasoning (will be discarded after execution)
-2. A JSON block fenced with json ... containing both your State Patch and your Action. The JSON block MUST have exactly these two keys: { "state_patch": { <dict: your state updates, set keys to null to delete> }, "action": "<string: the exact command you want to execute>" }`;
+
+2. A JSON block fenced with json ...  containing both your State Patch and your Action. The JSON block MUST have exactly these two keys: { "state_patch": { <dict: your state updates, set keys to null to delete> }, "action": "<string: the exact command you want to execute>" }`;
   }
 
   /**

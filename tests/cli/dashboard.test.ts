@@ -398,7 +398,10 @@ describe('formatMetricsTable accuracy row', () => {
     tracker.recordStep(makeStep({ step: 3, success: false }));
     tracker.recordStep(makeStep({ step: 4, success: true }));
 
-    const result = formatMetricsTable(tracker.getMetrics());
+    const result = formatMetricsTable({
+      ...tracker.getMetrics(),
+      ...tracker.getBookkeeping(),
+    });
     expect(result).toContain('75.0%');
   });
 });

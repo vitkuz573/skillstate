@@ -3,26 +3,37 @@ import * as path from 'node:path';
 import type { TrackerConfig, ExecutionStep } from './types.js';
 
 /**
- * Paper §4.3 metrics, measured in raw string CHARS:
- * - Task Accuracy: accepted patches / actionable steps (null when none).
- * - Average Prompt Size: mean prompt char length per call.
- * - Total Token Cost: cumulative char burn (prompts + responses).
+ * Paper §4.3 primary metrics — EXACTLY three, measured in raw string CHARS:
+ * - accuracy (Task Accuracy): accepted patches / actionable steps (null when none).
+ * - averagePromptSize (Average Prompt Size): mean prompt char length per call.
+ * - totalTokens (Total Token Cost): cumulative char burn (prompts + responses).
  *
  * No tokenizer lives here: `recordStep` consumes the char counts the
  * runtime measured (`promptChars` / `responseChars`). Anything estimated
  * (len/4 heuristics, dollar pricing) belongs to `./instrumentation.js`
  * and is explicitly marked @non-paper.
  */
-interface Metrics {
-  stepCount: number;
-  /** Mean prompt char length per recorded call (§4.3 Average Prompt Size). */
-  averagePromptSize: number;
-  /** Cumulative prompt chars across all steps. */
-  totalPromptChars: number;
-  /** Cumulative burn: prompt chars + response chars (§4.3 Total Token Cost). */
-  totalChars: number;
+export interface PaperMetrics {
   /** Task Accuracy (§4.3). Null when no step was actionable. */
   accuracy: number | null;
+  /** Mean prompt char length per recorded call (§4.3 Average Prompt Size). */
+  averagePromptSize: number;
+  /** Cumulative burn: prompt chars + response chars (§4.3 Total Token Cost). */
+  totalTokens: number;
+}
+
+/**
+ * @non-paper session bookkeeping beyond the §4.3 triad. Kept on a separate
+ * accessor (`getBookkeeping`) so the primary metrics object stays clean —
+ * `totalChars` here equals `totalTokens` (both are the cumulative char burn)
+ * and is retained for the CLI/dashboard/report consumers that grew up on it.
+ */
+export interface BookkeepingMetrics {
+  stepCount: number;
+  /** Cumulative prompt chars across all steps. */
+  totalPromptChars: number;
+  /** Cumulative burn: prompt chars + response chars (same value as totalTokens). */
+  totalChars: number;
   sessionName: string;
   lastStepTimestamp: number | null;
 }
@@ -42,7 +53,8 @@ interface BaselineComparison {
 }
 
 interface Report {
-  metrics: Metrics;
+  /** §4.3 triad merged with session bookkeeping for report/dashboard consumers. */
+  metrics: PaperMetrics & BookkeepingMetrics;
   steps: ExecutionStep[];
   session: {
     name: string;
@@ -79,7 +91,16 @@ export class TokenTracker {
     this.lastStepTimestamp = step.timestamp;
   }
 
-  getMetrics(): Metrics {
+  /**
+   * Paper §4.3 primary metrics — EXACTLY three fields.
+   *
+   * This is the clean §4.3 surface: Task Accuracy, Average Prompt Size
+   * (mean prompt char length per call), Total Token Cost (cumulative char
+   * burn). Bookkeeping (stepCount, sessionName, lastStepTimestamp,
+   * totalPromptChars, totalChars) lives on {@link getBookkeeping} so this
+   * object is never contaminated by non-§4.3 concerns.
+   */
+  getMetrics(): PaperMetrics {
     const stepCount = this.steps.length;
     const averagePromptSize =
       stepCount > 0 ? this.totalPromptChars / stepCount : 0;
@@ -96,11 +117,23 @@ export class TokenTracker {
           actionableSteps.length;
 
     return {
-      stepCount,
+      accuracy,
       averagePromptSize,
+      totalTokens: this.totalPromptChars + this.totalResponseChars,
+    };
+  }
+
+  /**
+   * @non-paper session bookkeeping separate from the §4.3 triad. Keeps the
+   * step count, cumulative prompt chars, cumulative char burn (same value
+   * as `totalTokens`), session name, and last-step timestamp for the CLI,
+   * dashboard, and report consumers.
+   */
+  getBookkeeping(): BookkeepingMetrics {
+    return {
+      stepCount: this.steps.length,
       totalPromptChars: this.totalPromptChars,
       totalChars: this.totalPromptChars + this.totalResponseChars,
-      accuracy,
       sessionName: this.config.sessionName ?? `session-${this.startedAt}`,
       lastStepTimestamp: this.lastStepTimestamp,
     };
@@ -128,10 +161,8 @@ export class TokenTracker {
   }
 
   exportReport(): string {
-    const metrics = this.getMetrics();
-
     const report: Report = {
-      metrics,
+      metrics: { ...this.getMetrics(), ...this.getBookkeeping() },
       steps: this.steps,
       session: {
         name: this.config.sessionName ?? `session-${this.startedAt}`,
