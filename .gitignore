@@ -25,3 +25,7 @@ yarn-error.log*
 .idea/
 .vscode/
 *.swp
+
+# Runtime state artifacts
+state.json
+state.json.*

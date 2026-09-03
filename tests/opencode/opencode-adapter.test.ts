@@ -213,9 +213,9 @@ describe('OpenCodeAdapter.generatePluginCode', () => {
     expect(plugin).toMatch(/(function|const|export|import)/);
   });
 
-  it('hooks into tool.execute.before', () => {
+  it('hooks into experimental.chat.messages.transform', () => {
     const plugin = adapter.generatePluginCode(statePath);
-    expect(plugin).toContain('tool.execute.before');
+    expect(plugin).toContain('experimental.chat.messages.transform');
   });
 
   it('rewrites prompt with state', () => {
@@ -229,16 +229,16 @@ describe('OpenCodeAdapter.generatePluginCode', () => {
     expect(plugin).toContain(statePath);
   });
 
-  it('mutates output.args in place (opencode hook contract: reassignment does not propagate)', () => {
+  it('trims messages via experimental.chat.messages.transform', () => {
     const plugin = adapter.generatePluginCode(statePath);
-    // The hook must copy patched keys back onto output.args IN PLACE.
-    // Verified live: reassigning output.args is silently ignored by opencode.
-    expect(plugin).toMatch(/\(output\.args[^)]*\)\[key\]\s*=/);
+    // The new O(1) plugin uses messages.transform for history trimming
+    expect(plugin).toContain('experimental.chat.messages.transform');
+    expect(plugin).toContain('slice(-MAX_HISTORY)');
   });
 
-  it('does NOT reassign output.args (reassignment is broken in opencode)', () => {
+  it('does NOT use tool.execute.before (replaced by messages.transform)', () => {
     const plugin = adapter.generatePluginCode(statePath);
-    expect(plugin).not.toContain('output.args = injectStateIntoArgs');
+    expect(plugin).not.toContain('tool.execute.before');
   });
 });
 

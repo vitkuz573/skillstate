@@ -5,12 +5,10 @@
  * §7 rollback-retry rejection) into Claude Code sessions via hook scripts
  * and prompt boilerplate.
  *
- * HONEST LIMITATION: the generated hooks are ADDITIVE — they inject the
- * persisted state on top of the host's full conversation history. Nothing
- * here trims or clears that history, so on its own this adapter does NOT
- * reproduce the paper's O(1) prompt footprint. The O(1)/O(T) economy holds
- * only when the host stops re-sending history (or the operator clears it):
- * the saving comes from never re-sending history, not from appending state.
+ * LIMITATION: Claude Code hooks are append-only — history cannot be trimmed
+ * from hooks. The best strategy is: PreCompact injects state into the
+ * compaction summary, SessionStart(source:compact) re-injects state after
+ * compaction. True O(1) is not possible without host-side trimming.
  */
 import type {
   SkillState,
@@ -270,6 +268,146 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
     const script = this.generateHookScript(eventType, resolvedState, schema);
     await atomicWriteFile(dest, script);
     return dest;
+  }
+
+  /**
+   * Generate a PreCompact hook script that injects the current skill state
+   * into the compaction summary. Also tracks what changed since the last
+   * compact to provide a diff in additionalContext.
+   *
+   * The script reads `.skillstate.json`, reads the previous compact snapshot
+   * from `.skillstate.last-compact.json` (if it exists), computes a diff,
+   * and injects the current state + diff into additionalContext. After
+   * injection it saves the current state as the new compact snapshot.
+   */
+  generateCompactHookScript(statePath: string, schema?: ProceduralSpec['schema']): string;
+  generateCompactHookScript(stateRef: StatePathRef, schema?: ProceduralSpec['schema']): string;
+  generateCompactHookScript(
+    statePathOrRef: string | StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): string {
+    const statePath =
+      typeof statePathOrRef === 'string'
+        ? statePathOrRef
+        : resolveStatePath(statePathOrRef.root, statePathOrRef.name);
+    const sp = JSON.stringify(statePath);
+    const schemaJson = JSON.stringify(schema ?? {});
+    const lastCompactPath = JSON.stringify(statePath + '.last-compact.json');
+
+    return [
+      '// Claude hook: PreCompact',
+      '// Injects the current skill state into the compaction summary.',
+      '// Tracks diff since last compact for incremental context.',
+      'const fs = require("fs");',
+      'const stateFilePath = ' + sp + ';',
+      'const lastCompactFilePath = ' + lastCompactPath + ';',
+      'const schema = ' + schemaJson + ';',
+      '',
+      'function readJsonSafe(filePath) {',
+      '  try {',
+      '    if (fs.existsSync(filePath)) {',
+      '      return JSON.parse(fs.readFileSync(filePath, "utf-8"));',
+      '    }',
+      '  } catch {}',
+      '  return {};',
+      '}',
+      '',
+      'const current = readJsonSafe(stateFilePath);',
+      'const lastCompact = readJsonSafe(lastCompactFilePath);',
+      '',
+      '// Compute diff: keys added, changed, or deleted since last compact.',
+      'const diff = {};',
+      'const allKeys = new Set([...Object.keys(current), ...Object.keys(lastCompact)]);',
+      'for (const key of allKeys) {',
+      '  const cur = current[key];',
+      '  const prev = lastCompact[key];',
+      '  if (cur === undefined) {',
+      '    diff[key] = "(deleted)";',
+      '  } else if (prev === undefined) {',
+      '    diff[key] = cur;',
+      '  } else if (JSON.stringify(cur) !== JSON.stringify(prev)) {',
+      '    diff[key] = { from: prev, to: cur };',
+      '  }',
+      '}',
+      '',
+      'const contextParts = [',
+      '  "Current skill state (JSON): " + JSON.stringify(current),',
+      '];',
+      'if (Object.keys(diff).length > 0) {',
+      '  contextParts.push("Changes since last compact: " + JSON.stringify(diff));',
+      '}',
+      '',
+      'const output = {',
+      '  hookSpecificOutput: {',
+      '    additionalContext: contextParts.join("\\n")',
+      '  }',
+      '};',
+      '',
+      '// Save current state as the new compact snapshot.',
+      'try {',
+      '  fs.writeFileSync(lastCompactFilePath, JSON.stringify(current, null, 2));',
+      '} catch {}',
+      '',
+      'process.stdout.write(JSON.stringify(output));',
+    ].join('\n');
+  }
+
+  /**
+   * Generate a SessionStart hook script that re-injects state after
+   * compaction. The hook uses a matcher for `source: "compact"` so it
+   * only fires when the session was resumed from a compacted state.
+   */
+  generateSessionStartHookScript(statePath: string): string;
+  generateSessionStartHookScript(stateRef: StatePathRef): string;
+  generateSessionStartHookScript(statePathOrRef: string | StatePathRef): string {
+    const statePath =
+      typeof statePathOrRef === 'string'
+        ? statePathOrRef
+        : resolveStatePath(statePathOrRef.root, statePathOrRef.name);
+    const sp = JSON.stringify(statePath);
+
+    return [
+      '// Claude hook: SessionStart (source: compact)',
+      '// Re-injects skill state after compaction so the model retains',
+      '// execution context even though history was compressed.',
+      'const fs = require("fs");',
+      'const stateFilePath = ' + sp + ';',
+      'let state = {};',
+      'try {',
+      '  if (fs.existsSync(stateFilePath)) {',
+      '    state = JSON.parse(fs.readFileSync(stateFilePath, "utf-8"));',
+      '  }',
+      '} catch {}',
+      'const output = {',
+      '  hookSpecificOutput: {',
+      '    additionalContext: "Skill state restored after compaction: " + JSON.stringify(state)',
+      '  }',
+      '};',
+      'process.stdout.write(JSON.stringify(output));',
+    ].join('\n');
+  }
+
+  /**
+   * Convenience: generate both compact-related hooks at once.
+   * Returns `{ preCompact, sessionStartCompact }` — write each to a
+   * `.cjs` file and register in Claude Code settings.
+   */
+  generateAllHooksScripts(
+    statePath: string,
+    schema?: ProceduralSpec['schema'],
+  ): { preCompact: string; sessionStartCompact: string };
+  generateAllHooksScripts(
+    stateRef: StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): { preCompact: string; sessionStartCompact: string };
+  generateAllHooksScripts(
+    statePathOrRef: string | StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): { preCompact: string; sessionStartCompact: string } {
+    return {
+      preCompact: this.generateCompactHookScript(statePathOrRef as string, schema),
+      sessionStartCompact: this.generateSessionStartHookScript(statePathOrRef as string),
+    };
   }
 
   generateAppendPrompt(): string {
