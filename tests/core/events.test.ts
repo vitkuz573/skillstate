@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   RuntimeEventEmitter,
   runtimeEvents,
-} from '../../src/core/events.js';
+} from '@skillstate/core';
 
 describe('RuntimeEventEmitter', () => {
   it('delivers typed payloads to subscribers', () => {

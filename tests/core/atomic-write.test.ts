@@ -7,7 +7,7 @@ import {
   acquireLock,
   atomicWriteFile,
   resolveStatePath,
-} from '../../src/core/atomic-write.js';
+} from '@skillstate/core';
 
 let tmpDirs: string[] = [];
 

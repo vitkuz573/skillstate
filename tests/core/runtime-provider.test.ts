@@ -1,15 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { SkillStateRuntime } from '../../src/core/runtime.js';
-import type { LLMFn } from '../../src/core/runtime.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import { fromLLMFn } from '../../src/core/provider.js';
-import type { LLMProvider } from '../../src/core/provider.js';
+import { SkillStateRuntime } from '@skillstate/core';
+import type { LLMFn } from '@skillstate/core';
+import { TokenTracker } from '@skillstate/core';
+import { fromLLMFn } from '@skillstate/core';
+import type { LLMProvider } from '@skillstate/core';
 import type {
   ProceduralSpec,
   StateSchema,
   StatePatch,
   Observation,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 const schema: StateSchema = {
   mood: { type: 'string', default: 'neutral', description: 'Mood' },

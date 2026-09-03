@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { REDACTED, redactSecrets } from '../../src/core/redaction.js';
+import { REDACTED, redactSecrets } from '@skillstate/core';
 
 describe('redactSecrets', () => {
   it('leaves text without secrets untouched', () => {

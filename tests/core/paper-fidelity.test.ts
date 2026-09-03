@@ -1,14 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { SkillStateRuntime } from '../../src/core/runtime.js';
-import type { LLMFn, ActionExecutor } from '../../src/core/runtime.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import { PromptTransformer } from '../../src/core/prompt-transformer.js';
+import { SkillStateRuntime } from '@skillstate/core';
+import type { LLMFn, ActionExecutor } from '@skillstate/core';
+import { TokenTracker } from '@skillstate/core';
+import { PromptTransformer } from '@skillstate/core';
 import type {
   ProceduralSpec,
   Observation,
   StatePatch,
   SkillState,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Paper-reported cumulative-burn fixtures (arXiv 2608.26263v3).

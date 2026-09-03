@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ClaudeAdapter } from '../../src/claude/claude-adapter.js';
-import { resolveStatePath } from '../../src/core/atomic-write.js';
+import { ClaudeAdapter } from '@skillstate/claude';
+import { resolveStatePath } from '@skillstate/core';
 
 let tmpDirs: string[] = [];
 

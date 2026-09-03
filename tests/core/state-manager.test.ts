@@ -7,12 +7,12 @@ import {
   deserializeState,
   StateManager,
   createStateManager,
-} from '../../src/core/state-manager.js';
+} from '@skillstate/core';
 import type {
   StateSchema,
   SkillState,
   StatePatch,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Test schemas and fixtures

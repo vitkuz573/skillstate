@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OpenCodeAdapter } from '../../src/opencode/opencode-adapter.js';
+import { OpenCodeAdapter } from '@skillstate/opencode';
 
 function makePlugin(maxHistory?: number): string {
   const adapter = new OpenCodeAdapter();

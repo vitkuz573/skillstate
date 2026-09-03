@@ -1,0 +1,27 @@
+{
+  "name": "@skillstate/mcp",
+  "version": "2.0.0",
+  "description": "Zero-dependency MCP server + adapter for the skillstate runtime.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "skillstate-mcp": "bin/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "bin"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@skillstate/core": "^2.0.0"
+  }
+}

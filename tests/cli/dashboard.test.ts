@@ -6,8 +6,8 @@ import {
   formatProgressBar,
   generateReport,
   printDashboard,
-} from '../../src/cli/dashboard.js';
-import type { ExecutionStep } from '../../src/core/types.js';
+} from '@skillstate/cli';
+import type { ExecutionStep } from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Fixtures — all sizes are raw string CHARS (paper §4.3)
@@ -390,7 +390,7 @@ describe('formatMetricsTable accuracy row', () => {
   });
 
   it('feeds getMetrics output through formatMetricsTable end-to-end', async () => {
-    const { TokenTracker } = await import('../../src/core/token-tracker.js');
+    const { TokenTracker } = await import('@skillstate/core');
 
     const tracker = new TokenTracker({ platform: 'claude' });
     tracker.recordStep(makeStep({ step: 1, success: true }));

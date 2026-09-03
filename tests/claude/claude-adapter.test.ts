@@ -3,14 +3,14 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ClaudeAdapter } from '../../src/claude/claude-adapter.js';
+import { ClaudeAdapter } from '@skillstate/claude';
 import type {
   SkillState,
   StatePatch,
   ProceduralSpec,
   Observation,
   StateSchema,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
   return {

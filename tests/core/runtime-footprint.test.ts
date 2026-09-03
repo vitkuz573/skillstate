@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { SkillStateRuntime } from '../../src/core/runtime.js';
-import type { LLMFn } from '../../src/core/runtime.js';
+import { SkillStateRuntime } from '@skillstate/core';
+import type { LLMFn } from '@skillstate/core';
 import type {
   ProceduralSpec,
   Observation,
   StatePatch,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Property: O(1) state footprint — prompt size must be constant + observation

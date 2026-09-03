@@ -1,0 +1,25 @@
+{
+  "name": "@skillstate/core",
+  "version": "2.0.0",
+  "description": "Paper-exact skillstate runtime core (A.4 byte-verbatim formatPaper, §4.3 token tracker).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schemas": {
+      "types": "./dist/schemas/index.d.ts",
+      "default": "./dist/schemas/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

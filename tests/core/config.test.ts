@@ -7,7 +7,7 @@ import {
   loadConfig,
   mergeConfig,
   CONFIG_FILE_NAME,
-} from '../../src/core/config.js';
+} from '@skillstate/core';
 
 const ENV_KEYS = [
   'SKILLSTATE_SPEC_PATH',

@@ -8,7 +8,7 @@
 
 ## Method
 
-- **Harness:** `src/bench/harness.ts`, entry `src/bench/run.ts`.
+- **Harness:** `packages/bench/src/harness.ts`, entry `packages/bench/src/run.ts`.
 - **Scenario (fixed, deterministic):** minimal skill `BENCH_SPEC` (one string
   field `status`, constant serialized size), fixed observation
   `BENCH_OBSERVATION` (64 chars, identical every step), fixed mock-LLM
@@ -48,7 +48,7 @@ no hardcoded 16.2x/50x — plus determinism and fixture-consistency checks).
 npm run bench
 ```
 
-(`bench` = `npm run build && node ./dist/bench/run.js`: zero-deps,
+(`bench` = `npm run build && node ./packages/bench/dist/run.js`: zero-deps,
 compiled output only. The table above plus the full JSON are printed to
 stdout; two runs are byte-identical.)
 

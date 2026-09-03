@@ -3,8 +3,8 @@ import {
   MAX_PATCH_DEPTH,
   MAX_PATCH_KEYS,
   validatePatchDeep,
-} from '../../src/core/validate.js';
-import type { StateSchema } from '../../src/core/types.js';
+} from '@skillstate/core';
+import type { StateSchema } from '@skillstate/core';
 
 const schema: StateSchema = {
   name: { type: 'string', default: '' },

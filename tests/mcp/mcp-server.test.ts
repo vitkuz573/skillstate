@@ -3,10 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { McpServer, launch } from '../../src/mcp/mcp-server.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import { INTERCODE_CTF_SPEC } from '../../src/schemas/index.js';
-import type { ProceduralSpec } from '../../src/core/types.js';
+import { McpServer, launch } from '@skillstate/mcp';
+import { TokenTracker } from '@skillstate/core';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import type { ProceduralSpec } from '@skillstate/core';
 
 type AnyRecord = Record<string, unknown>;
 type JsonRpcResponse = {

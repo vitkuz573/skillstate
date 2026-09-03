@@ -2,17 +2,17 @@ import { describe, it, expect } from 'vitest';
 import {
   SkillStateRuntime,
   BudgetExceededError,
-} from '../../src/core/runtime.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import { RuntimeEventEmitter } from '../../src/core/events.js';
-import type { RuntimeEventPayloads } from '../../src/core/events.js';
-import { JsonLogger } from '../../src/core/logger.js';
+} from '@skillstate/core';
+import { TokenTracker } from '@skillstate/core';
+import { RuntimeEventEmitter } from '@skillstate/core';
+import type { RuntimeEventPayloads } from '@skillstate/core';
+import { JsonLogger } from '@skillstate/core';
 import type {
   ProceduralSpec,
   StateSchema,
   StatePatch,
   Observation,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
 

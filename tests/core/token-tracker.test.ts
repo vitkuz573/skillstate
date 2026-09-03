@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TokenTracker } from '../../src/core/token-tracker.js';
+import { TokenTracker } from '@skillstate/core';
 import type {
   TrackerConfig,
   ExecutionStep,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 

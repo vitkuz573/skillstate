@@ -13,12 +13,12 @@ import {
   resolveInCwd,
   stubLlmResponse,
   CLI_USAGE,
-} from '../../src/cli/commands.js';
-import { CONFIG_FILE_NAME } from '../../src/core/config.js';
-import { INTERCODE_CTF_SPEC } from '../../src/schemas/index.js';
+} from '@skillstate/cli';
+import { CONFIG_FILE_NAME } from '@skillstate/core';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const BIN = path.join(REPO_ROOT, 'bin', 'skillstate.js');
+const BIN = path.join(REPO_ROOT, 'packages', 'cli', 'bin', 'skillstate.js');
 
 let tmpDirs: string[] = [];
 let logSpy: ReturnType<typeof vi.spyOn>;
@@ -36,8 +36,8 @@ function writeJson(absPath: string, value: unknown): void {
 }
 
 beforeAll(() => {
-  if (fs.existsSync(path.join(REPO_ROOT, 'dist', 'cli', 'commands.js')) === false) {
-    execFileSync(process.execPath, [path.join(REPO_ROOT, 'node_modules', '.bin', 'tsc')], {
+  if (fs.existsSync(path.join(REPO_ROOT, 'packages', 'cli', 'dist', 'index.js')) === false) {
+    execFileSync(process.execPath, [path.join(REPO_ROOT, 'node_modules', '.bin', 'tsc'), '-b'], {
       cwd: REPO_ROOT,
       stdio: 'ignore',
     });

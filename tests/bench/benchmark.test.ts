@@ -14,11 +14,11 @@ import {
   runScenario,
   runAll,
   formatTable,
-} from '../../src/bench/harness.js';
-import type { BenchResult } from '../../src/bench/harness.js';
-import { main } from '../../src/bench/run.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import { PromptTransformer } from '../../src/core/prompt-transformer.js';
+} from '@skillstate/bench';
+import type { BenchResult } from '@skillstate/bench';
+import { main } from '@skillstate/bench';
+import { TokenTracker } from '@skillstate/core';
+import { PromptTransformer } from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Local deterministic benchmark guards.

@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { TokenTracker } from '../../src/core/token-tracker.js';
-import type { ExecutionStep } from '../../src/core/types.js';
+import { TokenTracker } from '@skillstate/core';
+import type { ExecutionStep } from '@skillstate/core';
 
 let tmpDirs: string[] = [];
 

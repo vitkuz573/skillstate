@@ -3,9 +3,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { CodexAdapter } from '../../src/codex/codex-adapter.js';
-import { INTERCODE_CTF_SPEC } from '../../src/schemas/index.js';
-import type { ProceduralSpec } from '../../src/core/types.js';
+import { CodexAdapter } from '@skillstate/codex';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import type { ProceduralSpec } from '@skillstate/core';
 
 const nodePath = process.execPath;
 

@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   CharDiv4Counter,
   estimateCostSavings,
-} from '../../src/core/instrumentation.js';
-import type { TokenCounter } from '../../src/core/instrumentation.js';
+} from '@skillstate/core';
+import type { TokenCounter } from '@skillstate/core';
 
 /**
  * @non-paper — tests for the OPTIONAL instrumentation helpers.

@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { INTERCODE_CTF_SPEC } from '../../src/schemas/intercode-ctf.js';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import {
   createInitialState,
   mergeState,
   validatePatch,
-} from '../../src/core/state-manager.js';
-import { PromptTransformer } from '../../src/core/prompt-transformer.js';
-import type { Observation } from '../../src/core/types.js';
+} from '@skillstate/core';
+import { PromptTransformer } from '@skillstate/core';
+import type { Observation } from '@skillstate/core';
 
 // The paper's 5-field InterCode CTF schema (§3.1), sorted alphabetically.
 const EXPECTED_FIELDS = [

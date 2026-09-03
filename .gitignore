@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+packages/*/dist/
+*.tsbuildinfo
 
 # Test coverage
 coverage/

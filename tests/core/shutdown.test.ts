@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { installShutdown } from '../../src/core/shutdown.js';
+import { installShutdown } from '@skillstate/core';
 
 function nextTick(): Promise<void> {
   return new Promise((resolve) => {

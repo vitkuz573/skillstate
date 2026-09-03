@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { SkillStateRuntime } from '../../src/core/runtime.js';
-import { TimeoutError } from '../../src/core/resilience.js';
+import { SkillStateRuntime } from '@skillstate/core';
+import { TimeoutError } from '@skillstate/core';
 import type {
   ProceduralSpec,
   StateSchema,
   StatePatch,
   Observation,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
 

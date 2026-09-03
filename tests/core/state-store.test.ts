@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MemoryStore, FileStore } from '../../src/core/state-store.js';
-import type { VersionedState } from '../../src/core/migrations.js';
+import { MemoryStore, FileStore } from '@skillstate/core';
+import type { VersionedState } from '@skillstate/core';
 
 let tmpDirs: string[] = [];
 

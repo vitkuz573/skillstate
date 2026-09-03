@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   fromLLMFn,
   isLLMProvider,
-} from '../../src/core/provider.js';
+} from '@skillstate/core';
 
 describe('isLLMProvider', () => {
   it('returns true for an object with a call function', () => {

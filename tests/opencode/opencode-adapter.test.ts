@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { OpenCodeAdapter } from '../../src/opencode/opencode-adapter.js';
+import { OpenCodeAdapter } from '@skillstate/opencode';
 import type {
   SkillState,
   StatePatch,
   ProceduralSpec,
   Observation,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
   return {

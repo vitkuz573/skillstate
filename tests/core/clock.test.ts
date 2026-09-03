@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SystemClock, clone } from '../../src/core/clock.js';
+import { SystemClock, clone } from '@skillstate/core';
 
 describe('SystemClock', () => {
   it('now() tracks Date.now()', () => {

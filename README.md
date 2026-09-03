@@ -5,9 +5,9 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-736%20passing-brightgreen)](#development)
-[![npm version](https://img.shields.io/npm/v/skillstate)](https://www.npmjs.com/package/skillstate)
-[![node](https://img.shields.io/node/v/skillstate)](https://www.npmjs.com/package/skillstate)
+[![Tests](https://img.shields.io/badge/tests-745%20passing-brightgreen)](#development)
+[![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
+[![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 </div>
@@ -31,7 +31,7 @@ CTF/τ-Bench save only −60%/−40% — the large multiples come from the long-
 
 ## Our measurements (reproducible, `npm run bench`)
 
-Local deterministic harness (`src/bench/harness.ts`): fixed 593-char
+Local deterministic harness (`packages/bench/src/harness.ts`): fixed 593-char
 `formatPaper` turns, fixed 64-char observations, fixed mock-LLM replies —
 no Gemini, no warehouse. Conversation baseline = prefix sums of our own
 state prompts (the `TokenTracker.compareWithBaseline` model, paper §3.3
@@ -82,17 +82,19 @@ Each step:
 ## Installation
 
 ```bash
-npm install skillstate
+npm i @skillstate/core @skillstate/claude @skillstate/opencode @skillstate/codex @skillstate/mcp @skillstate/cli
 ```
 
-Requires Node.js >= 20. TypeScript types are bundled.
+Requires Node.js >= 20. TypeScript types are bundled with each package.
+The repo is a set of independently published `@skillstate/*` packages — there is
+no monolithic `skillstate` root package.
 
 ## Quick start
 
 ```ts
-import { SkillStateRuntime, TokenTracker } from 'skillstate/core';
-import { INTERCODE_CTF_SPEC } from 'skillstate/schemas';
-import type { Observation } from 'skillstate/core';
+import { SkillStateRuntime, TokenTracker } from '@skillstate/core';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import type { Observation } from '@skillstate/core';
 
 const tracker = new TokenTracker({
   platform: 'generic',          // required: 'claude' | 'opencode' | 'generic'
@@ -188,8 +190,8 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 ### Claude Code
 
 ```ts
-import { ClaudeAdapter } from 'skillstate/claude';
-import { INTERCODE_CTF_SPEC } from 'skillstate/schemas';
+import { ClaudeAdapter } from '@skillstate/claude';
+import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const adapter = new ClaudeAdapter();
 
@@ -221,7 +223,7 @@ const hooks = adapter.generateAllHooksScripts('./.skillstate.json', INTERCODE_CT
 ### opencode
 
 ```ts
-import { OpenCodeAdapter } from 'skillstate/opencode';
+import { OpenCodeAdapter } from '@skillstate/opencode';
 
 const adapter = new OpenCodeAdapter();
 
@@ -240,7 +242,7 @@ const plugin = adapter.generatePluginCode('./.skillstate.json');
 ### codex
 
 ```ts
-import { CodexAdapter } from 'skillstate/codex';
+import { CodexAdapter } from '@skillstate/codex';
 
 const adapter = new CodexAdapter();
 
@@ -282,7 +284,7 @@ tells the model to trust the state file over the conversation.
 ### MCP (Model Context Protocol)
 
 ```ts
-import { McpAdapter, McpServer, launch } from 'skillstate/mcp';
+import { McpAdapter, McpServer, launch } from '@skillstate/mcp';
 
 const adapter = new McpAdapter();
 
@@ -381,19 +383,26 @@ tracker.save('./report.json');// persist; tracker.load() restores
 
 The tracker models the conversation baseline exactly: at step *t* the transcript re-sends every prior turn, so cumulative conversation chars are `Σ(t=1..T) Σ(i=1..t) promptChars[i]`, while the state runtime sends only the current Σₜ each time. For constant-size prompts the closed form is `reductionFactor = (T+1)/2` (paper §3.3 eq.5–7).
 
-Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics — use the explicitly-marked `@non-paper` helpers in `skillstate/core` (`instrumentation`: `CharDiv4Counter`, `estimateCostSavings`) and label the result as estimated.
+Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics — use the explicitly-marked `@non-paper` helpers in `@skillstate/core` (`instrumentation`: `CharDiv4Counter`, `estimateCostSavings`) and label the result as estimated.
 
 ## Package exports
 
-| Path | Contents |
+Each integration is an independently published package under the `@skillstate`
+scope. There is **no** monolithic `skillstate` root package and no compat
+re-exports — import exactly the package you need:
+
+| Package | Contents |
 | --- | --- |
-| `skillstate` | Everything (core + adapters + schemas) |
-| `skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, `instrumentation` (@non-paper estimates), all types |
-| `skillstate/claude` | `ClaudeAdapter` |
-| `skillstate/opencode` | `OpenCodeAdapter` |
-| `skillstate/codex` | `CodexAdapter` |
-| `skillstate/mcp` | `McpAdapter`, `McpServer`, `launch` |
-| `skillstate/schemas` | `INTERCODE_CTF_SPEC` |
+| `@skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, `instrumentation` (@non-paper estimates), all types. Subpath `@skillstate/core/schemas` exports `INTERCODE_CTF_SPEC`. |
+| `@skillstate/claude` | `ClaudeAdapter` |
+| `@skillstate/opencode` | `OpenCodeAdapter` |
+| `@skillstate/codex` | `CodexAdapter` |
+| `@skillstate/mcp` | `McpAdapter`, `McpServer`, `launch` |
+| `@skillstate/cli` | `main`, `parseRunArgs`, `parseReportArgs`, `loadCliConfig`, `loadCliSpec`, `loadResumeState`, `resolveInCwd`, `stubLlmResponse`, `CLI_USAGE`, dashboard helpers. Ships the `skillstate` bin (`init \| run \| report`). |
+| `@skillstate/bench` | deterministic benchmark harness (`npm run bench` in the repo) |
+
+Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
+`skillstate-mcp`.
 
 ## Paper fidelity
 
@@ -415,11 +424,11 @@ Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics
 ## Development
 
 ```bash
-npm install
-npm test                # 736 tests
+npm ci
+npm test                # 745 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
-npm run typecheck       # tsc --noEmit
-npm run build           # emit dist/
+npm run typecheck       # tsc -b
+npm run build           # tsc -b — emits each packages/*/dist/
 ```
 
 The library is developed test-first: every behavior lands with a failing test before its implementation (see [CONTRIBUTING.md](./CONTRIBUTING.md)).

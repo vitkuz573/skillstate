@@ -5,7 +5,7 @@ import {
   CircuitBreaker,
   withRetry,
   withTimeout,
-} from '../../src/core/resilience.js';
+} from '@skillstate/core';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {

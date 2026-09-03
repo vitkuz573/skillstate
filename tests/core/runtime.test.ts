@@ -1,19 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { SkillStateRuntime } from '../../src/core/runtime.js';
+import { SkillStateRuntime } from '@skillstate/core';
 import type {
   LLMFn,
   ActionExecutor,
   StepResult,
-} from '../../src/core/runtime.js';
-import { createInitialState } from '../../src/core/state-manager.js';
-import { TokenTracker } from '../../src/core/token-tracker.js';
+} from '@skillstate/core';
+import { createInitialState } from '@skillstate/core';
+import { TokenTracker } from '@skillstate/core';
 import type {
   ProceduralSpec,
   StateSchema,
   SkillState,
   StatePatch,
   Observation,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
 // Test schemas, specs, and fixtures

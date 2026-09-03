@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { JsonLogger } from '../../src/core/logger.js';
+import { JsonLogger } from '@skillstate/core';
 
 afterEach(() => {
   vi.restoreAllMocks();

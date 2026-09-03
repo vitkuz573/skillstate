@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { PromptTransformer } from '../../src/core/prompt-transformer.js';
-import { mergeState } from '../../src/core/state-manager.js';
+import { PromptTransformer } from '@skillstate/core';
+import { mergeState } from '@skillstate/core';
 import type {
   ProceduralSpec,
   SkillState,
   Observation,
   StateSchema,
-} from '../../src/core/types.js';
+} from '@skillstate/core';
 
 /* ------------------------------------------------------------------ */
 /*  Test fixtures                                                      */

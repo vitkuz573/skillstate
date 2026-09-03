@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CURRENT_STATE_VERSION,
   migrate,
-} from '../../src/core/migrations.js';
+} from '@skillstate/core';
 
 describe('migrate', () => {
   it('exposes the current envelope version as 1', () => {
