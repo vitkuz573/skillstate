@@ -29,7 +29,31 @@ Agent skills today run on an **append-only conversation history**: every step re
 
 CTF/τ-Bench save only −60%/−40% — the large multiples come from the long-horizon Warehousing runs, not from every benchmark. Numbers are as reported in the paper, not re-measured by this implementation.
 
-> Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "до ~50x vs Memory на T=200 6175509 vs 122384 Table 1 — худший baseline на max T, не claim пейпера; CTF/τ-Bench −60%/−40%"; "§5.7/§7/A.4 как упрощенная имплементация, адаптеры non-paper/additive без очистки истории хостом экономии нет."
+## Our measurements (reproducible, `npm run bench`)
+
+Local deterministic harness (`src/bench/harness.ts`): fixed 589-char
+`formatPaper` turns, fixed 64-char observations, fixed mock-LLM replies —
+no Gemini, no warehouse. Conversation baseline = prefix sums of our own
+state prompts (the `TokenTracker.compareWithBaseline` model, paper §3.3
+eq.5), so the reduction is exactly `(T+1)/2` — an optimistic upper bound,
+not a deployment claim:
+
+| T | state cumulative (chars) | conv cumulative (chars) | reduction (ours) | formula (T+1)/2 |
+| --- | --- | --- | --- | --- |
+| 10 | 5890 | 32395 | **5.5x** | 5.5 |
+| 50 | 29450 | 750975 | **25.5x** | 25.5 |
+| 100 | 58900 | 2974450 | **50.5x** | 50.5 |
+| 200 | 117800 | 11838900 | **100.5x** | 100.5 |
+
+State slope is 0 (flat 589 chars/step); conv slope grows linearly. Do NOT
+confuse these with the paper rows above: e.g. our T=100 50.5x is
+numerically close to the paper's T=200 ~50.46x by coincidence (different T,
+different method — their §5.2 Stateful turns average only ~210 chars vs
+their ~654-char SKILL step, hence 16.24x at T=100). Full method, tables,
+and limitations: [`BENCHMARK.md`](./BENCHMARK.md); machine-readable
+fixture: [`tests/bench/expected.json`](./tests/bench/expected.json).
+
+> Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "~50x vs Memory at T=200 6175509 vs 122384 Table 1 — worst baseline at max T, not a paper claim; CTF/τ-Bench -60%/-40%"; "§5.7/§7/A.4 as simplified implementation, @non-paper/additive adapters with no host history trimming yield no saving."
 
 ## How it works
 
