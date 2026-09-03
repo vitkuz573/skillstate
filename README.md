@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-630%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-736%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![node](https://img.shields.io/node/v/skillstate)](https://www.npmjs.com/package/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -175,6 +175,16 @@ Standalone state utilities are also exported: `StateManager.createInitialState`,
 
 ## Platform integrations
 
+The runtime ships first-class adapters for four agent hosts. Every adapter is
+`@non-paper` — no adapters exist in arXiv 2608.26263v3.
+
+| Host | Mechanism | State injection | O(1)? |
+| --- | --- | --- | --- |
+| **Claude Code** | `PreCompact` / `PostToolUse` / `SessionStart(compact)` hook scripts + append prompt | state injected into compaction summary and tool context (`additionalContext`) | additive — host history is never trimmed |
+| **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
+| **Codex** | `AGENTS.md` amendment + `UserPromptSubmit` / `PostToolUse` / `SessionStart(compact)` hooks | state injected per prompt and re-injected after compaction | no — host history is never trimmed |
+| **MCP** | stdio JSON-RPC server (`state.get` / `state.patch` / `state.merge` / `state.reset` / `spec.get` / `state.metrics`) | any MCP client accesses the runtime state as tools | n/a — runtime access, not prompting |
+
 ### Claude Code
 
 ```ts
@@ -226,6 +236,56 @@ const plugin = adapter.generatePluginCode('./.skillstate.json');
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
 ```
+
+### codex
+
+```ts
+import { CodexAdapter } from 'skillstate/codex';
+
+const adapter = new CodexAdapter();
+
+// AGENTS.md amendment: read .skillstate.json each step, discard reasoning,
+// emit a two-key state_patch/action JSON block:
+const agentsMd = adapter.generateCodexAmendments('./.skillstate.json');
+
+// Standalone "read the state file" instruction block (skill / system prompt):
+const stateRead = adapter.generateCodexStateRead('./.skillstate.json');
+
+// Codex hooks.json: inject state on UserPromptSubmit, re-inject after
+// compaction (SessionStart matcher: compact), persist state_patch on PostToolUse:
+const hooksJson = adapter.generateCodexHooksConfig('./.skillstate.json');
+```
+
+**Honest limitation**: Codex has no `messages.transform` equivalent, so host
+history is never trimmed — true O(1) is not possible. The hooks keep the state
+injected per prompt and persisted per tool call, and the `AGENTS.md` amendment
+tells the model to trust the state file over the conversation.
+
+### MCP (Model Context Protocol)
+
+```ts
+import { McpAdapter, McpServer, launch } from 'skillstate/mcp';
+
+const adapter = new McpAdapter();
+
+// .mcp.json config registering the skillstate stdio server:
+const config = adapter.generateMcpConfig('/path/to/.skillstate.json');
+
+// Or run an in-process server and drive it line-by-line:
+const server = new McpServer({ spec: INTERCODE_CTF_SPEC, root: '.', name: '.skillstate.json' });
+const response = server.handleLine(
+  JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'state.get', arguments: {} },
+  }),
+);
+```
+
+`launch(args)` reads `SKILLSTATE_SPEC_PATH` / `SKILLSTATE_STATE_PATH` (or
+explicit args) and starts a stdio server; the `skillstate-mcp` bin launches
+it directly. Tools: `state.get`, `state.patch`, `state.merge`, `state.reset`,
+`spec.get`, `state.metrics`. State is redacted on every read, and both
+newline-delimited JSON-RPC and `Content-Length`-framed messages are accepted.
 
 ## Real-world usage
 
@@ -313,6 +373,8 @@ Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics
 | `skillstate/core` | `SkillStateRuntime`, `TokenTracker`, `StateManager`, `PromptTransformer`, `instrumentation` (@non-paper estimates), all types |
 | `skillstate/claude` | `ClaudeAdapter` |
 | `skillstate/opencode` | `OpenCodeAdapter` |
+| `skillstate/codex` | `CodexAdapter` |
+| `skillstate/mcp` | `McpAdapter`, `McpServer`, `launch` |
 | `skillstate/schemas` | `INTERCODE_CTF_SPEC` |
 
 ## Paper fidelity
@@ -327,13 +389,16 @@ Need a rough dollar figure or a tokenizer heuristic? Those are NOT paper metrics
 - [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios pinned as fixtures (`tests/core/paper-fidelity.test.ts`)
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
 - [x] Claude adapter: `PreCompact` hook injects state + diff into compaction summary; `SessionStart(compact)` re-injects after compaction
+- [x] Codex adapter (`@non-paper`): `AGENTS.md` amendment + `UserPromptSubmit`/`PostToolUse`/`SessionStart(compact)` hooks inject and persist state
+- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server exposing `state.get`/`state.patch`/`state.merge`/`state.reset`/`spec.get`/`state.metrics`, with `Content-Length` framing support and secret redaction
 - [ ] Claude Code limitation: history is append-only from hooks — true O(1) requires host-side trimming
+- [ ] Codex limitation: no `messages.transform` equivalent — history is never trimmed from hooks, so true O(1) requires host-side trimming
 
 ## Development
 
 ```bash
 npm install
-npm test                # 630 tests
+npm test                # 736 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc --noEmit
 npm run build           # emit dist/

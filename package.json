@@ -21,6 +21,14 @@
       "types": "./dist/opencode/opencode-adapter.d.ts",
       "default": "./dist/opencode/opencode-adapter.js"
     },
+    "./codex": {
+      "types": "./dist/codex/codex-adapter.d.ts",
+      "default": "./dist/codex/codex-adapter.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "default": "./dist/mcp/index.js"
+    },
     "./schemas": {
       "types": "./dist/schemas/index.d.ts",
       "default": "./dist/schemas/index.js"
@@ -31,6 +39,7 @@
     "dist",
     "bin",
     "README.md",
+    "state.md",
     "LICENSE"
   ],
   "engines": {
@@ -68,7 +77,8 @@
   },
   "type": "module",
   "bin": {
-    "skillstate": "./bin/skillstate.js"
+    "skillstate": "./bin/skillstate.js",
+    "skillstate-mcp": "./bin/mcp.js"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",

@@ -26,4 +26,7 @@ export * from './config.js';
 export * from './shutdown.js';
 export { ClaudeAdapter } from '../claude/claude-adapter.js';
 export { OpenCodeAdapter } from '../opencode/opencode-adapter.js';
+export { CodexAdapter } from '../codex/codex-adapter.js';
+export { McpAdapter } from '../mcp/mcp-adapter.js';
+export { McpServer, launch } from '../mcp/mcp-server.js';
 export * from '../schemas/index.js';
