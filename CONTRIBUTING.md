@@ -4,24 +4,31 @@ Thanks for your interest in contributing! This project maintains an
 enterprise-grade quality bar: **100% test coverage** is enforced, and every
 behavior change lands test-first.
 
-## Local development setup
+## Developing
 
-Requirements: **Node.js >= 20** and npm.
+Requirements: **Node.js >= 20** and npm (npm workspaces are not used — this is
+a single package). `.npmrc` sets `engine-strict=true`, so a Node version below
+20 will be rejected at install time.
 
 ```bash
 git clone https://github.com/vitkuz573/skillstate.git
 cd skillstate
-npm install
+npm ci                  # reproducible install from package-lock.json
 ```
 
-Verify your setup:
+Verify your setup — the full local gate:
 
 ```bash
-npm test                # 299 tests should pass
-npm run test:coverage   # 100% thresholds enforced
 npm run typecheck       # tsc --noEmit, must be clean
+npm test                # 745 tests should pass
+npm run test:coverage   # 100% thresholds enforced on all four metric kinds
 npm run build           # emits dist/
 ```
+
+A deep dive into the design and execution-state model lives in
+[`state.md`](./state.md); usage and public API examples are in
+[`README.md`](./README.md). Keep both consistent with any public signature
+change you land.
 
 ## Test-driven development is required
 
@@ -35,6 +42,24 @@ Every behavior change follows the RED → GREEN → REFACTOR cycle:
 A PR whose implementation arrives without its tests is not reviewable. If you
 are fixing a bug, the regression test must reproduce the bug before the fix
 lands.
+
+## Testing
+
+The project enforces a hard quality bar via Vitest v8 coverage (`v8`)
+declared in `vitest.config.ts`. `npm run test:coverage` fails the build unless
+**100%** is met on **all four metric kinds**:
+
+- **branches** — every branch of every `if`/`switch`/logical expression;
+- **functions** — every exported and internal function is executed;
+- **lines** — every executable line is hit;
+- **statements** — every statement is evaluated.
+
+Run the suite locally before pushing:
+
+```bash
+npm test                # all tests (currently 745)
+npm run test:coverage   # 100% on branches/functions/lines/statements
+```
 
 ## The 100% coverage rule
 
@@ -88,6 +113,27 @@ Example: `feat(core): add maxValidationRetries option to SkillStateRuntime`
      if you change a public signature, update the README in the same PR;
    - add a `CHANGELOG.md` entry under *Unreleased* for user-visible changes.
 5. Keep PRs focused: one behavior or fix per PR.
+
+## Releasing
+
+Releases are cut from `main` by a maintainer after the full local gate passes
+(typecheck → tests → 100% coverage → build). There is no CI pipeline, so the
+gate is run by hand before every publish.
+
+```bash
+# 1. Run the full gate
+npm run typecheck && npm test && npm run test:coverage && npm run build
+
+# 2. Add/verify the CHANGELOG.md entry under *Unreleased*, then tag:
+npm version patch|minor|major -m "chore(release): %s"
+
+# 3. Publish to the public npm registry (scoped/private would need --access restricted)
+npm publish --access public
+```
+
+`npm version` runs the `prepack` script (`npm run build`) synchronously, so
+`dist/` is always freshly built into the published tarball. Never publish from
+a dirty working tree or a branch other than `main`.
 
 ## Paper fidelity
 
