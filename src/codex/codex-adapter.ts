@@ -43,6 +43,21 @@ export type CodexHookEvent =
   | 'PostToolUse'
   | 'SessionStart';
 
+/**
+ * Canonical `.cjs` filename suffix per Codex hook event, used by
+ * {@link CodexAdapter.codexHookScriptPath} so `hooks.json` commands and the
+ * on-disk hook scripts always agree.
+ */
+export const CODEX_HOOK_SCRIPT_SUFFIX = {
+  UserPromptSubmit: 'user-prompt-submit',
+  PostToolUse: 'post-tool-use',
+  SessionStart: 'session-start-compact',
+} as const;
+
+/** Executable hook-script suffix for a {@link CodexHookEvent}. */
+export type CodexHookEventSuffix =
+  (typeof CODEX_HOOK_SCRIPT_SUFFIX)[CodexHookEvent];
+
 /** Options for {@link CodexAdapter.generateCodexAmendments}. */
 export interface CodexAmendmentsOptions {
   /** Fill a `## State schema` section from the provided spec. */
@@ -214,10 +229,8 @@ export class CodexAdapter {
     options?: CodexHooksConfigOptions,
   ): string {
     const resolved = this.resolve(statePath);
-    const dir = path.dirname(resolved);
-    const base = path.basename(resolved, '.json');
-    const defaultCommand = (suffix: string): string =>
-      `node ${JSON.stringify(path.join(dir, `.codex-${base}-${suffix}.cjs`))}`;
+    const defaultCommand = (eventType: CodexHookEvent): string =>
+      `node ${JSON.stringify(this.codexHookScriptPath(resolved, eventType))}`;
 
     const sessionStartMatcher = options?.sessionStartMatcher ?? 'compact';
     const command = options?.command;
@@ -232,7 +245,7 @@ export class CodexAdapter {
               {
                 type: 'command',
                 command:
-                  command ?? defaultCommand('user-prompt-submit'),
+                  command ?? defaultCommand('UserPromptSubmit'),
                 statusMessage: 'Injecting skill state',
               },
             ],
@@ -244,7 +257,7 @@ export class CodexAdapter {
             hooks: [
               {
                 type: 'command',
-                command: command ?? defaultCommand('session-start-compact'),
+                command: command ?? defaultCommand('SessionStart'),
                 statusMessage: 'Re-injecting skill state after compaction',
               },
             ],
@@ -255,7 +268,7 @@ export class CodexAdapter {
             hooks: [
               {
                 type: 'command',
-                command: command ?? defaultCommand('post-tool-use'),
+                command: command ?? defaultCommand('PostToolUse'),
                 statusMessage: 'Persisting skill state patch',
               },
             ],
@@ -265,6 +278,30 @@ export class CodexAdapter {
     };
 
     return JSON.stringify(doc, null, 2) + '\n';
+  }
+
+  /**
+   * Canonical absolute path of the generated hook script for a Codex event,
+   * derived from the state file name. Both {@link generateCodexHooksConfig}
+   * and {@link saveCodexHookScript} use this single convention so the
+   * `hooks.json` commands and the on-disk scripts always agree.
+   *
+   * For `./.skillstate.json`:
+   * - `UserPromptSubmit` → `.../.codex-.skillstate-user-prompt-submit.cjs`
+   * - `SessionStart`    → `.../.codex-.skillstate-session-start-compact.cjs`
+   * - `PostToolUse`     → `.../.codex-.skillstate-post-tool-use.cjs`
+   *
+   * Accepts a raw state path or a `{ root, name }` ref resolved via
+   * `resolveStatePath`.
+   */
+  codexHookScriptPath(
+    statePath: string | StatePathRef,
+    eventType: CodexHookEvent,
+  ): string {
+    const resolved = this.resolve(statePath);
+    const dir = path.dirname(resolved);
+    const base = path.basename(resolved, '.json');
+    return path.join(dir, `.codex-${base}-${CODEX_HOOK_SCRIPT_SUFFIX[eventType]}.cjs`);
   }
 
   /**
@@ -311,14 +348,51 @@ export class CodexAdapter {
    * destination path.
    */
   async saveCodexHookScript(
+    eventType: CodexHookEvent,
+    statePath: string | StatePathRef,
+    schema?: ProceduralSpec['schema'],
+  ): Promise<string>;
+  async saveCodexHookScript(
     target: string | StatePathRef,
     eventType: CodexHookEvent,
     statePath: string | StatePathRef,
     schema?: ProceduralSpec['schema'],
+  ): Promise<string>;
+  async saveCodexHookScript(
+    targetOrEvent: string | StatePathRef | CodexHookEvent,
+    eventTypeOrPath: CodexHookEvent | string | StatePathRef,
+    statePathOrSchema?: string | StatePathRef | ProceduralSpec['schema'],
+    schema?: ProceduralSpec['schema'],
   ): Promise<string> {
+    const refForm =
+      typeof targetOrEvent === 'string' &&
+      (targetOrEvent === 'UserPromptSubmit' ||
+        targetOrEvent === 'PostToolUse' ||
+        targetOrEvent === 'SessionStart');
+
+    const target: string | StatePathRef = refForm
+      ? this.codexHookScriptPath(
+          eventTypeOrPath as string | StatePathRef,
+          targetOrEvent as CodexHookEvent,
+        )
+      : (targetOrEvent as string | StatePathRef);
+    const eventType: CodexHookEvent = refForm
+      ? (targetOrEvent as CodexHookEvent)
+      : (eventTypeOrPath as CodexHookEvent);
+    const statePath: string | StatePathRef = refForm
+      ? (eventTypeOrPath as string | StatePathRef)
+      : (statePathOrSchema as string | StatePathRef);
+    const effectiveSchema: ProceduralSpec['schema'] | undefined = refForm
+      ? (statePathOrSchema as ProceduralSpec['schema'] | undefined)
+      : schema;
+
     const dest = this.resolve(target);
     const resolved = this.resolve(statePath);
-    const content = this.generateCodexHookScript(eventType, resolved, schema);
+    const content = this.generateCodexHookScript(
+      eventType,
+      resolved,
+      effectiveSchema,
+    );
     await atomicWriteFile(dest, content);
     return dest;
   }
@@ -412,15 +486,42 @@ export class CodexAdapter {
       '  return null;',
       '}',
       '',
+      'function isJsonObjectWithStatePatch(value) {',
+      '  return value !== null &&',
+      '    typeof value === "object" &&',
+      '    !Array.isArray(value) &&',
+      '    value.state_patch !== null &&',
+      '    typeof value.state_patch === "object" &&',
+      '    !Array.isArray(value.state_patch);',
+      '}',
+      '',
+      'function tryParseStandaloneJson(text) {',
+      '  const trimmed = String(text).trim();',
+      '  try {',
+      '    const parsed = JSON.parse(trimmed);',
+      '    if (isJsonObjectWithStatePatch(parsed)) return parsed;',
+      '  } catch (e) {}',
+      '  const first = trimmed.indexOf("{");',
+      '  const last = trimmed.lastIndexOf("}");',
+      '  if (first !== -1 && last > first) {',
+      '    try {',
+      '      const parsed = JSON.parse(trimmed.slice(first, last + 1));',
+      '      if (isJsonObjectWithStatePatch(parsed)) return parsed;',
+      '    } catch (e) {}',
+      '  }',
+      '  return null;',
+      '}',
+      '',
       'function extractPatchString(content) {',
       '  if (typeof content !== "string") return null;',
       '  const match = content.match(/' + fence + 'json\\s*\\n?([\\s\\S]*?)\\n?\\s*' + fence + '/);',
-      '  if (!match) return null;',
-      '  try {',
-      '    return JSON.parse(match[1]);',
-      '  } catch (e) {',
-      '    return null;',
+      '  if (match) {',
+      '    try {',
+      '      const parsed = JSON.parse(match[1]);',
+      '      if (isJsonObjectWithStatePatch(parsed)) return parsed;',
+      '    } catch (e) {}',
       '  }',
+      '  return tryParseStandaloneJson(content);',
       '}',
       '',
       'function readResponseText(response) {',

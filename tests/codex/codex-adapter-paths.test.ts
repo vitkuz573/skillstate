@@ -109,4 +109,35 @@ describe('CodexAdapter — @non-paper StatePathRef overloads', () => {
       JSON.stringify(resolveStatePath(dir, 'state.json')).slice(1, -1),
     );
   });
+
+  it('codexHookScriptPath resolves a ref to the canonical path inside the root', () => {
+    const dir = makeTmp();
+    expect(
+      adapter.codexHookScriptPath(
+        { root: dir, name: '.skillstate.json' },
+        'PostToolUse',
+      ),
+    ).toBe(path.join(dir, '.codex-.skillstate-post-tool-use.cjs'));
+  });
+
+  it('codexHookScriptPath rejects traversal refs', () => {
+    const dir = makeTmp();
+    expect(() =>
+      adapter.codexHookScriptPath({ root: dir, name: '../evil.json' }, 'PostToolUse'),
+    ).toThrow('Path traversal blocked');
+  });
+
+  it('saveCodexHookScript with no target resolves the ref and lands on the canonical path', async () => {
+    const dir = makeTmp();
+    const expected = adapter.codexHookScriptPath(
+      { root: dir, name: '.skillstate.json' },
+      'UserPromptSubmit',
+    );
+    const returned = await adapter.saveCodexHookScript('UserPromptSubmit', {
+      root: dir,
+      name: '.skillstate.json',
+    });
+    expect(returned).toBe(expected);
+    expect(fs.readFileSync(returned, 'utf-8')).toContain('UserPromptSubmit');
+  });
 });

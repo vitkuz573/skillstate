@@ -254,7 +254,25 @@ const stateRead = adapter.generateCodexStateRead('./.skillstate.json');
 // Codex hooks.json: inject state on UserPromptSubmit, re-inject after
 // compaction (SessionStart matcher: compact), persist state_patch on PostToolUse:
 const hooksJson = adapter.generateCodexHooksConfig('./.skillstate.json');
+
+// Canonical hook-script path for a given event. Both `generateCodexHooksConfig`
+// and `saveCodexHookScript` use this single convention so the hooks.json
+// commands and the on-disk scripts ALWAYS agree by filename:
+const script = adapter.codexHookScriptPath('./.skillstate.json', 'PostToolUse');
+// -> path/to/.codex-.skillstate-post-tool-use.cjs
+
+// Generate a single hook script and persist it to the canonical path (no
+// explicit target) or to an explicit target you pass as the first argument:
+const scriptPath = await adapter.saveCodexHookScript(
+  'PostToolUse',
+  './.skillstate.json',
+);
 ```
+
+The `PostToolUse` hook parses `state_patch` from the `tool_response`: it accepts
+both fenced ```json blocks and a standalone (unfenced) JSON object, and is
+tolerant of wrappers such as `Here is: {...}`. `UserPromptSubmit` and
+`SessionStart` inject the current state as `additionalContext`.
 
 **Honest limitation**: Codex has no `messages.transform` equivalent, so host
 history is never trimmed — true O(1) is not possible. The hooks keep the state

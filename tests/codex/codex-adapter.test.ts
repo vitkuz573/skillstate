@@ -1,10 +1,13 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { CodexAdapter } from '../../src/codex/codex-adapter.js';
 import { INTERCODE_CTF_SPEC } from '../../src/schemas/index.js';
 import type { ProceduralSpec } from '../../src/core/types.js';
+
+const nodePath = process.execPath;
 
 function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
   return {
@@ -253,6 +256,127 @@ describe('CodexAdapter.generateCodexHookScript', () => {
     expect(
       adapter.generateCodexHookScript('UserPromptSubmit', '/tmp/x.json'),
     ).toBe(adapter.generateCodexHookScript('UserPromptSubmit', '/tmp/x.json'));
+  });
+});
+
+describe('CodexAdapter.codexHookScriptPath', () => {
+  const adapter = new CodexAdapter();
+
+  it('returns the canonical script path for each event', () => {
+    expect(
+      adapter.codexHookScriptPath('/tmp/.skillstate.json', 'UserPromptSubmit'),
+    ).toBe(path.join('/tmp', '.codex-.skillstate-user-prompt-submit.cjs'));
+    expect(
+      adapter.codexHookScriptPath('/tmp/.skillstate.json', 'SessionStart'),
+    ).toBe(path.join('/tmp', '.codex-.skillstate-session-start-compact.cjs'));
+    expect(
+      adapter.codexHookScriptPath('/tmp/.skillstate.json', 'PostToolUse'),
+    ).toBe(path.join('/tmp', '.codex-.skillstate-post-tool-use.cjs'));
+  });
+
+  it('drives the exact commands in generateCodexHooksConfig', () => {
+    const raw = adapter.generateCodexHooksConfig('/tmp/.skillstate.json');
+    const parsed = JSON.parse(raw) as any;
+    for (const evt of ['UserPromptSubmit', 'SessionStart', 'PostToolUse'] as const) {
+      expect(parsed.hooks[evt][0].hooks[0].command).toBe(
+        `node ${JSON.stringify(
+          adapter.codexHookScriptPath('/tmp/.skillstate.json', evt),
+        )}`,
+      );
+    }
+  });
+
+  it('saveCodexHookScript without a target writes to the canonical path echoed by the config', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-codex-'));
+    try {
+      const statePath = path.join(dir, '.skillstate.json');
+      const dest = await adapter.saveCodexHookScript('PostToolUse', statePath);
+      expect(dest).toBe(
+        adapter.codexHookScriptPath(statePath, 'PostToolUse'),
+      );
+      expect(dest).toContain('.codex-.skillstate-post-tool-use.cjs');
+      expect(fs.readFileSync(dest, 'utf-8')).toContain('PostToolUse');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('CodexAdapter PostToolUse state_patch parsing', () => {
+  const adapter = new CodexAdapter();
+
+  it('embeds the standalone-JSON fallback helpers', () => {
+    const script = adapter.generateCodexHookScript(
+      'PostToolUse',
+      '/tmp/.skillstate.json',
+    );
+    expect(script).toContain('function tryParseStandaloneJson(text)');
+    expect(script).toContain('function isJsonObjectWithStatePatch(value)');
+    expect(script).toContain('JSON.parse(trimmed)');
+    expect(script).toContain('indexOf("{")');
+  });
+
+  it('still supports the fenced code block path', () => {
+    const script = adapter.generateCodexHookScript(
+      'PostToolUse',
+      '/tmp/.skillstate.json',
+    );
+    expect(script).toMatch(/```json\\s\*/);
+  });
+
+  it('parses fenced, raw standalone, wrapped text and object tool_response at runtime', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-codex-'));
+    try {
+      const statePath = path.join(dir, 'state.json');
+      const hookPath = path.join(dir, 'hook.cjs');
+      fs.writeFileSync(
+        hookPath,
+        adapter.generateCodexHookScript(
+          'PostToolUse',
+          statePath,
+          INTERCODE_CTF_SPEC.schema,
+        ),
+      );
+
+      const run = (toolResponse: unknown): Record<string, unknown> => {
+        try {
+          fs.rmSync(statePath, { force: true });
+        } catch {
+          /* no-op */
+        }
+        execFileSync(nodePath, [hookPath], {
+          input: JSON.stringify({ tool_response: toolResponse }),
+          encoding: 'utf-8',
+        });
+        return fs.existsSync(statePath)
+          ? (JSON.parse(fs.readFileSync(statePath, 'utf-8')) as Record<
+              string,
+              unknown
+            >)
+          : {};
+      };
+
+      const raw = run('{"state_patch":{"working_dir":"/home"},"action":"ls"}');
+      expect(raw.working_dir).toBe('/home');
+
+      const wrapped = run(
+        'Here is: {"state_patch":{"working_dir":"/app"},"action":"ls"}',
+      );
+      expect(wrapped.working_dir).toBe('/app');
+
+      const fenced = run(
+        '```json\n{"state_patch":{"cmd_summary":"ok"},"action":"a"}\n```',
+      );
+      expect(fenced.cmd_summary).toBe('ok');
+
+      const object = run({
+        state_patch: { discovered_flags: ['flag{x}'] },
+        action: 'done',
+      });
+      expect(object.discovered_flags).toEqual(['flag{x}']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
