@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/opencode",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OpenCode platform adapter for the skillstate runtime.",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,9 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "engines": {
     "node": ">=20"

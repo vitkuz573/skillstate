@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/bench",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Deterministic local benchmark harness for the skillstate runtime (entry only).",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,9 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "engines": {
     "node": ">=20"
