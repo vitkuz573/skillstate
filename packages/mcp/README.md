@@ -6,8 +6,8 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
 [![node](https://img.shields.io/node/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
-[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
+[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
 
@@ -65,6 +65,39 @@ Command-line:
 
 ```bash
 skillstate-mcp                # reads SKILLSTATE_SPEC_PATH / SKILLSTATE_STATE_PATH
+```
+
+## Register in opencode.jsonc
+
+For an OpenCode host, add the stdio server to the `mcp` block of
+`~/.config/opencode/opencode.jsonc` (or the project `opencode.jsonc`). The
+`environment` block feeds `SKILLSTATE_STATE_PATH`, which `launch()` reads:
+
+```jsonc
+{
+  "mcp": {
+    "skillstate": {
+      "type": "local",
+      "command": ["node", "/abs/path/to/skillstate/packages/mcp/bin/mcp.js"],
+      "enabled": true,
+      "environment": {
+        "SKILLSTATE_STATE_PATH": "/abs/path/to/.skillstate.json"
+      }
+    }
+  }
+}
+```
+
+If you installed from npm instead of a checkout, replace the command with
+`["npx", "-y", "skillstate-mcp"]` (the packaged bin). Create the state file
+first (see the `@skillstate/opencode` README for a sample). Verify with:
+
+```bash
+opencode debug config   # mcp.skillstate appears in the resolved config
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | SKILLSTATE_STATE_PATH=/abs/path/to/.skillstate.json node packages/mcp/bin/mcp.js
+# -> serverInfo {"name":"skillstate","version":"1.0.0"} + 6 tools
 ```
 
 ## API / Exports

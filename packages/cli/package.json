@@ -25,6 +25,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@skillstate/core": "^2.0.0"
+    "@skillstate/core": "^2.0.0",
+    "@skillstate/mcp": "^2.0.0",
+    "@skillstate/opencode": "^2.0.0"
   }
 }

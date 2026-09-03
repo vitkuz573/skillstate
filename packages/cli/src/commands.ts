@@ -1,4 +1,4 @@
-// skillstate CLI — init | run [--config <path>] [--resume] | report [--format json|md].
+// skillstate CLI — init [--host ...] [--dry-run] [--uninstall] | uninstall | run | report.
 //
 // @non-paper Wave-4 DX layer (additive): thin file orchestration over the
 // paper-exact runtime. `run` uses a deterministic offline stub LLM (empty
@@ -24,9 +24,19 @@ import { migrate } from '@skillstate/core';
 import { generateReport } from './dashboard.js';
 import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec, SkillState } from '@skillstate/core';
+import {
+  autoInstall,
+  CLI_USAGE_INSTALL,
+  defaultHome,
+  HelpRequestedInitError,
+  parseInitArgs,
+  parseUninstallArgs,
+  uninstall,
+} from './install.js';
+import type { InitFlags } from './install.js';
 
-export const CLI_USAGE =
-  'Usage: skillstate init | run [--config <path>] [--resume] | report [--format json|md]';
+export const CLI_USAGE = `Usage: skillstate init [flags] | uninstall [flags] | run [--config <path>] [--resume] | report [--format json|md]
+  init flags: ${CLI_USAGE_INSTALL.slice('Usage: skillstate '.length)}`;
 
 /** Parsed `run` flags. */
 export interface RunFlags {
@@ -192,7 +202,14 @@ export function stubLlmResponse(): string {
   return `noop step\n\n\`\`\`json\n${JSON.stringify({ state_patch: {}, action: 'noop' })}\n\`\`\``;
 }
 
-async function cmdInit(cwd: string): Promise<number> {
+async function cmdInit(cwd: string, flags: InitFlags): Promise<number> {
+  if (flags.uninstall) {
+    return uninstall({ cwd, flags: { removeState: false, dryRun: flags.dryRun } });
+  }
+  if (flags.dryRun) {
+    console.log('[dry-run] would create ./skillstate.json + ./skill-spec.json (if missing)');
+    return autoInstall({ cwd, home: defaultHome(), flags });
+  }
   const configPath = path.join(cwd, CONFIG_FILE_NAME);
   const defaults = defaultConfig();
   if (fs.existsSync(configPath) === false) {
@@ -208,7 +225,7 @@ async function cmdInit(cwd: string): Promise<number> {
     fs.writeFileSync(specAbs, `${JSON.stringify(INTERCODE_CTF_SPEC, null, 2)}\n`, 'utf-8');
     console.log(`Created ${defaults.specPath}`);
   }
-  return 0;
+  return autoInstall({ cwd, home: defaultHome(), flags });
 }
 
 async function cmdRun(cwd: string, flags: RunFlags): Promise<number> {
@@ -347,15 +364,10 @@ export async function main(argv: string[], cwd?: string): Promise<number> {
 
   try {
     if (command === 'init') {
-      if (wantsHelp(rest)) {
-        console.log(CLI_USAGE);
-        return 0;
-      }
-      if (rest.length > 0) {
-        console.error(`Unknown flag for init: ${rest[0] as string}\n${CLI_USAGE}`);
-        return 2;
-      }
-      return await cmdInit(dir);
+      return await cmdInit(dir, parseInitArgs(rest));
+    }
+    if (command === 'uninstall') {
+      return await uninstall({ cwd: dir, flags: parseUninstallArgs(rest) });
     }
     if (command === 'run') {
       return await cmdRun(dir, parseRunArgs(rest));
@@ -366,7 +378,7 @@ export async function main(argv: string[], cwd?: string): Promise<number> {
     console.error(CLI_USAGE);
     return 2;
   } catch (error) {
-    if (error instanceof HelpRequestedError) {
+    if (error instanceof HelpRequestedError || error instanceof HelpRequestedInitError) {
       console.log(CLI_USAGE);
       return 0;
     }

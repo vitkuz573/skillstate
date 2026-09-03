@@ -307,6 +307,36 @@ it directly. Tools: `state.get`, `state.patch`, `state.merge`, `state.reset`,
 `spec.get`, `state.metrics`. State is redacted on every read, and both
 newline-delimited JSON-RPC and `Content-Length`-framed messages are accepted.
 
+### Integrate into your OpenCode host
+
+One command — detection, plugin, MCP registration, skill, and per-project
+state are all handled automatically:
+
+```bash
+npm i -g @skillstate/cli && skillstate init
+```
+
+`skillstate init` detects the host (OpenCode, Claude Code, Codex; override
+with `--host`), writes the plugin to `~/.config/opencode/plugins/` (auto-loaded
+by OpenCode 1.17 — no `plugin: []` edit), splices the `skillstate` stdio MCP
+server into the existing `mcp` object of `opencode.jsonc` (comment-preserving,
+with a timestamped backup), installs the `SKILL.md`, and creates a per-project
+`./.skillstate/` runtime dir with an install manifest. Idempotent: re-running
+never duplicates entries. `skillstate uninstall` rolls everything back.
+
+Manual step-by-step guides (tested on OpenCode 1.17):
+
+- [`packages/opencode` → "Install into OpenCode (host)"](./packages/opencode/README.md#install-into-opencode-host) —
+  generate the plugin, create the state file, register it under `plugin` in
+  `opencode.jsonc` (`"file:///abs/path/skillstate.plugin.ts"`), install the
+  `SKILL.md`.
+- [`packages/mcp` → "Register in opencode.jsonc"](./packages/mcp/README.md#register-in-opencodejsonc) —
+  add the `skillstate` stdio MCP server (`state.get` / `state.patch` / …)
+  with `SKILLSTATE_STATE_PATH`.
+
+Verify with `opencode debug config`, `opencode debug skill`, and an
+`initialize` + `tools/list` round-trip against `packages/mcp/bin/mcp.js`.
+
 ## Real-world usage
 
 ### OpenCode — real O(1) via `experimental.chat.messages.transform`

@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
 [![node](https://img.shields.io/node/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
-[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
+[![Tests](https://img.shields.io/badge/tests-831%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
 
 </div>
@@ -26,8 +26,11 @@ JSON or a markdown dashboard.
 
 ## Installation
 
+One command installs the CLI **and** wires skillstate into your host
+(OpenCode, Claude Code, or Codex — auto-detected):
+
 ```bash
-npm i @skillstate/core @skillstate/cli
+npm i -g @skillstate/cli && skillstate init
 ```
 
 Requires Node.js >= 20. TypeScript types are bundled. Ships the `skillstate`
@@ -36,13 +39,41 @@ bin.
 ## Quick start
 
 ```bash
-npx skillstate init            # creates ./skillstate.json + ./skill-spec.json
-npx skillstate run             # runs the offline stub-LLM against the spec
-npx skillstate run --resume    # continue from the persisted .skillstate.json
-npx skillstate run --config ./my-config.json
-npx skillstate report          # pretty JSON report
-npx skillstate report --format md   # markdown dashboard
+skillstate init              # full auto-install into the detected host
+skillstate run               # runs the offline stub-LLM against the spec
+skillstate run --resume      # continue from the persisted .skillstate.json
+skillstate run --config ./my-config.json
+skillstate report            # pretty JSON report
+skillstate report --format md   # markdown dashboard
+skillstate uninstall         # roll the host install back (manifest-driven)
 ```
+
+### `skillstate init` — what it does
+
+1. Detects the host: `opencode` (`~/.config/opencode/opencode.jsonc` or
+   `~/.opencode/bin/opencode`), `claude` (`~/.claude`), `codex` (`~/.codex`).
+   Override with `--host <opencode|claude|codex>`.
+2. Creates a per-project runtime dir `./.skillstate/` with the state file
+   (`skillstate.json`), an install manifest, and the `skillstate.json` config
+   + spec file for `run`/`report`.
+3. For OpenCode:
+   - writes the plugin to `~/.config/opencode/plugins/skillstate.ts` — files
+     in `plugins/` are **auto-loaded at startup** by OpenCode 1.17, so no
+     `plugin: []` edit is needed;
+   - splices a `skillstate` stdio MCP server into the existing `mcp` object of
+     `opencode.jsonc` **in place** (comments and unknown keys preserved,
+     timestamped `.bak.*` backup written);
+   - installs `~/.config/opencode/skills/skillstate/SKILL.md`.
+4. For Claude Code: installs `~/.claude/skills/skillstate/SKILL.md` and writes
+   a project `.mcp.json` (`mcpServers.skillstate`).
+5. For Codex: installs `~/.codex/skills/skillstate/SKILL.md` (no JSON MCP
+   config to edit).
+
+Flags: `--host <name>`, `--state-path <path>`, `--max-history <n>`,
+`--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
+re-running never duplicates config entries. `skillstate uninstall`
+(`--state-dir <dir>`, `--remove-state`, `--dry-run`) removes exactly what the
+manifest records.
 
 Programmatically:
 
@@ -64,7 +95,7 @@ Root path `@skillstate/cli` exports the command layer and the dashboard.
 
 **Commands (`commands.ts`):**
 
-- `main(argv, cwd?): Promise<number>` — CLI entry; returns a process exit code.
+- `main(argv, cwd?, home?): Promise<number>` — CLI entry; returns a process exit code.
 - `CLI_USAGE` — the usage string.
 - `parseRunArgs(args): RunFlags` — `--config <path>`, `--config=<path>`, `--resume`.
 - `parseReportArgs(args): ReportFlags` — `--format json|md` (default `json`).
@@ -74,6 +105,22 @@ Root path `@skillstate/cli` exports the command layer and the dashboard.
 - `loadCliSpec(cwd, specPath): ProceduralSpec` — JSON file or `@intercode-ctf`.
 - `loadResumeState(cwd, statePath): SkillState | null`.
 - `stubLlmResponse(): string`.
+
+**Host install (`install.ts`):**
+
+- `autoInstall({ cwd, home, flags }): Promise<number>` — one-shot host install.
+- `uninstall({ cwd, flags }): Promise<number>` — manifest-driven rollback.
+- `detectHost(home): HostId | null` — `opencode | claude | codex` detection.
+- `parseInitArgs(args): InitFlags`, `parseUninstallArgs(args): UninstallFlags`.
+- `buildSkillMd(statePathRel): string`, `buildMcpEntry(stateAbs)`.
+- `addSkillstateMcp(configText, entry)` / `removeSkillstateMcp(configText)` — JSONC surgery.
+- `resolveMcpCommand()`, `defaultHome()`, `HelpRequestedInitError`, `InstallManifest`.
+
+**JSONC (`jsonc.ts`):**
+
+- `parseJsonc(text)`, `stripJsonc(text)` — tolerant parsing (comments, trailing commas).
+- `scanObject`, `findTopLevelObject`, `skipWsAndComments` — string-aware spans.
+- `insertObjectEntry` / `removeObjectEntry` — comment-preserving key splice.
 
 **Dashboard (`dashboard.ts`):**
 

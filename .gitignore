@@ -31,3 +31,8 @@ yarn-error.log*
 # Runtime state artifacts
 state.json
 state.json.*
+
+# skillstate init runtime artifacts (repo root)
+/.skillstate/
+/skill-spec.json
+/skillstate.json

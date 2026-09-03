@@ -6,8 +6,8 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
 [![node](https://img.shields.io/node/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
-[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
+[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
 
@@ -59,6 +59,65 @@ const saved = await adapter.savePluginCode(
   { maxHistoryMessages: 5 },
 );
 ```
+
+## Install into OpenCode (host)
+
+Tested end-to-end against OpenCode ≥ 1.17 (`@opencode-ai/plugin` 1.15.x
+hook contracts). Four steps:
+
+**1. Generate the plugin file** (one-off, or wire into a build script):
+
+```ts
+// scripts/gen-plugin.mjs  (run with: node scripts/gen-plugin.mjs)
+import { OpenCodeAdapter } from '@skillstate/opencode';
+import { writeFileSync } from 'node:fs';
+
+const adapter = new OpenCodeAdapter();
+const statePath = '/abs/path/to/.skillstate.json';
+const code = adapter.generatePluginCode(statePath, { maxHistoryMessages: 3 });
+writeFileSync('/abs/path/to/skillstate.plugin.ts', code);
+```
+
+Put the generated `skillstate.plugin.ts` anywhere stable (absolute path is
+safest), e.g. `<project>/.opencode-runtime/skillstate.plugin.ts`.
+
+**2. Create the initial state file** (`statePath` from step 1), matching your
+spec schema, e.g. for `INTERCODE_CTF_SPEC`:
+
+```json
+{
+  "discovered_flags": [],
+  "tested_hypotheses": [],
+  "active_files": [],
+  "working_dir": "/abs/work/dir",
+  "cmd_summary": "initialized"
+}
+```
+
+**3. Register the plugin in `opencode.jsonc`** — add a `file://` entry to the
+`plugin` array (local paths are resolved by OpenCode and imported directly;
+TypeScript is supported because plugins load under Bun):
+
+```jsonc
+{
+  "plugin": [
+    "@ai-sdk/anthropic",
+    "file:///abs/path/to/skillstate.plugin.ts"
+  ]
+}
+```
+
+**4. Install the SKILL.md** — write `adapter.generateSkillMd(spec, statePath)`
+to `~/.config/opencode/skills/skillstate/SKILL.md` (global) or
+`.opencode/skills/skillstate/SKILL.md` (project). Keep the frontmatter fields
+`name` (must match the folder name) and a one-line `description`; the
+generated frontmatter may need a manual trim to those two fields.
+
+Verify with `opencode debug config` (plugin entry shows under `plugin`) and
+`opencode debug skill` (your skill is listed). Hook notes for OpenCode ≥ 1.17:
+`messages.transform` receives `{ info: Message, parts: Part[] }` entries and
+must mutate `output.messages` **in place**; the plugin injects state as a
+synthetic `{ info, parts }` message.
 
 ## API / Exports
 
