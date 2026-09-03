@@ -77,8 +77,8 @@
   },
   "type": "module",
   "bin": {
-    "skillstate": "./bin/skillstate.js",
-    "skillstate-mcp": "./bin/mcp.js"
+    "skillstate": "bin/skillstate.js",
+    "skillstate-mcp": "bin/mcp.js"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
