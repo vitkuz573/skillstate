@@ -28,11 +28,13 @@ yarn-error.log*
 .vscode/
 *.swp
 
-# Runtime state artifacts
+# skillstate runtime artifacts — NEVER commit (state, reports, host manifest)
 state.json
 state.json.*
-
-# skillstate init runtime artifacts (repo root)
+/.skillstate.json
 /.skillstate/
-/skill-spec.json
 /skillstate.json
+/skillstate-report.json
+
+# NOTE: skill-spec.json is NOT ignored — it is the declarative task config.
+# Committing it is the user's choice (recommended for sharing a procedure).

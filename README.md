@@ -324,6 +324,19 @@ with a timestamped backup), installs the `SKILL.md`, and creates a per-project
 `./.skillstate/` runtime dir with an install manifest. Idempotent: re-running
 never duplicates entries. `skillstate uninstall` rolls everything back.
 
+#### What gets committed vs ignored
+
+| Path | Git | Why |
+| --- | --- | --- |
+| `.skillstate/` (state file + `install-manifest.json`) | **ignored** | runtime state; the manifest records absolute host paths |
+| `.skillstate.json` (default state file) | **ignored** | runtime state envelope, rewritten every step |
+| `skillstate-report.json` | **ignored** | per-run report, overwritten on every `run` |
+| `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
+
+The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
+entry in `opencode.jsonc` / `.mcp.json`, and `SKILL.md` in the host skills
+directory — live in your home directory, outside any git repo.
+
 Manual step-by-step guides (tested on OpenCode 1.17):
 
 - [`packages/opencode` → "Install into OpenCode (host)"](./packages/opencode/README.md#install-into-opencode-host) —

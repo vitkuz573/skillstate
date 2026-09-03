@@ -224,6 +224,8 @@ async function cmdInit(cwd: string, flags: InitFlags): Promise<number> {
     fs.mkdirSync(path.dirname(specAbs), { recursive: true });
     fs.writeFileSync(specAbs, `${JSON.stringify(INTERCODE_CTF_SPEC, null, 2)}\n`, 'utf-8');
     console.log(`Created ${defaults.specPath}`);
+  } else {
+    console.log(`${defaults.specPath} already exists`);
   }
   return autoInstall({ cwd, home: defaultHome(), flags });
 }

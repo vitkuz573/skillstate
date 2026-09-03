@@ -71,9 +71,22 @@ skillstate uninstall         # roll the host install back (manifest-driven)
 
 Flags: `--host <name>`, `--state-path <path>`, `--max-history <n>`,
 `--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
-re-running never duplicates config entries. `skillstate uninstall`
-(`--state-dir <dir>`, `--remove-state`, `--dry-run`) removes exactly what the
-manifest records.
+re-running never duplicates config entries and never overwrites an existing
+spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
+`--dry-run`) removes exactly what the manifest records.
+
+### What gets committed vs ignored
+
+| Path | Git | Why |
+| --- | --- | --- |
+| `.skillstate/` (state file + `install-manifest.json`) | **ignored** | runtime state; the manifest records absolute host paths |
+| `.skillstate.json` (default state file) | **ignored** | runtime state envelope, rewritten every step |
+| `skillstate-report.json` | **ignored** | per-run report, overwritten on every `run` |
+| `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
+
+The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
+entry in `opencode.jsonc` / `.mcp.json`, and `SKILL.md` in the host skills
+directory — live in your home directory, outside any git repo.
 
 Programmatically:
 

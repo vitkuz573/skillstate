@@ -272,10 +272,12 @@ describe('main init', () => {
     const dir = makeTmp();
     await main(['init'], dir);
     const before = fs.readFileSync(path.join(dir, CONFIG_FILE_NAME), 'utf-8');
+    const specBefore = fs.readFileSync(path.join(dir, 'skill-spec.json'), 'utf-8');
     const code = await main(['init'], dir);
     expect(code).toBe(0);
     expect(fs.readFileSync(path.join(dir, CONFIG_FILE_NAME), 'utf-8')).toBe(before);
-    expect(logSpy.mock.calls.join('\n')).toContain('already exists');
+    expect(fs.readFileSync(path.join(dir, 'skill-spec.json'), 'utf-8')).toBe(specBefore);
+    expect(logSpy.mock.calls.join('\n')).toContain('skill-spec.json already exists');
   });
 
   it('creates a missing spec when config already exists', async () => {
