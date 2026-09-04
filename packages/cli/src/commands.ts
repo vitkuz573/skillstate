@@ -22,7 +22,7 @@ import { TokenTracker } from '@skillstate/core';
 import { atomicWriteFile } from '@skillstate/core';
 import { migrate } from '@skillstate/core';
 import { generateReport } from './dashboard.js';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec, SkillState } from '@skillstate/core';
 import {
   autoInstall,
@@ -31,6 +31,7 @@ import {
   HelpRequestedInitError,
   parseInitArgs,
   parseUninstallArgs,
+  resolveInitSpec,
   uninstall,
 } from './install.js';
 import type { InitFlags } from './install.js';
@@ -164,7 +165,7 @@ export function loadCliConfig(cwd: string, configPath?: string): SkillStateConfi
   return mergeConfig(parsed);
 }
 
-/** Load the procedural spec: JSON file at `specPath`, else the builtin CTF spec. */
+/** Load the procedural spec: JSON file at `specPath`, else the builtin neutral spec. */
 export function loadCliSpec(cwd: string, specPath: string): ProceduralSpec {
   if (specPath === '@intercode-ctf') {
     return INTERCODE_CTF_SPEC;
@@ -184,7 +185,7 @@ export function loadCliSpec(cwd: string, specPath: string): ProceduralSpec {
   } catch {
     // Fall through to the builtin below.
   }
-  return INTERCODE_CTF_SPEC;
+  return GENERIC_PROCEDURE_SPEC;
 }
 
 /** Load persisted state for `--resume` (null = fresh start, never throws). */
@@ -206,9 +207,10 @@ async function cmdInit(cwd: string, flags: InitFlags): Promise<number> {
   if (flags.uninstall) {
     return uninstall({ cwd, flags: { removeState: false, dryRun: flags.dryRun } });
   }
+  const spec = resolveInitSpec(cwd, flags);
   if (flags.dryRun) {
     console.log('[dry-run] would create ./skillstate.json + ./skill-spec.json (if missing)');
-    return autoInstall({ cwd, home: defaultHome(), flags });
+    return autoInstall({ cwd, home: defaultHome(), flags, spec });
   }
   const configPath = path.join(cwd, CONFIG_FILE_NAME);
   const defaults = defaultConfig();
@@ -222,12 +224,12 @@ async function cmdInit(cwd: string, flags: InitFlags): Promise<number> {
   const specAbs = resolveInCwd(cwd, defaults.specPath);
   if (fs.existsSync(specAbs) === false) {
     fs.mkdirSync(path.dirname(specAbs), { recursive: true });
-    fs.writeFileSync(specAbs, `${JSON.stringify(INTERCODE_CTF_SPEC, null, 2)}\n`, 'utf-8');
-    console.log(`Created ${defaults.specPath}`);
+    fs.writeFileSync(specAbs, `${JSON.stringify(spec, null, 2)}\n`, 'utf-8');
+    console.log(`Created ${defaults.specPath} (${spec.id})`);
   } else {
     console.log(`${defaults.specPath} already exists`);
   }
-  return autoInstall({ cwd, home: defaultHome(), flags });
+  return autoInstall({ cwd, home: defaultHome(), flags, spec });
 }
 
 async function cmdRun(cwd: string, flags: RunFlags): Promise<number> {

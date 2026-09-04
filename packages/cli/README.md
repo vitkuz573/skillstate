@@ -70,10 +70,20 @@ skillstate uninstall         # roll the host install back (manifest-driven)
    config to edit).
 
 Flags: `--host <name>`, `--state-path <path>`, `--max-history <n>`,
-`--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
+`--spec <path>`, `--example ctf`, `--no-mcp`, `--no-skill`, `--dry-run`,
+`--uninstall`. Init is **idempotent** —
 re-running never duplicates config entries and never overwrites an existing
 spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
 `--dry-run`) removes exactly what the manifest records.
+
+### Which spec does init install?
+
+- **Default: domain-neutral** (`generic-procedure`) — a state-based execution
+  protocol with universal bookkeeping fields (`goal`, `progress`,
+  `next_steps`, `artifacts`, `blockers`, `notes`). No domain assumptions.
+- **`--spec <path>`** — your own task spec (JSON: `id`, `name`, `version`,
+  `instructions`, `schema`). Projects differ; bring yours.
+- **`--example ctf`** — the paper's InterCode CTF demo, available explicitly.
 
 ### What gets committed vs ignored
 

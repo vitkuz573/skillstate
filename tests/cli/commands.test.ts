@@ -17,7 +17,7 @@ import {
   CLI_USAGE,
 } from '@skillstate/cli';
 import { CONFIG_FILE_NAME } from '@skillstate/core';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const BIN = path.join(REPO_ROOT, 'packages', 'cli', 'bin', 'skillstate.js');
@@ -187,49 +187,49 @@ describe('loadCliSpec', () => {
   });
 
   it('falls back to builtin when the file is missing', () => {
-    expect(loadCliSpec(makeTmp(), 'missing.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(makeTmp(), 'missing.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin on corrupt JSON', () => {
     const dir = makeTmp();
     fs.writeFileSync(path.join(dir, 'bad.json'), '{oops', 'utf-8');
-    expect(loadCliSpec(dir, 'bad.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 'bad.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when id is not a string', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), { ...INTERCODE_CTF_SPEC, id: 42 });
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when name is not a string', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), { ...INTERCODE_CTF_SPEC, name: 42 });
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when instructions are not a string', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), { ...INTERCODE_CTF_SPEC, instructions: 42 });
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when schema is not a record', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), { ...INTERCODE_CTF_SPEC, schema: [] });
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when version is not a string', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), { ...INTERCODE_CTF_SPEC, version: 2 });
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('falls back to builtin when the file holds a primitive', () => {
     const dir = makeTmp();
     writeJson(path.join(dir, 's.json'), 42);
-    expect(loadCliSpec(dir, 's.json')).toBe(INTERCODE_CTF_SPEC);
+    expect(loadCliSpec(dir, 's.json')).toBe(GENERIC_PROCEDURE_SPEC);
   });
 });
 

@@ -324,6 +324,11 @@ with a timestamped backup), installs the `SKILL.md`, and creates a per-project
 `./.skillstate/` runtime dir with an install manifest. Idempotent: re-running
 never duplicates entries. `skillstate uninstall` rolls everything back.
 
+The installed skill is **domain-neutral** by default (a state-based execution
+protocol — no task-specific assumptions). Bring your own procedure with
+`skillstate init --spec ./my-task.json`; the paper's InterCode CTF demo is
+available via `--example ctf`.
+
 #### What gets committed vs ignored
 
 | Path | Git | Why |

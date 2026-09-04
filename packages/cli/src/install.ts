@@ -18,7 +18,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { atomicWriteFile } from '@skillstate/core';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import type { ProceduralSpec } from '@skillstate/core';
 import { OpenCodeAdapter } from '@skillstate/opencode';
 import { findTopLevelObject, insertObjectEntry, parseJsonc, removeObjectEntry } from './jsonc.js';
 import { resolveInCwd } from './commands.js';
@@ -46,6 +47,10 @@ export interface InitFlags {
   statePath?: string;
   /** Non-system messages kept by the plugin (`--max-history`, default 3). */
   maxHistory?: number;
+  /** User spec file (`--spec <path>`); overrides the default spec. */
+  specPath?: string;
+  /** Builtin demo spec (`--example ctf` → InterCode CTF). */
+  example?: 'ctf';
   /** Skip MCP server registration (`--no-mcp`). */
   noMcp: boolean;
   /** Skip SKILL.md installation (`--no-skill`). */
@@ -158,6 +163,18 @@ export function parseInitArgs(args: string[]): InitFlags {
         throw new Error(`Invalid --max-history (want a positive integer)\n${CLI_USAGE_INSTALL}`);
       }
       flags.maxHistory = parsed;
+    } else if (arg === '--spec' || arg.startsWith('--spec=')) {
+      const value = arg === '--spec' ? args[++i] : arg.slice('--spec='.length);
+      if (value === undefined || value.length === 0) {
+        throw new Error(`Missing value for --spec\n${CLI_USAGE_INSTALL}`);
+      }
+      flags.specPath = value;
+    } else if (arg === '--example' || arg.startsWith('--example=')) {
+      const value = arg === '--example' ? args[++i] : arg.slice('--example='.length);
+      if (value !== 'ctf') {
+        throw new Error(`Invalid --example (want ctf)\n${CLI_USAGE_INSTALL}`);
+      }
+      flags.example = value;
     } else {
       throw new Error(`Unknown flag for init: ${arg}\n${CLI_USAGE_INSTALL}`);
     }
@@ -250,9 +267,50 @@ function skillDirFor(host: HostId, home: string): string {
   return path.join(home, '.codex', 'skills', 'skillstate');
 }
 
+/**
+ * Spec resolution for `init`: `--spec <path>` wins (validated), then
+ * `--example ctf`, then the neutral domain-agnostic default. Never defaults
+ * to a domain-specific example.
+ */
+export function resolveInitSpec(cwd: string, flags: InitFlags): ProceduralSpec {
+  if (flags.specPath !== undefined) {
+    const abs = resolveInCwd(cwd, flags.specPath);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(abs, 'utf-8');
+    } catch {
+      throw new Error(`Spec file not found: ${flags.specPath}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      throw new Error(`Spec file is not valid JSON: ${flags.specPath}`);
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      typeof (parsed as Record<string, unknown>)['id'] !== 'string' ||
+      typeof (parsed as Record<string, unknown>)['name'] !== 'string' ||
+      typeof (parsed as Record<string, unknown>)['instructions'] !== 'string' ||
+      typeof (parsed as Record<string, unknown>)['schema'] !== 'object' ||
+      (parsed as Record<string, unknown>)['schema'] === null
+    ) {
+      throw new Error(
+        `Invalid spec ${flags.specPath}: need { id: string, name: string, instructions: string, schema: object }`,
+      );
+    }
+    return parsed as ProceduralSpec;
+  }
+  if (flags.example === 'ctf') {
+    return INTERCODE_CTF_SPEC;
+  }
+  return GENERIC_PROCEDURE_SPEC;
+}
+
 /** SKILL.md with a short frontmatter description + the adapter-generated body. */
-export function buildSkillMd(statePathRel: string): string {
-  const generated = new OpenCodeAdapter().generateSkillMd(INTERCODE_CTF_SPEC, statePathRel);
+export function buildSkillMd(statePathRel: string, spec: ProceduralSpec): string {
+  const generated = new OpenCodeAdapter().generateSkillMd(spec, statePathRel);
   const body = generated.slice(generated.indexOf('\n---', 3) + '\n---\n'.length);
   return `---
 name: skillstate
@@ -325,6 +383,8 @@ export interface InstallOptions {
   cwd: string;
   home: string;
   flags: InitFlags;
+  /** Spec used for the SKILL.md body; defaults to the flags-driven choice. */
+  spec?: ProceduralSpec;
 }
 
 /**
@@ -345,6 +405,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     console.log(dry ? `[dry-run] ${line}` : line);
   };
   const maxHistory = flags.maxHistory ?? 3;
+  const spec = options.spec ?? resolveInitSpec(cwd, flags);
 
   const stateDir = path.join(cwd, STATE_DIR_NAME);
   const stateAbs =
@@ -379,7 +440,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   if (!flags.noSkill) {
     const skillAbs = path.join(skillDirFor(host, home), 'SKILL.md');
     if (!dry) {
-      await atomicWriteFile(skillAbs, buildSkillMd(relativeStatePath(cwd, stateAbs)));
+      await atomicWriteFile(skillAbs, buildSkillMd(relativeStatePath(cwd, stateAbs), spec));
     }
     say(`skill:    ${skillAbs}`);
     manifest.skillPath = skillAbs;

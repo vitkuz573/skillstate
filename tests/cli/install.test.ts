@@ -14,6 +14,7 @@ import {
   removeSkillstateMcp,
   parseInitArgs,
   parseUninstallArgs,
+  resolveInitSpec,
   resolveMcpCommandWith,
   uninstall,
   HelpRequestedInitError,
@@ -21,6 +22,7 @@ import {
   MANIFEST_FILE_NAME,
 } from '@skillstate/cli';
 import type { InitFlags, InstallManifest } from '@skillstate/cli';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 let tmpDirs: string[] = [];
 let logSpy: ReturnType<typeof vi.spyOn>;
@@ -187,6 +189,17 @@ describe('parseInitArgs', () => {
       auto: false,
       uninstall: false,
     });
+    expect(parseInitArgs(['--spec', 'my.json', '--example', 'ctf'])).toEqual({
+      specPath: 'my.json',
+      example: 'ctf',
+      noMcp: false,
+      noSkill: false,
+      dryRun: false,
+      auto: false,
+      uninstall: false,
+    });
+    expect(parseInitArgs(['--spec=my.json', '--example=ctf']).specPath).toBe('my.json');
+    expect(parseInitArgs(['--spec=my.json', '--example=ctf']).example).toBe('ctf');
   });
 
   it('throws usage on invalid host, bad max-history, and missing values', () => {
@@ -199,6 +212,10 @@ describe('parseInitArgs', () => {
     expect(() => parseInitArgs(['--max-history'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--state-path'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--state-path='])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInitArgs(['--spec'])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInitArgs(['--spec='])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInitArgs(['--example', 'todo'])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInitArgs(['--example='])).toThrow(CLI_USAGE_INSTALL);
   });
 
   it('throws usage on unknown flags and throws help errors', () => {
@@ -234,11 +251,18 @@ describe('parseUninstallArgs', () => {
 
 describe('buildSkillMd / buildMcpEntry', () => {
   it('builds a SKILL.md with the required frontmatter', () => {
-    const md = buildSkillMd('./.skillstate/skillstate.json');
+    const md = buildSkillMd('./.skillstate/skillstate.json', GENERIC_PROCEDURE_SPEC);
     expect(md.startsWith('---\n')).toBe(true);
     expect(md).toContain('\nname: skillstate\n');
     expect(md).toContain('description: "');
     expect(md).toContain('## Process');
+  });
+
+  it('builds a domain-neutral skill by default (no CTF)', () => {
+    const md = buildSkillMd('./s.json', GENERIC_PROCEDURE_SPEC);
+    expect(md).not.toContain('CTF');
+    expect(md).not.toContain('flag{');
+    expect(md).toContain('State-based Execution');
   });
 
   it('builds an mcp entry shaped like opencode local servers', () => {
@@ -249,6 +273,53 @@ describe('buildSkillMd / buildMcpEntry', () => {
       enabled: true,
       environment: { SKILLSTATE_STATE_PATH: '/abs/state.json' },
     });
+  });
+});
+
+describe('resolveInitSpec', () => {
+  it('defaults to the neutral generic spec (never CTF)', () => {
+    expect(resolveInitSpec(makeTmp(), defaultFlags())).toBe(GENERIC_PROCEDURE_SPEC);
+  });
+
+  it('uses the CTF demo only when explicitly requested', () => {
+    expect(resolveInitSpec(makeTmp(), { ...defaultFlags(), example: 'ctf' })).toBe(
+      INTERCODE_CTF_SPEC,
+    );
+  });
+
+  it('loads a valid user spec via --spec', () => {
+    const dir = makeTmp();
+    const custom = {
+      id: 'my-task',
+      name: 'My Task',
+      version: '1.0.0',
+      instructions: 'Do my task.',
+      schema: { step: { type: 'string', default: '', description: 'x' } },
+    };
+    fs.writeFileSync(path.join(dir, 'my.json'), JSON.stringify(custom));
+    expect(resolveInitSpec(dir, { ...defaultFlags(), specPath: 'my.json' })).toEqual(custom);
+  });
+
+  it('throws a clear error for a missing --spec file', () => {
+    expect(() => resolveInitSpec(makeTmp(), { ...defaultFlags(), specPath: 'nope.json' })).toThrow(
+      /Spec file not found/,
+    );
+  });
+
+  it('throws a clear error for invalid JSON in --spec', () => {
+    const dir = makeTmp();
+    fs.writeFileSync(path.join(dir, 'bad.json'), '{nope');
+    expect(() => resolveInitSpec(dir, { ...defaultFlags(), specPath: 'bad.json' })).toThrow(
+      /not valid JSON/,
+    );
+  });
+
+  it('throws a clear error for a structurally invalid --spec', () => {
+    const dir = makeTmp();
+    fs.writeFileSync(path.join(dir, 'bad.json'), JSON.stringify({ id: 'x' }));
+    expect(() => resolveInitSpec(dir, { ...defaultFlags(), specPath: 'bad.json' })).toThrow(
+      /Invalid spec/,
+    );
   });
 });
 
