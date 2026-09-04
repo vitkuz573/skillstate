@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/mcp",
-  "version": "2.0.7",
+  "version": "2.1.0",
   "description": "Zero-dependency MCP server + adapter for the skillstate runtime.",
   "type": "module",
   "main": "dist/index.js",
