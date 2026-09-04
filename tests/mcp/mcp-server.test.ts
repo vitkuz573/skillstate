@@ -179,6 +179,9 @@ describe('MCP JSON-RPC handshake', () => {
     const tools = (await parseResult(call(server, 'tools/list'))).result
       ?.tools as Array<{ name: string }>;
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'agent.list',
+      'agent.merge',
+      'agent.read',
       'spec.get',
       'spec.next',
       'state.checkpoint',
@@ -200,6 +203,7 @@ describe('MCP JSON-RPC handshake', () => {
     expect(byName.get('state.patch')).toEqual({ readOnlyHint: false, destructiveHint: false });
     expect(byName.get('state.checkpoint')).toEqual({ readOnlyHint: false, destructiveHint: false });
     expect(byName.get('state.rollback')).toEqual({ readOnlyHint: false, destructiveHint: true });
+    expect(byName.get('agent.merge')).toEqual({ readOnlyHint: false, destructiveHint: false });
     for (const readOnly of [
       'state.get',
       'state.validate',
@@ -208,6 +212,8 @@ describe('MCP JSON-RPC handshake', () => {
       'state.metrics',
       'spec.get',
       'spec.next',
+      'agent.list',
+      'agent.read',
     ]) {
       expect(byName.get(readOnly)).toEqual({ readOnlyHint: true, destructiveHint: false });
     }
@@ -1192,5 +1198,369 @@ describe('MCP launch', () => {
     expect(resolveStatePathForCwd(home, home)).toBe(
       path.join(path.resolve(home), '.skillstate', 'global', 'skillstate.json'),
     );
+  });
+});
+
+// ─── agent-scoped state ({ agent } arg + SKILLSTATE_AGENT_ID) ───────────────
+
+describe('MCP agent-scoped state', () => {
+  function withCwd(dir: string): () => void {
+    const prev = process.cwd();
+    process.chdir(dir);
+    return () => process.chdir(prev);
+  }
+
+  function streams(): { input: PassThrough; output: PassThrough } {
+    return { input: new PassThrough(), output: new PassThrough() };
+  }
+
+  it('state.get falls back to schema defaults for a missing agent scope', async () => {
+    const server = makeServer();
+    const state = toolJson(
+      (await toolCall(server, 'state.get', { agent: 'worker-1' })).result,
+    );
+    expect(state.working_dir).toBe('/');
+  });
+
+  it('state.patch with { agent } writes agents/<id>/skillstate.json, not the main file', async () => {
+    const server = makeServer();
+    const payload = toolJson(
+      (
+        await toolCall(server, 'state.patch', {
+          agent: 'worker-1',
+          patch: { working_dir: '/agent-scoped' },
+        })
+      ).result,
+    );
+    expect((payload.state as AnyRecord).working_dir).toBe('/agent-scoped');
+    const o = (server as unknown as ServerOptionsShape).options;
+    const agentFile = path.join(o.root, 'agents', 'worker-1', o.name);
+    const envelope = JSON.parse(fs.readFileSync(agentFile, 'utf-8')) as AnyRecord;
+    expect((envelope.state as AnyRecord).working_dir).toBe('/agent-scoped');
+    expect(fs.existsSync(statePath(server))).toBe(false);
+  });
+
+  it('agent scopes are isolated between agents', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/w1' } });
+    await toolCall(server, 'state.patch', { agent: 'w2', patch: { working_dir: '/w2' } });
+    expect(toolJson((await toolCall(server, 'state.get', { agent: 'w1' })).result).working_dir).toBe('/w1');
+    expect(toolJson((await toolCall(server, 'state.get', { agent: 'w2' })).result).working_dir).toBe('/w2');
+    expect(toolJson((await toolCall(server, 'state.get', {})).result).working_dir).toBe('/');
+  });
+
+  it('agent ids are sanitized ([A-Za-z0-9_-], <=64)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w/.././x', patch: { working_dir: '/ok' } });
+    const o = (server as unknown as ServerOptionsShape).options;
+    const state = toolJson((await toolCall(server, 'state.get', { agent: 'w-x' })).result);
+    expect(state.working_dir).toBe('/ok');
+    expect(fs.existsSync(path.join(o.root, 'agents', 'w-x', o.name))).toBe(true);
+  });
+
+  it('an agent id that sanitizes to empty is rejected', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.patch', {
+      agent: '***',
+      patch: { working_dir: '/x' },
+    });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Invalid agent id: ***');
+  });
+
+  it('a server-level default agent (constructor option) scopes every state tool', async () => {
+    const dir = makeTmp();
+    const server = new McpServer({
+      spec: makeSpec(),
+      root: dir,
+      name: '.skillstate.json',
+      agent: 'sub-agent',
+    });
+    servers.push(server);
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/default-agent' } });
+    const envelope = JSON.parse(
+      fs.readFileSync(path.join(dir, 'agents', 'sub-agent', '.skillstate.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect((envelope.state as AnyRecord).working_dir).toBe('/default-agent');
+    expect(fs.existsSync(path.join(dir, '.skillstate.json'))).toBe(false);
+  });
+
+  it('a server-level default agent that sanitizes to empty is rejected at construction', () => {
+    const dir = makeTmp();
+    expect(
+      () => new McpServer({ spec: makeSpec(), root: dir, name: '.skillstate.json', agent: '***' }),
+    ).toThrow('Invalid agent id: ***');
+  });
+
+  it('launch honours the SKILLSTATE_AGENT_ID env', async () => {
+    const project = makeTmp();
+    const restore = withCwd(project);
+    const oldAgent = process.env['SKILLSTATE_AGENT_ID'];
+    process.env['SKILLSTATE_AGENT_ID'] = 'env-agent';
+    try {
+      const { input, output } = streams();
+      const server = await launch({ spec: makeSpec(), input, output });
+      await toolCall(server, 'state.patch', { patch: { working_dir: '/from-env' } });
+      const envelope = JSON.parse(
+        fs.readFileSync(
+          path.join(project, '.skillstate', 'agents', 'env-agent', 'skillstate.json'),
+          'utf-8',
+        ),
+      ) as AnyRecord;
+      expect((envelope.state as AnyRecord).working_dir).toBe('/from-env');
+    } finally {
+      restore();
+      if (oldAgent === undefined) {
+        delete process.env['SKILLSTATE_AGENT_ID'];
+      } else {
+        process.env['SKILLSTATE_AGENT_ID'] = oldAgent;
+      }
+    }
+  });
+});
+
+// ─── diff baseline ON DISK (cross-process consistent) ───────────────────────
+
+describe('MCP state.diff — baseline persisted to disk', () => {
+  it('writes .diff-baseline.json next to the state file on the first patch', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/moved' } });
+    const baselineFile = path.join(
+      path.dirname(statePath(server)),
+      '.diff-baseline.json',
+    );
+    expect(fs.existsSync(baselineFile)).toBe(true);
+    const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf-8')) as AnyRecord;
+    expect(baseline.working_dir).toBe('/');
+  });
+
+  it('keeps the since-last-look semantics across SEPARATE server instances', async () => {
+    const dir = makeTmp();
+    const serverA = makeServer({ root: dir });
+    const serverB = makeServer({ root: dir });
+    await toolCall(serverA, 'state.patch', { patch: { working_dir: '/from-a', cmd_summary: 'a' } });
+    const diffB = toolJson((await toolCall(serverB, 'state.diff', {})).result);
+    expect(diffB.changes).toEqual({
+      added: [],
+      updated: ['working_dir', 'cmd_summary'],
+      deleted: [],
+    });
+    const diffB2 = toolJson((await toolCall(serverB, 'state.diff', {})).result);
+    expect(diffB2.changes).toEqual({ added: [], updated: [], deleted: [] });
+  });
+
+  it('the second instance sees changes made by the first after its own look', async () => {
+    const dir = makeTmp();
+    const serverA = makeServer({ root: dir });
+    const serverB = makeServer({ root: dir });
+    await toolCall(serverA, 'state.diff', {});
+    await toolCall(serverB, 'state.diff', {});
+    await toolCall(serverB, 'state.patch', { patch: { cmd_summary: 'from-b' } });
+    const diffA = toolJson((await toolCall(serverA, 'state.diff', {})).result);
+    expect(diffA.changes).toEqual({
+      added: [],
+      updated: ['cmd_summary'],
+      deleted: [],
+    });
+  });
+
+  it('tolerates a corrupt baseline file (treated as absent)', async () => {
+    const server = makeServer();
+    const baselineFile = path.join(path.dirname(statePath(server)), '.diff-baseline.json');
+    fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
+    fs.writeFileSync(baselineFile, '{corrupt');
+    const payload = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: [] });
+    expect(JSON.parse(fs.readFileSync(baselineFile, 'utf-8'))).toBeDefined();
+  });
+
+  it('tolerates a non-object baseline payload', async () => {
+    const server = makeServer();
+    const baselineFile = path.join(path.dirname(statePath(server)), '.diff-baseline.json');
+    fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
+    fs.writeFileSync(baselineFile, '[1,2]');
+    const payload = toolJson((await toolCall(server, 'state.diff', { full: true })).result);
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: [] });
+    expect(payload.before).toEqual(payload.after);
+  });
+
+  it('agent scopes get their OWN baseline file inside agents/<id>/', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/w1' } });
+    const o = (server as unknown as ServerOptionsShape).options;
+    const baselineFile = path.join(o.root, 'agents', 'w1', '.diff-baseline.json');
+    expect(fs.existsSync(baselineFile)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(baselineFile, 'utf-8')).working_dir).toBe('/');
+  });
+});
+
+// ─── agent.list / agent.read / agent.merge ─────────────────────────────────
+
+describe('MCP agent.list', () => {
+  it('returns an empty list when no agents directory exists', async () => {
+    const server = makeServer();
+    const payload = toolJson((await toolCall(server, 'agent.list', {})).result);
+    expect(payload).toEqual({ agents: [] });
+  });
+
+  it('lists agent directories with exists/summary/lastModified and skips junk', async () => {
+    const server = makeServer();
+    const o = (server as unknown as ServerOptionsShape).options;
+    const agentsDir = path.join(o.root, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'w-1'), { recursive: true });
+    fs.mkdirSync(path.join(agentsDir, 'w-2'), { recursive: true });
+    fs.mkdirSync(agentsDir + '/not-a-dir.json', { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'notes.txt'), 'x');
+    fs.writeFileSync(
+      path.join(agentsDir, 'w-1', o.name),
+      JSON.stringify({ version: 1, state: { working_dir: '/w1' } }),
+    );
+    const payload = toolJson((await toolCall(server, 'agent.list', {})).result);
+    const agents = payload.agents as Array<AnyRecord>;
+    expect(agents.map((a) => a.id)).toEqual(['w-1', 'w-2']);
+    expect(agents[0]!.exists).toBe(true);
+    expect(agents[0]!.statePath).toBe(path.join(agentsDir, 'w-1', o.name));
+    expect(agents[0]!.summary).toEqual({ keys: ['working_dir'], size_bytes: expect.any(Number) });
+    expect(typeof agents[0]!.lastModified).toBe('string');
+    expect(agents[1]!.exists).toBe(false);
+    expect(agents[1]!.lastModified).toBeNull();
+    expect(agents[1]!.summary).toBeUndefined();
+  });
+});
+
+describe('MCP agent.read', () => {
+  it('requires the agent argument', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'agent.read', {});
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('agent is required');
+  });
+
+  it('rejects an agent id that sanitizes to empty', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'agent.read', { agent: '///' });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Invalid agent id: ///');
+  });
+
+  it('returns the sub-agent state read-only (main state untouched)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/w1', cmd_summary: 'busy' } });
+    const payload = toolJson((await toolCall(server, 'agent.read', { agent: 'w1' })).result);
+    expect(payload.agent).toBe('w1');
+    expect((payload.state as AnyRecord).working_dir).toBe('/w1');
+    expect(toolJson((await toolCall(server, 'state.get', {})).result).working_dir).toBe('/');
+  });
+});
+
+describe('MCP agent.merge', () => {
+  it('requires the agent argument', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'agent.merge', {});
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('agent is required');
+  });
+
+  it('keeps the main value for conflicting scalars (default keep: main)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/main' } });
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/sub', cmd_summary: 'from-sub' } });
+    const payload = toolJson(
+      (await toolCall(server, 'agent.merge', { agent: 'w1' })).result,
+    );
+    expect(payload.keep).toBe('main');
+    expect((payload.state as AnyRecord).working_dir).toBe('/main');
+    expect((payload.state as AnyRecord).cmd_summary).toBe('from-sub');
+    expect(payload.changes).toEqual({ added: [], updated: ['cmd_summary'], deleted: [] });
+  });
+
+  it('keep: sub lets the sub-agent win conflicts', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/main' } });
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/sub' } });
+    const payload = toolJson(
+      (await toolCall(server, 'agent.merge', { agent: 'w1', keep: 'sub' })).result,
+    );
+    expect(payload.keep).toBe('sub');
+    expect((payload.state as AnyRecord).working_dir).toBe('/sub');
+  });
+
+  it('merges nested objects recursively (deletions stay local to the sub copy)', async () => {
+    const server = makeServer({ spec: KITCHEN_SINK_SPEC });
+    await toolCall(server, 'state.patch', { patch: { meta: { keep: 1, drop: 2 } } });
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { meta: { add: 3 }, done: true } });
+    const payload = toolJson((await toolCall(server, 'agent.merge', { agent: 'w1' })).result);
+    expect((payload.state as AnyRecord).meta).toEqual({ keep: 1, drop: 2, add: 3 });
+    expect((payload.state as AnyRecord).done).toBe(true);
+  });
+
+  it('a fully main-resolved nested conflict leaves the nested object untouched', async () => {
+    const server = makeServer({ spec: KITCHEN_SINK_SPEC });
+    await toolCall(server, 'state.patch', { patch: { meta: { a: 1 } } });
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { meta: { a: 2 } } });
+    const payload = toolJson((await toolCall(server, 'agent.merge', { agent: 'w1' })).result);
+    expect((payload.state as AnyRecord).meta).toEqual({ a: 1 });
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: [] });
+  });
+
+  it('agent.read honours { root, name } overrides inside the agent scope', async () => {
+    const server = makeServer();
+    const root = (server as unknown as ServerOptionsShape).options.root;
+    const agentDir = path.join(root, 'agents', 'w-alt');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, 'alt.json'),
+      JSON.stringify({ version: 1, state: { working_dir: '/alt-agent' } }),
+    );
+    const payload = toolJson(
+      (
+        await toolCall(server, 'agent.read', {
+          agent: 'w-alt',
+          root,
+          name: 'alt.json',
+        })
+      ).result,
+    );
+    expect((payload.state as AnyRecord).working_dir).toBe('/alt-agent');
+    expect(payload.statePath).toBe(path.join(agentDir, 'alt.json'));
+  });
+
+  it('skips sub keys that equal their schema default (the sub agent never set them)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { cmd_summary: 'main-only' } });
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/w1' } });
+    const payload = toolJson((await toolCall(server, 'agent.merge', { agent: 'w1' })).result);
+    expect((payload.state as AnyRecord).cmd_summary).toBe('main-only');
+    expect(payload.changes).toEqual({ added: [], updated: ['working_dir'], deleted: [] });
+  });
+
+  it('marks the sub state with mergedAt and does NOT delete it', async () => {
+    const server = makeServer();
+    const o = (server as unknown as ServerOptionsShape).options;
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { cmd_summary: 'work' } });
+    await toolCall(server, 'agent.merge', { agent: 'w1' });
+    const subFile = path.join(o.root, 'agents', 'w1', o.name);
+    const sub = JSON.parse(fs.readFileSync(subFile, 'utf-8')) as AnyRecord;
+    expect(typeof (sub.state as AnyRecord).mergedAt).toBe('string');
+    expect((sub.state as AnyRecord).cmd_summary).toBe('work');
+  });
+
+  it('serializes the merge with concurrent patches (cross-process lock)', async () => {
+    const server = makeServer();
+    await Promise.all([
+      toolCall(server, 'agent.merge', { agent: 'w-merge' }),
+      toolCall(server, 'state.patch', { patch: { working_dir: '/during-merge' } }),
+    ]);
+    const state = toolJson((await toolCall(server, 'state.get', {})).result);
+    expect(state.working_dir).toBe('/during-merge');
+  });
+
+  it('merging into the main state establishes the diff baseline when absent', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.diff', {});
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { cmd_summary: 'x' } });
+    await toolCall(server, 'agent.merge', { agent: 'w1' });
+    const diff = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(diff.changes).toEqual({ added: [], updated: ['cmd_summary'], deleted: [] });
   });
 });

@@ -16,14 +16,25 @@
  *   `output.context` so the compaction summary preserves it.
  * - `tool.execute.after` — the tool response is `output.output`; a fenced
  *   ```json `state_patch` block is merged (paper ⊕: null deletes) and saved.
+ *
+ * AGENT-SCOPED STATE: the opencode hook inputs carry the session id
+ * (`input.sessionID`; message envelopes carry `info.sessionID`), so every
+ * hook scopes the state file to `<cwd>/.skillstate/agents/<session>/` —
+ * parallel opencode sessions (sub-agents) never last-writer-win over the
+ * main state. When no session id is available the `'default'` agent is
+ * used (the plugin trims the history of one session context). Writes go
+ * through the core cross-process sync lock (`lockStateWrite`) so a
+ * session state file is never interleaved between processes.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   findFencedPatch,
+  lockStateWrite,
   mergePatch,
   readStateEnvelope,
+  resolveAgentIdFromSession,
   resolveHostStateForCwd,
   saveStateEnvelope,
 } from '@skillstate/core';
@@ -40,12 +51,16 @@ export * from './plugin-types.js';
  * (`cwd` of the current opencode session) — the core single source of
  * truth (`resolveHostStateForCwd`): `<cwd>/.skillstate/skillstate.json`,
  * or the global bucket `<home>/.skillstate/global/skillstate.json` when
- * cwd equals home. Pure path arithmetic via `path.resolve`, no filesystem
- * access.
+ * cwd equals home. A non-empty `agentId` scopes the file under
+ * `<bucket>/agents/<agentId>/skillstate.json`. Pure path arithmetic via
+ * `path.resolve`, no filesystem access.
  */
 export { resolveHostStateForCwd as resolveStatePathForCwd };
 
 export { mergePatch };
+
+/** Agent scope used by the plugin when no session id is available. */
+export const PLUGIN_DEFAULT_AGENT_ID = 'default';
 
 /** Options for {@link createSkillStatePlugin}. */
 export interface SkillStatePluginOptions {
@@ -66,16 +81,46 @@ export function readSkillState(statePath: string): Record<string, unknown> {
 /**
  * Persist the state file (best-effort: read-only environments are ignored).
  * Creates the parent directory when missing (the per-project resolver may
- * target a fresh `<cwd>/.skillstate/`). Writes the `{ version: 1, state }`
- * envelope so `migrate()`/runtime resume read the same file — via the core
- * hook-runtime {@link saveStateEnvelope}.
+ * target a fresh `<cwd>/.skillstate/agents/<id>/`). Writes the
+ * `{ version: 1, state }` envelope so `migrate()`/runtime resume read the
+ * same file — via the core hook-runtime {@link saveStateEnvelope} — under
+ * the cross-process sync lock {@link lockStateWrite} (2-3 parallel agent
+ * processes never interleave state writes).
  */
 export function saveSkillState(statePath: string, state: Record<string, unknown>): void {
   try {
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    saveStateEnvelope(statePath, state, (p, data) => fs.writeFileSync(p, data));
+    lockStateWrite(
+      statePath,
+      fs,
+      () => saveStateEnvelope(statePath, state, (p, data) => fs.writeFileSync(p, data)),
+    );
   } catch {
     // Best-effort: read-only environments or permission issues.
+  }
+}
+
+/**
+ * Atomic READ-MERGE-WRITE of one `state_patch` (paper ⊕: null deletes):
+ * the whole critical section runs inside {@link lockStateWrite}, so two
+ * concurrent writers apply BOTH patches instead of racing between the
+ * read and the write. Best-effort: lock contention or unwritable state
+ * files are swallowed — the tool flow never breaks.
+ */
+export function mergeSkillState(
+  statePath: string,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    let merged: Record<string, unknown> = {};
+    lockStateWrite(statePath, fs, () => {
+      merged = mergePatch(readSkillState(statePath), patch);
+      saveStateEnvelope(statePath, merged, (p, data) => fs.writeFileSync(p, data));
+    });
+    return merged;
+  } catch {
+    return readSkillState(statePath);
   }
 }
 
@@ -91,6 +136,29 @@ export function extractPatch(response: string): Record<string, unknown> | null {
   return 'patch' in result ? result.patch : null;
 }
 
+/**
+ * Agent id for an opencode hook call: the 8-char session prefix from
+ * `input.sessionID` when the hook carries it, else the first non-synthetic
+ * message's `info.sessionID` (the transform hook input is empty — the
+ * session lives on the message envelopes), else `'default'` (the plugin
+ * trims the history of one session context).
+ */
+export function pluginAgentId(
+  input: { sessionID?: unknown },
+  messages?: OpenCodeMessage[],
+): string {
+  const direct = resolveAgentIdFromSession(input?.sessionID);
+  if (direct.length > 0) return direct;
+  const fromMessages = (messages ?? []).find(
+    (m) =>
+      typeof m.info?.sessionID === 'string' &&
+      m.info.sessionID.length > 0 &&
+      m.info.sessionID !== 'skillstate',
+  );
+  const indirect = resolveAgentIdFromSession(fromMessages?.info.sessionID);
+  return indirect.length > 0 ? indirect : PLUGIN_DEFAULT_AGENT_ID;
+}
+
 /** Synthetic message ids for the injected state carrier. */
 const STATE_MESSAGE_ID = 'skillstate-state-inject';
 
@@ -100,12 +168,14 @@ const STATE_MESSAGE_ID = 'skillstate-state-inject';
  *
  * State resolution is ALWAYS per-project: the state file path is computed
  * from the session cwd on EVERY hook call via
- * `resolveStatePathForCwd(process.cwd(), os.homedir())` — each project gets
- * its own `<cwd>/.skillstate/skillstate.json`, and a session launched from
- * `$HOME` uses the global bucket.
+ * `resolveStatePathForCwd(process.cwd(), os.homedir(), agentId)` — each
+ * project gets its own `<cwd>/.skillstate/`, each session (sub-agent) its
+ * isolated `agents/<session>/` copy, and a session launched from `$HOME`
+ * uses the global bucket.
  */
 export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): SkillStatePlugin {
-  const resolvePath = (): string => resolveHostStateForCwd(process.cwd(), os.homedir());
+  const resolvePath = (agentId: string): string =>
+    resolveHostStateForCwd(process.cwd(), os.homedir(), agentId);
   const maxHistory = options.maxHistoryMessages ?? 3;
 
   return async () => {
@@ -116,10 +186,11 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       // synthetic state element. Old messages are DROPPED from the prompt,
       // not just hidden.
       'experimental.chat.messages.transform': async (
-        _input,
+        input,
         output,
       ): Promise<void> => {
-        const state = readSkillState(resolvePath());
+        const agentId = pluginAgentId(input as { sessionID?: unknown }, output.messages);
+        const state = readSkillState(resolvePath(agentId));
         const messages = output.messages;
         const systemMessages = messages.filter((m) => m.info.role === 'system');
         const trimmed = messages
@@ -159,11 +230,9 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       // ── Compaction context injection ───────────────────────────────────
       // Before compaction, inject the current state into the context so the
       // compaction summary preserves state even after history is compressed.
-      'experimental.session.compacting': async (
-        _input,
-        output,
-      ): Promise<void> => {
-        const state = readSkillState(resolvePath());
+      'experimental.session.compacting': async (input, output): Promise<void> => {
+        const agentId = pluginAgentId(input);
+        const state = readSkillState(resolvePath(agentId));
         if (!Array.isArray(output.context)) {
           output.context = [];
         }
@@ -172,14 +241,15 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
 
       // ── State persistence from LLM responses ───────────────────────────
       // After tool execution, extract state_patch from the tool response
-      // (output.output), merge it, and save to disk.
-      'tool.execute.after': async (_input, output): Promise<void> => {
+      // (output.output), and atomically merge it into the session-scoped
+      // state (read + merge + write all inside the cross-process lock).
+      'tool.execute.after': async (input, output): Promise<void> => {
         const response = output.output ?? '';
         if (typeof response !== 'string') return;
-        const statePath = resolvePath();
         const patch = extractPatch(response);
         if (patch) {
-          saveSkillState(statePath, mergePatch(readSkillState(statePath), patch));
+          const agentId = pluginAgentId(input);
+          mergeSkillState(resolvePath(agentId), patch);
         }
       },
     } satisfies SkillStateHooks;

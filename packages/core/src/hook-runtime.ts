@@ -31,10 +31,38 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 /**
+ * Agent-id sanitization: keep `[A-Za-z0-9_-]` runs, collapse everything
+ * else into single `-`, trim edge dashes, cap at 64 chars. Garbage input
+ * sanitizes to `''` — callers treat that as "no agent" (the main state).
+ */
+export function sanitizeAgentId(agentId: string): string {
+  return agentId
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+/**
+ * Agent id from a host session id (Claude Code / Codex hook stdin carry
+ * `session_id`; opencode hooks carry `sessionID`): the short prefix — the
+ * first 8 characters — keeps agent directories bounded while remaining
+ * unique enough per session. Non-string/empty input yields `''`.
+ */
+export function resolveAgentIdFromSession(sessionId: unknown): string {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return '';
+  return sessionId.slice(0, 8);
+}
+
+/**
  * Resolve the per-project state file for a working directory — the pure,
  * dependency-free mirror of `resolveHostStateForCwd`
  * (`<cwd>/.skillstate/skillstate.json`; the global bucket
  * `<home>/.skillstate/global/skillstate.json` when cwd equals home).
+ *
+ * AGENT-SCOPED STATE: a non-empty `agentId` (sanitized via
+ * {@link sanitizeAgentId}) scopes the file under an isolated
+ * `agents/<agentId>/` copy — parallel sub-agents (hook sessions) never
+ * share the main state file.
  *
  * String arithmetic only (POSIX): absolute paths are normalized like
  * `path.resolve` (empty/`.` segments dropped, `..` popped, trailing
@@ -44,7 +72,7 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
  * that. `home` must be provided to detect the global bucket; when it is
  * omitted the project path is returned.
  */
-export function resolveStatePathForCwd(cwd: string, home?: string): string {
+export function resolveStatePathForCwd(cwd: string, home?: string, agentId?: string): string {
   const normalize = (p: string): string => {
     const isAbsolute = p.startsWith('/');
     const segments = [];
@@ -65,10 +93,16 @@ export function resolveStatePathForCwd(cwd: string, home?: string): string {
   const rootless = (p: string): string => (p === '/' ? '' : p);
   const resolvedCwd = normalize(cwd);
   const resolvedHome = home === undefined || home === null ? '' : normalize(home);
-  if (resolvedCwd === resolvedHome) {
-    return `${rootless(resolvedHome)}/.skillstate/global/skillstate.json`;
+  const agent =
+    typeof agentId === 'string' && agentId.length > 0 ? sanitizeAgentId(agentId) : '';
+  const base =
+    resolvedCwd === resolvedHome
+      ? `${rootless(resolvedHome)}/.skillstate/global`
+      : `${rootless(resolvedCwd)}/.skillstate`;
+  if (agent.length > 0) {
+    return `${base}/agents/${agent}/skillstate.json`;
   }
-  return `${rootless(resolvedCwd)}/.skillstate/skillstate.json`;
+  return `${base}/skillstate.json`;
 }
 
 /**
@@ -108,6 +142,97 @@ export function saveStateEnvelope(
   writeFile: (p: string, data: string) => void,
 ): void {
   writeFile(statePath, `${JSON.stringify({ version: 1, state }, null, 2)}\n`);
+}
+
+/**
+ * Minimal `node:fs` surface {@link lockStateWrite} needs. Injections keep
+ * the hook-runtime pure: real `node:fs` in generated scripts and the
+ * plugin, mocks in tests (the established hook-runtime dependency style).
+ */
+export interface StateLockFs {
+  openSync(path: string, flags: string): number;
+  closeSync(fd: number): void;
+  statSync(path: string): { mtimeMs: number };
+  unlinkSync(path: string): void;
+  mkdirSync(path: string): unknown;
+}
+
+/**
+ * Block the current thread for `ms` milliseconds — the sync sleep for the
+ * {@link lockStateWrite} retry loop. Prefers `Atomics.wait` on a shared
+ * integer (a real sleep); falls back to a busy spin when the primitive is
+ * unavailable. Plain JS — survives `fn.toString()` inlining.
+ */
+export function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    return;
+  } catch (error) {
+    // Atomics.wait unavailable in this host — spin below.
+  }
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // Spin — hook scripts must stay synchronous.
+  }
+}
+
+/**
+ * Cross-process state lock for the SELF-CONTAINED hook scripts (sync,
+ * no imports): exclusive `O_EXCL` lockfile at `statePath + '.lock'`,
+ * stale-TTL takeover (10s — crashed hook holders), and a retry loop
+ * (50ms × 40 ≈ 2s) while a live holder runs its critical section. The
+ * injected `fs` (real `node:fs` in generated scripts and the plugin,
+ * mocks in tests) performs the lockfile I/O and creates the parent
+ * directory. The injected `fn` runs inside the lock; the lockfile is
+ * ALWAYS removed in the `finally` block. `fn` failures propagate AFTER
+ * the release; lock exhaustion throws.
+ */
+export function lockStateWrite(statePath: string, fs: StateLockFs, fn: () => unknown): unknown {
+  const lockPath = `${statePath}.lock`;
+  const ttl = 10_000;
+  const retries = 40;
+  const dir = lockPath.replace(/\/[^/]+$/, '');
+  try {
+    fs.mkdirSync(dir);
+  } catch (error) {
+    // Exists already — only the lockfile itself must be exclusive.
+  }
+  let acquired = false;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      fs.closeSync(fs.openSync(lockPath, 'wx'));
+      acquired = true;
+      break;
+    } catch (error) {
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(lockPath).mtimeMs;
+      } catch (error) {
+        // Vanished between the failed create and the stat — retry at once.
+      }
+      if (Date.now() - mtimeMs > ttl) {
+        try {
+          fs.unlinkSync(lockPath);
+        } catch (error) {
+          // Another waiter removed it first — retry from the top.
+        }
+      } else {
+        sleepSync(50);
+      }
+    }
+  }
+  if (!acquired) {
+    throw new Error(`skillstate: could not acquire the state lock: ${lockPath}`);
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (error) {
+      // Lock already removed (stale takeover raced us) — nothing to release.
+    }
+  }
 }
 
 /**
@@ -224,6 +349,8 @@ export function findRawPatch(text: string): PatchLookup {
 export function hookRuntimeSnippet(): string {
   return [
     isPlainObject,
+    resolveAgentIdFromSession,
+    sanitizeAgentId,
     resolveStatePathForCwd,
     readStateEnvelope,
     saveStateEnvelope,
@@ -231,6 +358,8 @@ export function hookRuntimeSnippet(): string {
     readResponseText,
     findFencedPatch,
     findRawPatch,
+    sleepSync,
+    lockStateWrite,
   ]
     .map((fn) => fn.toString())
     .join('\n\n');

@@ -239,8 +239,12 @@ ${STATE_PATCH_CONTRACT}`;
    *   with the `^compact$` matcher);
    * - `post-tool-use`: extracts a `state_patch` from the tool_response
    *   (fenced ```json block or raw JSON), applies the ⊕ null-deletion merge
-   *   and writes the state file; stdout is `{}` or a `systemMessage` when
-   *   the patch is invalid.
+   *   and writes the state file (under the built-in cross-process lock);
+   *   stdout is `{}` or a `systemMessage` when the patch is invalid.
+   *
+   * AGENT-SCOPED STATE: the hook stdin's `session_id` scopes the state to
+   * `<cwd>/.skillstate/agents/<session-prefix>/skillstate.json`, so
+   * parallel Claude Code sessions never last-writer-win over each other.
    *
    * `statePath` is accepted for `{ root, name }` confinement (traversal
    * refs throw) and documented in the script header; the content itself is
@@ -401,14 +405,16 @@ ${STATE_PATCH_CONTRACT}
       'process.stdin.on("data", (chunk) => { raw += chunk; });',
       'process.stdin.on("end", () => {',
       '  let cwd = process.cwd();',
+      '  let agentId = "";',
       '  try {',
       '    const input = JSON.parse(raw);',
       '    if (typeof input.cwd === "string" && input.cwd.length > 0) {',
       '      cwd = input.cwd;',
       '    }',
+      '    agentId = resolveAgentIdFromSession(input.session_id);',
       '  } catch (error) {}',
       '  const state = readStateEnvelope(',
-      '    resolveStatePathForCwd(path.resolve(cwd), path.resolve(os.homedir())),',
+      '    resolveStatePathForCwd(path.resolve(cwd), path.resolve(os.homedir()), agentId),',
       '    (p) => fs.readFileSync(p, "utf-8"),',
       '  );',
       '  const output = {',
@@ -455,7 +461,11 @@ ${STATE_PATCH_CONTRACT}
       '    if (typeof input.cwd === "string" && input.cwd.length > 0) {',
       '      cwd = input.cwd;',
       '    }',
-      '    const statePath = resolveStatePathForCwd(path.resolve(cwd), path.resolve(os.homedir()));',
+      '    const statePath = resolveStatePathForCwd(',
+      '      path.resolve(cwd),',
+      '      path.resolve(os.homedir()),',
+      '      resolveAgentIdFromSession(input.session_id),',
+      '    );',
       '    const response = input.tool_response;',
       '    let result;',
       '    if (isPlainObject(response) && isPlainObject(response.state_patch)) {',
@@ -466,13 +476,15 @@ ${STATE_PATCH_CONTRACT}
       '      if (result.absent) result = findRawPatch(text);',
       '    }',
       '    if (result.patch !== undefined) {',
-      '      const merged = mergePatch(',
-      '        readStateEnvelope(statePath, (p) => fs.readFileSync(p, "utf-8")),',
-      '        result.patch,',
-      '      );',
       '      try {',
       '        fs.mkdirSync(path.dirname(statePath), { recursive: true });',
-      '        saveStateEnvelope(statePath, merged, (p, data) => fs.writeFileSync(p, data));',
+      '        lockStateWrite(statePath, fs, () => {',
+      '          const merged = mergePatch(',
+      '            readStateEnvelope(statePath, (p) => fs.readFileSync(p, "utf-8")),',
+      '            result.patch,',
+      '          );',
+      '          saveStateEnvelope(statePath, merged, (p, data) => fs.writeFileSync(p, data));',
+      '        });',
       '      } catch (writeError) {',
       "        output.systemMessage = 'skillstate: failed to persist state (' + writeError.message + ')';",
       '      }',

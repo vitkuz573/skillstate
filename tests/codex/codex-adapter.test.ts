@@ -243,6 +243,32 @@ describe('CodexAdapter.generateHookScript — injection events', () => {
     expect(parsed.hookSpecificOutput.additionalContext).toContain('Current skill state (JSON): {}');
   });
 
+  it('injects the AGENT-SCOPED state from input.session_id (8-char prefix)', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'project');
+    const sessionId = 'ses_0123456789abcdef';
+    const agentStatePath = path.join(
+      cwd,
+      '.skillstate',
+      'agents',
+      sessionId.slice(0, 8),
+      'skillstate.json',
+    );
+    fs.mkdirSync(path.dirname(agentStatePath), { recursive: true });
+    fs.writeFileSync(
+      agentStatePath,
+      `${JSON.stringify({ version: 1, state: { agent: 'scoped' } }, null, 2)}\n`,
+    );
+    const scriptPath = writeScript(dir, adapter.generateHookScript('user-prompt-submit'));
+    const emitted = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({ cwd, session_id: sessionId }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    const parsed = JSON.parse(emitted) as any;
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('"agent":"scoped"');
+  });
+
   it('uses the global bucket when the hook cwd equals the process home', () => {
     const dir = makeTmp();
     const fakeHome = path.join(dir, 'home');
@@ -371,6 +397,40 @@ describe('CodexAdapter.generateHookScript — post-tool-use', () => {
       { input: '', encoding: 'utf-8' },
     ).toString();
     expect(JSON.parse(stdout).systemMessage).toContain('failed to process');
+  });
+
+  it('persists the patch into the AGENT-SCOPED state derived from input.session_id', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'project');
+    fs.mkdirSync(cwd, { recursive: true });
+    const sessionId = 'ses_feedface99';
+    const agentStatePath = path.join(
+      cwd,
+      '.skillstate',
+      'agents',
+      sessionId.slice(0, 8),
+      'skillstate.json',
+    );
+    fs.mkdirSync(path.dirname(agentStatePath), { recursive: true });
+    fs.writeFileSync(
+      agentStatePath,
+      `${JSON.stringify({ version: 1, state: { notes: 'old' } }, null, 2)}\n`,
+    );
+    const scriptPath = writeScript(dir, adapter.generateHookScript('post-tool-use'));
+    execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({
+        cwd,
+        session_id: sessionId,
+        tool_response: '```json\n{"state_patch":{"progress":1},"action":"go"}\n```',
+      }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    const envelope = JSON.parse(fs.readFileSync(agentStatePath, 'utf-8')) as any;
+    expect(envelope.state).toEqual({ notes: 'old', progress: 1 });
+    // The MAIN state file is untouched.
+    expect(fs.existsSync(path.join(cwd, '.skillstate', 'skillstate.json'))).toBe(false);
+    expect(fs.existsSync(`${agentStatePath}.lock`)).toBe(false);
   });
 });
 

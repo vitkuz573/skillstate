@@ -185,7 +185,42 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | **Claude Code** | `UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)` hook scripts + `~/.claude/settings.json` merge + stdio `.mcp.json` + SKILL.md | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
 | **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
 | **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
-| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `spec.get` / `spec.next`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
+| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
+
+## Multi-agent state (release 2.2.0)
+
+2-3 parallel agents (hook sessions, sub-agents) used to share ONE
+`<cwd>/.skillstate/skillstate.json` — last-writer-wins, patches
+interleaved. Since 2.2.0 every agent gets an ISOLATED state copy plus a
+cross-process lock on every write; the main agent folds sub-agent work
+back explicitly:
+
+- **Agent-scoped state.** A non-empty agent id scopes the state file under
+  an isolated copy: `<cwd>/.skillstate/agents/<agentId>/skillstate.json`
+  (the global bucket mirrors it: `~/.skillstate/global/agents/<id>/…`).
+  Ids sanitize to `[A-Za-z0-9_-]`, ≤ 64 chars; the default (`''`) is the
+  main agent with the plain path.
+- **Where the agent id comes from.** Claude Code / Codex hook scripts take
+  the 8-char prefix of the hook stdin's `session_id`; the OpenCode plugin
+  uses the hook/message `sessionID` (fallback agent `default`); the MCP
+  server reads `SKILLSTATE_AGENT_ID` from its env or accepts a per-call
+  `{ agent }` argument (default `''` = main agent).
+- **Cross-process locks.** `withStateLock(statePath, fn)` (async,
+  `@skillstate/core`) serializes the MCP write hot path
+  (`state.patch` / `state.rollback` / `state.checkpoint` / `agent.merge`);
+  the self-contained hook scripts and the OpenCode plugin embed the sync
+  `lockStateWrite(statePath, fs, fn)` (`O_EXCL` lockfile at
+  `<state>.lock`, 10s stale-TTL takeover, 50ms × 40 retry loop). A race of
+  two processes × 20 interleaved patches loses nothing.
+- **Diff baseline on disk.** `state.diff` keeps its "since your last look"
+  semantics through `<stateDir>/.diff-baseline.json` (atomic write, under
+  the lock) — consistent across processes, no in-memory baseline divergence.
+- **Agent tools (MCP).** `agent.list` scans `<stateDir>/agents/`
+  (`{id, statePath, exists, summary, lastModified}`), `agent.read` shows a
+  sub-agent's state read-only, and `agent.merge` folds a sub-agent copy
+  into the main state (⊕ merge; conflicting scalars follow
+  `keep: 'main' \| 'sub'`, default `'main'`; the sub copy is kept and
+  marked `mergedAt`).
 
 ### Claude Code
 

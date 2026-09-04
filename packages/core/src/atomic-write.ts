@@ -103,6 +103,60 @@ export async function acquireLock(
   }
 }
 
+/** Default retry count for {@link withStateLock} (~10s at 50ms per try). */
+export const DEFAULT_LOCK_RETRIES = 200;
+
+/** Delay between {@link withStateLock} acquisition retries (50ms). */
+export const LOCK_RETRY_DELAY_MS = 50;
+
+/**
+ * Run `fn` while holding an exclusive cross-process lock on
+ * `statePath + '.lock'` ({@link acquireLock}, default TTL). Waits for a
+ * live holder: up to `retries` (default {@link DEFAULT_LOCK_RETRIES})
+ * attempts {@link LOCK_RETRY_DELAY_MS} apart, so 2-3 concurrent agent
+ * processes serialize instead of failing. The lock is acquired before
+ * `fn` starts and ALWAYS released in the `finally` block; the `fn`
+ * result (or failure) propagates after the release. Throws when the lock
+ * cannot be acquired within the retry budget. This is the async
+ * hot-path serialization primitive for the MCP server writes
+ * (patch/rollback/checkpoint/merge) and the host adapters.
+ */
+export async function withStateLock<T>(
+  statePath: string,
+  fn: () => Promise<T> | T,
+  ttlMs?: number,
+  retries: number = DEFAULT_LOCK_RETRIES,
+): Promise<T> {
+  const lockPath = `${statePath}.lock`;
+  await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
+  let handle = await acquireLockSafely(lockPath, ttlMs);
+  for (let attempt = 0; handle === null && attempt < retries; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
+    handle = await acquireLockSafely(lockPath, ttlMs);
+  }
+  if (!handle) {
+    throw new Error(`skillstate: could not acquire the state lock: ${lockPath}`);
+  }
+  try {
+    return await fn();
+  } finally {
+    handle.release();
+  }
+}
+
+/**
+ * {@link acquireLock} with the stale-takeover race collapsed to `null`:
+ * between `unlink` and the re-`writeFile`, another waiter may recreate
+ * the lockfile (`EEXIST`) — that loser must retry, never crash.
+ */
+async function acquireLockSafely(lockPath: string, ttlMs?: number): Promise<LockHandle | null> {
+  try {
+    return await acquireLock(lockPath, ttlMs);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve `name` inside `root` and return the absolute path. Throws when
  * the result escapes `root` (`..` traversal or an absolute outsider).

@@ -20,12 +20,19 @@ import {
   findFencedPatch,
   findRawPatch,
   hookRuntimeSnippet,
+  lockStateWrite,
   mergePatch,
   readResponseText,
   readStateEnvelope,
+  resolveAgentIdFromSession,
   resolveStatePathForCwd,
   saveStateEnvelope,
+  sanitizeAgentId,
+  sleepSync,
 } from '@skillstate/core';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const claude = new ClaudeAdapter();
 const codex = new CodexAdapter();
@@ -39,6 +46,8 @@ const GENERATED_SCRIPTS: Record<string, string> = {
 
 const SNIPPET_MARKERS = [
   'function isPlainObject(',
+  'function resolveAgentIdFromSession(',
+  'function sanitizeAgentId(',
   'function resolveStatePathForCwd(',
   'function readStateEnvelope(',
   'function saveStateEnvelope(',
@@ -46,6 +55,8 @@ const SNIPPET_MARKERS = [
   'function readResponseText(',
   'function findFencedPatch(',
   'function findRawPatch(',
+  'function sleepSync(',
+  'function lockStateWrite(',
 ];
 
 // ─── (1) containment: every generated script embeds the shared snippet ──────
@@ -83,6 +94,8 @@ function evalSnippet(script: string): Record<string, (...args: never[]) => unkno
   vm.runInContext(hookRuntimeSnippet(), context);
   const names = [
     'isPlainObject',
+    'resolveAgentIdFromSession',
+    'sanitizeAgentId',
     'resolveStatePathForCwd',
     'readStateEnvelope',
     'saveStateEnvelope',
@@ -90,6 +103,8 @@ function evalSnippet(script: string): Record<string, (...args: never[]) => unkno
     'readResponseText',
     'findFencedPatch',
     'findRawPatch',
+    'sleepSync',
+    'lockStateWrite',
   ];
   const out: Record<string, (...args: never[]) => unknown> = {};
   for (const name of names) {
@@ -157,6 +172,64 @@ describe('snippet-vs-original parity', () => {
       'resolve omitted home falls back to project path',
       (cwd, home) => resolveStatePathForCwd(cwd as string, home as string | undefined),
       ['/home/v/projects/app', undefined],
+    ],
+    // resolveStatePathForCwd — agent-scoped paths
+    [
+      'resolve agent-scoped project path',
+      (cwd, home, agentId) =>
+        resolveStatePathForCwd(cwd as string, home as string, agentId as string),
+      ['/home/v/projects/app', '/home/v', 'ses_abc12345'],
+    ],
+    [
+      'resolve agent-scoped global bucket (cwd === home)',
+      (cwd, home, agentId) =>
+        resolveStatePathForCwd(cwd as string, home as string, agentId as string),
+      ['/home/u', '/home/u', 'worker-9'],
+    ],
+    [
+      'resolve empty agentId keeps the plain project path',
+      (cwd, home, agentId) =>
+        resolveStatePathForCwd(cwd as string, home as string, agentId as string),
+      ['/home/v/projects/app', '/home/v', ''],
+    ],
+    [
+      'resolve agent id sanitizes unsafe characters',
+      (cwd, home, agentId) =>
+        resolveStatePathForCwd(cwd as string, home as string, agentId as string),
+      ['/home/v/projects/app', '/home/v', 'w/.././x'],
+    ],
+    [
+      'resolve agent id sanitizing to empty falls back to the main state',
+      (cwd, home, agentId) =>
+        resolveStatePathForCwd(cwd as string, home as string, agentId as string),
+      ['/home/v/projects/app', '/home/v', '***'],
+    ],
+    // resolveAgentIdFromSession — session prefix rule
+    [
+      'agent id: 8-char prefix of a long session id',
+      (session) => resolveAgentIdFromSession(session),
+      ['ses_abcdef123456'],
+    ],
+    [
+      'agent id: short session id passes through whole',
+      (session) => resolveAgentIdFromSession(session),
+      ['ses'],
+    ],
+    [
+      'agent id: non-string/empty session yields empty',
+      (session) => resolveAgentIdFromSession(session),
+      [42],
+    ],
+    // sanitizeAgentId — the sanitizer mirrors the resolver behavior
+    [
+      'sanitizeAgentId collapses unsafe characters',
+      (id) => sanitizeAgentId(id as string),
+      ['w/.././x'],
+    ],
+    [
+      'sanitizeAgentId trims edge dashes and caps at 64',
+      (id) => sanitizeAgentId(id as string),
+      ['--a---b--'],
     ],
     // readStateEnvelope — valid envelope / bare / corrupt / missing
     [
@@ -342,6 +415,185 @@ describe('snippet-vs-original parity', () => {
       expect(JSON.stringify(patch)).toBe(beforePatch);
     }
   });
+
+  // ─── lockStateWrite: snippet-vs-original behavioral parity ────────────────
+
+  it('lockStateWrite: snippet acquires, runs fn, and releases (original semantics)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-lock-'));
+    try {
+      for (const lock of [
+        (fn: () => void) => lockStateWrite(path.join(dir, 'orig.json'), fs, fn),
+        (fn: () => void) => snippetFns['lockStateWrite'](path.join(dir, 'snip.json'), fs, fn),
+      ]) {
+        const order: string[] = [];
+        lock(() => {
+          order.push('inside');
+        });
+        expect(order).toEqual(['inside']);
+        expect(fs.existsSync(`${path.join(dir, 'orig.json')}.lock`)).toBe(false);
+        expect(fs.existsSync(`${path.join(dir, 'snip.json')}.lock`)).toBe(false);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lockStateWrite: serializes concurrent writers (original and snippet alike)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-lock-'));
+    try {
+      for (const name of ['orig', 'snip'] as const) {
+        const statePath = path.join(dir, `${name}-race.json`);
+        const lock =
+          name === 'orig'
+            ? (fn: () => void) => lockStateWrite(statePath, fs, fn)
+            : (fn: () => void) => snippetFns['lockStateWrite'](statePath, fs, fn);
+        const writers = Array.from({ length: 10 }, (_, i) =>
+          Promise.resolve().then(() =>
+            lock(() => {
+              const current = fs.existsSync(statePath)
+                ? (JSON.parse(fs.readFileSync(statePath, 'utf-8')) as Record<string, number>)
+                : {};
+              current[`k${i}`] = i;
+              fs.writeFileSync(statePath, JSON.stringify(current));
+            }),
+          ),
+        );
+        await Promise.all(writers);
+        const final = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as Record<string, number>;
+        expect(Object.keys(final)).toHaveLength(10);
+        expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lockStateWrite: releases the lock when fn throws (original and snippet alike)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-lock-'));
+    try {
+      for (const statePath of [path.join(dir, 'orig3.json'), path.join(dir, 'snip3.json')]) {
+        const lock =
+          statePath.endsWith('orig3.json')
+            ? (fn: () => void) => lockStateWrite(statePath, fs, fn)
+            : (fn: () => void) => snippetFns['lockStateWrite'](statePath, fs, fn);
+        expect(() =>
+          lock(() => {
+            throw new Error('boom');
+          }),
+        ).toThrow('boom');
+        expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+        // The lock is re-acquirable after the failure.
+        expect(() => lock(() => undefined)).not.toThrow();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lockStateWrite: throws after the retry budget while a fresh foreign lock is held', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-lock-'));
+    try {
+      const statePath = path.join(dir, 'busy.json');
+      fs.writeFileSync(`${statePath}.lock`, 'foreign-holder', 'utf-8');
+      for (const lock of [
+        (fn: () => void) => lockStateWrite(statePath, fs, fn),
+        (fn: () => void) => snippetFns['lockStateWrite'](statePath, fs, fn),
+      ]) {
+        expect(() => lock(() => undefined)).toThrow('could not acquire the state lock');
+      }
+      // The foreign lock must survive failed attempts (never deleted live).
+      expect(fs.readFileSync(`${statePath}.lock`, 'utf-8')).toBe('foreign-holder');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lockStateWrite: takes over a STALE lock (original and snippet alike)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-lock-'));
+    try {
+      for (const name of ['orig', 'snip'] as const) {
+        const statePath = path.join(dir, `${name}-stale.json`);
+        fs.writeFileSync(`${statePath}.lock`, 'dead-holder', 'utf-8');
+        const ancient = new Date(Date.now() - 120_000);
+        fs.utimesSync(`${statePath}.lock`, ancient, ancient);
+        const lock =
+          name === 'orig'
+            ? (fn: () => void) => lockStateWrite(statePath, fs, fn)
+            : (fn: () => void) => snippetFns['lockStateWrite'](statePath, fs, fn);
+        expect(lock(() => 'took-over')).toBe('took-over');
+        expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lockStateWrite: a failing stale-unlink retries instead of crashing (mock fs)', () => {
+    const statePath = '/virtual/state.json';
+    const calls = { unlink: 0 };
+    const hostileFs = {
+      openSync: (p: string, flags: string): number => {
+        void p;
+        void flags;
+        throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
+      },
+      closeSync: (): void => undefined,
+      statSync: (): { mtimeMs: number } => ({ mtimeMs: Date.now() - 60_000 }),
+      unlinkSync: (): void => {
+        calls.unlink += 1;
+        throw new Error('another waiter removed it first');
+      },
+      mkdirSync: (): void => undefined,
+    };
+    for (const lock of [
+      (fn: () => void) => lockStateWrite(statePath, hostileFs, fn),
+      (fn: () => void) => snippetFns['lockStateWrite'](statePath, hostileFs, fn),
+    ]) {
+      calls.unlink = 0;
+      expect(() => lock(() => undefined)).toThrow('could not acquire the state lock');
+      expect(calls.unlink).toBeGreaterThan(0);
+    }
+  });
+
+  it('lockStateWrite: a failing release-unlink is swallowed after fn ran (mock fs)', () => {
+    const statePath = '/virtual/state-release.json';
+    let openCalls = 0;
+    const releaseFailFs = {
+      openSync: (p: string, flags: string): number => {
+        void p;
+        void flags;
+        openCalls += 1;
+        return 7;
+      },
+      closeSync: (): void => undefined,
+      statSync: (): { mtimeMs: number } => ({ mtimeMs: Date.now() }),
+      unlinkSync: (p: string): void => {
+        void p;
+        throw new Error('lock already removed');
+      },
+      mkdirSync: (): void => undefined,
+    };
+    for (const lock of [
+      (fn: () => void) => lockStateWrite(statePath, releaseFailFs, fn),
+      (fn: () => void) => snippetFns['lockStateWrite'](statePath, releaseFailFs, fn),
+    ]) {
+      openCalls = 0;
+      expect(lock(() => 'ran')).toBe('ran');
+      expect(openCalls).toBe(1);
+    }
+  });
+
+  it('sleepSync: falls back to a busy spin when Atomics is unavailable', () => {
+    const originalAtomics = (globalThis as Record<string, unknown>)['Atomics'];
+    (globalThis as Record<string, unknown>)['Atomics'] = undefined;
+    try {
+      const start = Date.now();
+      sleepSync(3);
+      expect(Date.now() - start).toBeGreaterThanOrEqual(2);
+    } finally {
+      (globalThis as Record<string, unknown>)['Atomics'] = originalAtomics;
+    }
+  });
 });
 
 /** JSON round-trip so vm-hosted objects compare structurally. */
@@ -354,6 +606,7 @@ function deep(value: unknown): unknown {
  * exercises (the arrow's first call target, declared in hook-runtime).
  */
 const FN_NAMES = [
+  'resolveAgentIdFromSession',
   'resolveStatePathForCwd',
   'readStateEnvelope',
   'saveStateEnvelope',
@@ -361,6 +614,9 @@ const FN_NAMES = [
   'findFencedPatch',
   'findRawPatch',
   'readResponseText',
+  'sanitizeAgentId',
+  'sleepSync',
+  'lockStateWrite',
 ] as const;
 
 function resolveSnippetFnName(invoke: (...args: unknown[]) => unknown): string {

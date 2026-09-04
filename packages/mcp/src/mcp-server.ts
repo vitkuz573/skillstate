@@ -36,7 +36,9 @@ import {
   redactSecrets,
   resolveHostStateForCwd,
   resolveStatePath,
+  sanitizeAgentId,
   validatePatchDeep,
+  withStateLock,
   CURRENT_STATE_VERSION,
 } from '@skillstate/core';
 import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
@@ -86,6 +88,13 @@ export interface McpServerOptions {
   root: string;
   /** State file name (confined by `resolveStatePath`). */
   name: string;
+  /**
+   * Default agent scope: `''` (the main agent) targets the plain state
+   * file; a non-empty id (sanitized `[A-Za-z0-9_-]`, ≤64) targets
+   * `agents/<id>/skillstate.json` inside the same bucket. Every tool call
+   * may still override the scope via `{ agent }` (and/or `{ root, name }`).
+   */
+  agent?: string;
   /** Optional token tracker for the `state.metrics` tool. */
   tracker?: TokenTracker;
 }
@@ -98,6 +107,8 @@ export interface LaunchArgs {
   root?: string;
   /** State file name override; defaults to the per-project state file name. */
   name?: string;
+  /** Default agent scope; falls back to the `SKILLSTATE_AGENT_ID` env. */
+  agent?: string;
   tracker?: TokenTracker;
   input?: Readable;
   output?: Writable;
@@ -152,6 +163,61 @@ function nestedMergeWarnings(before: SkillState, patch: StatePatch): string[] {
     }
   }
   return warnings;
+}
+
+/**
+ * AGENT-MERGE conflict resolution: build the effective sub-state patch
+ * against `main` under the `keep` policy. Schema defaults are the shared
+ * "unset" baseline: a sub value equal to its schema default means the sub
+ * agent never set the key (skip), a main value equal to its default means
+ * the main agent never set it (no real conflict — the sub value wins).
+ * Everything else: keys only in `sub` are taken, identical keys are
+ * skipped, nested plain objects recurse, and remaining scalar conflicts
+ * go to the `keep` winner. Deletions stay local to the sub copy — the
+ * merge carries set/updated keys only.
+ */
+function resolveAgentMergeConflicts(
+  main: SkillState,
+  sub: SkillState,
+  keep: 'main' | 'sub',
+  defaults: Record<string, unknown>,
+): StatePatch {
+  const patch: Record<string, unknown> = {};
+  for (const [key, subValue] of Object.entries(sub)) {
+    if (!Object.prototype.hasOwnProperty.call(main, key)) {
+      patch[key] = subValue;
+      continue;
+    }
+    const mainValue = main[key];
+    if (JSON.stringify(mainValue) === JSON.stringify(subValue)) {
+      continue;
+    }
+    if (isPlainObject(mainValue) && isPlainObject(subValue)) {
+      const nested = resolveAgentMergeConflicts(mainValue, subValue, keep, {});
+      if (Object.keys(nested).length > 0) {
+        patch[key] = nested;
+      }
+      continue;
+    }
+    const isDefault = (value: unknown): boolean =>
+      Object.prototype.hasOwnProperty.call(defaults, key) &&
+      JSON.stringify(value) === JSON.stringify(defaults[key]);
+    if (isDefault(subValue)) {
+      continue;
+    }
+    if (isDefault(mainValue) || keep === 'sub') {
+      patch[key] = subValue;
+    }
+  }
+  return patch;
+}
+
+/** Light sub-agent summary: top-level keys + JSON size (no values). */
+function agentSummary(state: SkillState): Record<string, unknown> {
+  return {
+    keys: Object.keys(state),
+    size_bytes: Buffer.byteLength(JSON.stringify(state), 'utf-8'),
+  };
 }
 
 /**
@@ -262,14 +328,24 @@ export class McpServer {
   /** Serializes `start()` stream handling so chunk order is preserved. */
   private chain: Promise<void> = Promise.resolve();
   /**
-   * Diff baselines per resolved state path: the state as of the last
-   * `state.diff` call (or, before the first look, as of the first write).
+   * Diff baselines are persisted to disk (`.diff-baseline.json` next to
+   * each state file, under the cross-process lock) — the "since your last
+   * look" semantics stays, but is now CONSISTENT BETWEEN PROCESSES: the
+   * former in-memory per-server Map made two servers diff against
+   * different baselines.
    */
-  private readonly prevStates = new Map<string, SkillState>();
   /** Writes (patch/rollback) applied per resolved state path this session. */
   private readonly writeSeq = new Map<string, number>();
 
-  constructor(private readonly options: McpServerOptions) {}
+  constructor(private readonly options: McpServerOptions) {
+    if (
+      options.agent !== undefined &&
+      options.agent.length > 0 &&
+      sanitizeAgentId(options.agent).length === 0
+    ) {
+      throw new Error(`Invalid agent id: ${options.agent}`);
+    }
+  }
 
   /**
    * Process a single (already-framed) JSON-RPC message line and return the
@@ -525,6 +601,12 @@ export class McpServer {
         return this.specGet();
       case 'spec.next':
         return this.specNext(args);
+      case 'agent.list':
+        return this.agentList();
+      case 'agent.read':
+        return this.agentRead(args);
+      case 'agent.merge':
+        return this.agentMerge(args);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -535,7 +617,7 @@ export class McpServer {
     return this.textResult(redactSecrets(JSON.stringify(state)));
   }
 
-  private statePatch(args: Record<string, unknown>): McpToolResult {
+  private async statePatch(args: Record<string, unknown>): Promise<McpToolResult> {
     const patch = args['patch'];
     if (!isPlainObject(patch)) {
       throw new Error('patch must be an object');
@@ -558,13 +640,16 @@ export class McpServer {
       };
     }
     const filePath = this.resolveStore(args);
-    const before = this.loadState(filePath);
-    const after = mergeState(before, patch as StatePatch);
-    this.writeState(filePath, after);
-    this.bumpWriteSeq(filePath);
-    if (!this.prevStates.has(filePath)) {
-      this.prevStates.set(filePath, before);
-    }
+    const { before, after } = await withStateLock(filePath, () => {
+      const before = this.loadState(filePath);
+      const after = mergeState(before, patch as StatePatch);
+      this.writeState(filePath, after);
+      this.bumpWriteSeq(filePath);
+      if (this.readBaseline(filePath) === null) {
+        this.writeBaseline(filePath, before);
+      }
+      return { before, after };
+    });
     const payload = {
       state: after,
       changes: topChanges(before, after),
@@ -593,14 +678,14 @@ export class McpServer {
     );
   }
 
-  private stateDiff(args: Record<string, unknown>): McpToolResult {
+  private async stateDiff(args: Record<string, unknown>): Promise<McpToolResult> {
     const filePath = this.resolveStore(args);
-    const current = this.loadState(filePath);
-    let before = this.prevStates.get(filePath);
-    if (before === undefined) {
-      before = current;
-    }
-    this.prevStates.set(filePath, current);
+    const { before, current } = await withStateLock(filePath, () => {
+      const current = this.loadState(filePath);
+      const stored = this.readBaseline(filePath);
+      this.writeBaseline(filePath, current);
+      return { before: stored ?? current, current };
+    });
     const payload: Record<string, unknown> = {
       changes: topChanges(before, current),
     };
@@ -614,30 +699,32 @@ export class McpServer {
   private async stateCheckpoint(args: Record<string, unknown>): Promise<McpToolResult> {
     const ref = this.resolveRef(args);
     const dir = checkpointsDir(ref.filePath);
-    const state = this.loadState(ref.filePath);
-    const seq = nextCheckpointSeq(dir);
-    const label = sanitizeLabel(typeof args['label'] === 'string' ? args['label'] : '');
-    const checkpointId = `${seq}-${label}`;
-    const record = {
-      checkpointId,
-      seq,
-      label,
-      createdAt: new Date().toISOString(),
-      state,
-    };
-    // Best-effort `<path>.snapshot` side copy through the paper-exact store,
-    // then the named sidecar entry (both atomic writes).
-    await new FileStore(ref.root, ref.name).snapshot();
-    await atomicWriteFile(
-      path.join(dir, `${checkpointId}.json`),
-      JSON.stringify(record, null, 2),
-    );
-    const payload = {
-      checkpointId,
-      seq,
-      label,
-      checkpoints: listCheckpoints(dir),
-    };
+    const payload = await withStateLock(ref.filePath, async () => {
+      const state = this.loadState(ref.filePath);
+      const seq = nextCheckpointSeq(dir);
+      const label = sanitizeLabel(typeof args['label'] === 'string' ? args['label'] : '');
+      const checkpointId = `${seq}-${label}`;
+      const record = {
+        checkpointId,
+        seq,
+        label,
+        createdAt: new Date().toISOString(),
+        state,
+      };
+      // Best-effort `<path>.snapshot` side copy through the paper-exact
+      // store, then the named sidecar entry (both atomic writes).
+      await new FileStore(ref.root, ref.name).snapshot();
+      await atomicWriteFile(
+        path.join(dir, `${checkpointId}.json`),
+        JSON.stringify(record, null, 2),
+      );
+      return {
+        checkpointId,
+        seq,
+        label,
+        checkpoints: listCheckpoints(dir),
+      };
+    });
     return this.textResult(redactSecrets(JSON.stringify(payload)));
   }
 
@@ -669,13 +756,15 @@ export class McpServer {
     if (!isPlainObject(record.state)) {
       throw new Error(`Checkpoint is corrupted (no state): ${checkpointId}`);
     }
-    const before = this.loadState(ref.filePath);
-    this.writeState(ref.filePath, record.state);
-    this.bumpWriteSeq(ref.filePath);
-    if (!this.prevStates.has(ref.filePath)) {
-      this.prevStates.set(ref.filePath, before);
-    }
-    const payload = { checkpointId, state: record.state };
+    const payload = await withStateLock(ref.filePath, () => {
+      const before = this.loadState(ref.filePath);
+      this.writeState(ref.filePath, record.state as SkillState);
+      this.bumpWriteSeq(ref.filePath);
+      if (this.readBaseline(ref.filePath) === null) {
+        this.writeBaseline(ref.filePath, before);
+      }
+      return { checkpointId, state: record.state };
+    });
     return this.textResult(redactSecrets(JSON.stringify(payload)));
   }
 
@@ -746,15 +835,151 @@ export class McpServer {
     return this.resolveRef(args).filePath;
   }
 
-  /** Resolve `{ root, name }` + the confined file path in one go. */
+  /**
+   * The effective agent scope for a call: `{ agent }` wins, then the
+   * server default ({@link McpServerOptions.agent} — set from the
+   * `SKILLSTATE_AGENT_ID` env by {@link launch}). `''` = main agent.
+   */
+  private effectiveAgent(args: Record<string, unknown>): string {
+    const raw =
+      typeof args['agent'] === 'string' && args['agent'].length > 0
+        ? args['agent']
+        : this.options.agent ?? '';
+    if (raw.length === 0) return '';
+    const sanitized = sanitizeAgentId(raw);
+    if (sanitized.length === 0) {
+      throw new Error(`Invalid agent id: ${raw}`);
+    }
+    return sanitized;
+  }
+
+  /** Resolve `{ root, name, agent }` + the confined file path in one go. */
   private resolveRef(args: Record<string, unknown>): {
     root: string;
     name: string;
+    agent: string;
     filePath: string;
   } {
     const root = typeof args['root'] === 'string' ? args['root'] : this.options.root;
     const name = typeof args['name'] === 'string' ? args['name'] : this.options.name;
-    return { root, name, filePath: resolveStatePath(root, name) };
+    const agent = this.effectiveAgent(args);
+    const filePath =
+      agent.length > 0
+        ? resolveStatePath(root, path.join('agents', agent, name))
+        : resolveStatePath(root, name);
+    return { root, name, agent, filePath };
+  }
+
+  /** Required + sanitized `{ agent }` for the agent.* tools. */
+  private requireAgent(args: Record<string, unknown>): string {
+    const raw = args['agent'];
+    if (typeof raw !== 'string' || raw.length === 0) {
+      throw new Error('agent is required: pass the sub-agent id from agent.list');
+    }
+    const sanitized = sanitizeAgentId(raw);
+    if (sanitized.length === 0) {
+      throw new Error(`Invalid agent id: ${raw}`);
+    }
+    return sanitized;
+  }
+
+  /** State file path for a REQUIRED sub-agent id (read-only views). */
+  private agentStore(args: Record<string, unknown>): string {
+    const root = typeof args['root'] === 'string' ? args['root'] : this.options.root;
+    const name = typeof args['name'] === 'string' ? args['name'] : this.options.name;
+    return resolveStatePath(root, path.join('agents', this.requireAgent(args), name));
+  }
+
+  /**
+   * `agent.list`: scan `<root>/agents/` and project each sub-agent state
+   * copy — id, statePath, exists, lastModified, and a LIGHT summary
+   * (top-level keys + size only, no values). Non-directory entries and
+   * ids outside `[A-Za-z0-9_-]{1,64}` are skipped; a missing agents
+   * directory yields an empty list.
+   */
+  private agentList(): McpToolResult {
+    const agentsDir = path.join(this.options.root, 'agents');
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(agentsDir, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const agents: Array<Record<string, unknown>> = [];
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,64}$/.test(entry.name)) {
+        continue;
+      }
+      const statePath = path.join(agentsDir, entry.name, this.options.name);
+      let exists = false;
+      let lastModified: string | null = null;
+      let summary: Record<string, unknown> | undefined;
+      try {
+        const stat = fs.statSync(statePath);
+        exists = true;
+        lastModified = new Date(stat.mtimeMs).toISOString();
+        summary = agentSummary(this.loadState(statePath));
+      } catch {
+        // No state file for this agent yet — listed with exists: false.
+      }
+      const agent: Record<string, unknown> = { id: entry.name, statePath, exists, lastModified };
+      if (summary !== undefined) {
+        agent['summary'] = summary;
+      }
+      agents.push(agent);
+    }
+    return this.textResult(redactSecrets(JSON.stringify({ agents })));
+  }
+
+  /** `agent.read`: a sub-agent's state, READ-ONLY (the main agent peeks). */
+  private agentRead(args: Record<string, unknown>): McpToolResult {
+    const statePath = this.agentStore(args);
+    return this.textResult(
+      redactSecrets(
+        JSON.stringify({ agent: this.requireAgent(args), statePath, state: this.loadState(statePath) }),
+      ),
+    );
+  }
+
+  /**
+   * `agent.merge`: fold a sub-agent's state into the MAIN state under the
+   * cross-process lock (conflicting scalars resolved by `keep: 'main'` —
+   * the default — or `'sub'`; nested objects recurse; `null` deletes).
+   * The sub state is NOT deleted (history): it is marked with `mergedAt`.
+   * Returns `{ agent, keep, state, changes }`.
+   */
+  private async agentMerge(args: Record<string, unknown>): Promise<McpToolResult> {
+    const agent = this.requireAgent(args);
+    const keep = args['keep'] === 'sub' ? 'sub' : 'main';
+    const ref = this.resolveRef({});
+    const subPath = resolveStatePath(ref.root, path.join('agents', agent, ref.name));
+    const { merged, changes } = await withStateLock(ref.filePath, () => {
+      const main = this.loadState(ref.filePath);
+      if (this.readBaseline(ref.filePath) === null) {
+        this.writeBaseline(ref.filePath, main);
+      }
+      const sub = this.loadState(subPath);
+      const after = mergeState(
+        main,
+        resolveAgentMergeConflicts(
+          main,
+          sub,
+          keep,
+          Object.fromEntries(
+            Object.entries(this.options.spec.schema).map(([key, field]) => [key, field.default]),
+          ),
+        ),
+      );
+      this.writeState(ref.filePath, after);
+      this.bumpWriteSeq(ref.filePath);
+      return { merged: after, changes: topChanges(main, after) };
+    });
+    await withStateLock(subPath, () => {
+      const sub = this.loadState(subPath);
+      sub['mergedAt'] = new Date().toISOString();
+      this.writeState(subPath, sub);
+    });
+    return this.textResult(redactSecrets(JSON.stringify({ agent, keep, state: merged, changes })));
   }
 
   /** Read + normalize the state, falling back to schema defaults. */
@@ -793,6 +1018,44 @@ export class McpServer {
     fs.renameSync(tmp, filePath);
   }
 
+  /**
+   * The DIFF BASELINE for a state file, persisted at
+   * `<stateDir>/.diff-baseline.json` (stateDir = the state file's
+   * directory — per state file, since agent scopes live in their own
+   * `agents/<id>/` directories). `null` = no baseline yet.
+   */
+  private readBaseline(filePath: string): SkillState | null {
+    try {
+      const parsed = JSON.parse(
+        fs.readFileSync(this.baselinePathFor(filePath), 'utf-8'),
+      ) as unknown;
+      return isPlainObject(parsed) ? (parsed as SkillState) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Crash-safe synchronous write of the diff baseline (atomic rename). */
+  private writeBaseline(filePath: string, state: SkillState): void {
+    const target = this.baselinePathFor(filePath);
+    const dir = path.dirname(target);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2)}`;
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeSync(fd, JSON.stringify(state, null, 2));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, target);
+  }
+
+  /** `.diff-baseline.json` lives next to its state file. */
+  private baselinePathFor(filePath: string): string {
+    return path.join(path.dirname(filePath), '.diff-baseline.json');
+  }
+
   /* ------------------------------------------------------------------ */
   /*  Tool / resource schemas                                            */
   /* ------------------------------------------------------------------ */
@@ -801,6 +1064,11 @@ export class McpServer {
     const stateTargetProps = {
       root: { type: 'string', description: 'Optional state root directory override.' },
       name: { type: 'string', description: 'Optional state file name override.' },
+      agent: {
+        type: 'string',
+        description:
+          "Optional agent scope: targets agents/<id>/skillstate.json (sanitized [A-Za-z0-9_-], <=64). Omit for the main agent; the server default comes from SKILLSTATE_AGENT_ID.",
+      },
     };
     return [
       {
@@ -895,6 +1163,42 @@ export class McpServer {
           'What to do next, derived from the state: { goal, completed (progress count), next (first 3 next_steps), blockers, suggestion }. Use at the start of a step; when next_steps is empty the suggestion tells you to set it via state.patch.',
         inputSchema: { type: 'object', properties: { ...stateTargetProps } },
         annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      {
+        name: 'agent.list',
+        description:
+          "List sub-agent state copies: scans <stateDir>/agents/ and returns { agents: [{ id, statePath, exists, summary (top-level keys + size, no values), lastModified }] }. Use it to discover parallel sub-agent sessions (hook session ids) and what they touched.",
+        inputSchema: { type: 'object', properties: {} },
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      {
+        name: 'agent.read',
+        description:
+          "Read a sub-agent's state (READ-ONLY): { agent, statePath, state }. Pass { agent: \"<id from agent.list>\" }. Use it to see what a parallel sub-agent is doing before merging its work.",
+        inputSchema: {
+          type: 'object',
+          properties: { agent: { type: 'string', description: 'Sub-agent id from agent.list.' } },
+          required: ['agent'],
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      {
+        name: 'agent.merge',
+        description:
+          "Merge a sub-agent's state copy into the MAIN state (under the cross-process lock): keys only in the sub state are taken, nested plain objects merge recursively, conflicting scalars follow keep: 'main' (default — the main value wins) or 'sub'. Returns { agent, keep, state, changes }. The sub state is NOT deleted — it is marked mergedAt (history).",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agent: { type: 'string', description: 'Sub-agent id from agent.list.' },
+            keep: {
+              type: 'string',
+              enum: ['main', 'sub'],
+              description: "Conflict policy for scalars (default 'main').",
+            },
+          },
+          required: ['agent'],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false },
       },
     ];
   }
@@ -1045,20 +1349,29 @@ export { resolveHostStateForCwd as resolveStatePathForCwd } from '@skillstate/co
  * `SKILLSTATE_SPEC_PATH` when not passed explicitly). State resolution is
  * ALWAYS per-project from the server's `process.cwd()`:
  * `<cwd>/.skillstate/skillstate.json` (the global bucket when cwd === home).
- * Hosts that launch local MCP servers with the project as cwd therefore get
- * per-project state without any baked path. Explicit `args.root`/`args.name`
- * remain available for in-process embedding. Defaults to the canonical
- * InterCode CTF spec.
+ * AGENT SCOPE: a non-empty `SKILLSTATE_AGENT_ID` env (or `args.agent`)
+ * scopes the default state file to `agents/<id>/skillstate.json` — host
+ * configs set the env per server instance when a sub-agent needs an
+ * isolated copy; the default is `''` (the main agent) and every tool call
+ * can still override via `{ agent }`. Hosts that launch local MCP servers
+ * with the project as cwd therefore get per-project state without any
+ * baked path. Explicit `args.root`/`args.name` remain available for
+ * in-process embedding. Defaults to the canonical InterCode CTF spec.
  */
 export async function launch(args?: LaunchArgs): Promise<McpServer> {
   const spec = resolveSpec(args, process.env);
   const statePath = resolveHostStateForCwd(process.cwd(), os.homedir());
   const root = args?.root ?? path.dirname(statePath);
   const name = args?.name ?? path.basename(statePath);
+  const agentEnv = process.env['SKILLSTATE_AGENT_ID'];
+  const agent =
+    args?.agent ??
+    (typeof agentEnv === 'string' && agentEnv.length > 0 ? agentEnv : '');
   const server = new McpServer({
     spec,
     root,
     name,
+    agent,
     tracker: args?.tracker,
   });
   return server.start(args?.input, args?.output);

@@ -3,9 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  PLUGIN_DEFAULT_AGENT_ID,
   createSkillStatePlugin,
   extractPatch,
   mergePatch,
+  mergeSkillState,
+  pluginAgentId,
   readSkillState,
   resolveStatePathForCwd,
   saveSkillState,
@@ -28,10 +31,10 @@ afterEach(() => {
 });
 
 /** `{ info, parts }` envelope as opencode 1.17 hands messages to transform. */
-function envelope(role: string, text: string): OpenCodeMessage {
+function envelope(role: string, text: string, sessionID = 's'): OpenCodeMessage {
   return {
-    info: { id: `id-${role}-${text}`, sessionID: 's', role },
-    parts: [{ id: `part-${role}-${text}`, sessionID: 's', type: 'text', text }],
+    info: { id: `id-${role}-${text}`, sessionID, role },
+    parts: [{ id: `part-${role}-${text}`, sessionID, type: 'text', text }],
   };
 }
 
@@ -41,6 +44,22 @@ function makeProject(): { project: string; statePath: string } {
   const statePath = path.join(project, '.skillstate', 'skillstate.json');
   process.chdir(project);
   return { project, statePath };
+}
+
+/** AGENT-SCOPED state file for a session id (8-char prefix rule). */
+function agentStatePath(project: string, sessionId: string): string {
+  return path.join(
+    project,
+    '.skillstate',
+    'agents',
+    sessionId.slice(0, 8),
+    'skillstate.json',
+  );
+}
+
+/** AGENT-SCOPED state file for the plugin fallback agent. */
+function defaultAgentStatePath(project: string): string {
+  return path.join(project, '.skillstate', 'agents', PLUGIN_DEFAULT_AGENT_ID, 'skillstate.json');
 }
 
 let lastCwd = process.cwd();
@@ -93,6 +112,55 @@ describe('readSkillState / saveSkillState', () => {
   it('saveSkillState swallows write errors (e.g. destination is a directory)', () => {
     const dir = makeTmp();
     expect(() => saveSkillState(dir, { a: 1 })).not.toThrow();
+    expect(fs.statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it('saveSkillState removes the lockfile after the write', () => {
+    const dir = makeTmp();
+    const statePath = path.join(dir, 'state.json');
+    saveSkillState(statePath, { a: 1 });
+    expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+});
+
+// ─── mergeSkillState (locked read-merge-write) ──────────────────────────────
+
+describe('mergeSkillState', () => {
+  it('applies the ⊕ merge (null deletes) and persists the envelope', () => {
+    const dir = makeTmp();
+    const statePath = path.join(dir, 'state.json');
+    saveSkillState(statePath, { obsolete: 'old', notes: 'kept' });
+    const merged = mergeSkillState(statePath, { obsolete: null, progress: 7 });
+    expect(merged).toEqual({ notes: 'kept', progress: 7 });
+    expect(readSkillState(statePath)).toEqual({ notes: 'kept', progress: 7 });
+  });
+
+  it('starts from {} for a missing state file and removes the lockfile', () => {
+    const dir = makeTmp();
+    const statePath = path.join(dir, 'state.json');
+    expect(mergeSkillState(statePath, { a: 1 })).toEqual({ a: 1 });
+    expect(readSkillState(statePath)).toEqual({ a: 1 });
+    expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+
+  it('serializes concurrent writers — every patch survives', async () => {
+    const dir = makeTmp();
+    const statePath = path.join(dir, 'state.json');
+    await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        Promise.resolve().then(() => mergeSkillState(statePath, { [`k${i}`]: i })),
+      ),
+    );
+    const state = readSkillState(statePath);
+    for (let i = 0; i < 12; i++) {
+      expect(state[`k${i}`]).toBe(i);
+    }
+    expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+
+  it('swallows unwritable state files (destination is a directory)', () => {
+    const dir = makeTmp();
+    expect(() => mergeSkillState(dir, { a: 1 })).not.toThrow();
     expect(fs.statSync(dir).isDirectory()).toBe(true);
   });
 });
@@ -166,6 +234,37 @@ describe('extractPatch', () => {
   });
 });
 
+// ─── pluginAgentId (session → agent scope) ──────────────────────────────────
+
+describe('pluginAgentId', () => {
+  it('uses the 8-char session prefix from input.sessionID', () => {
+    expect(pluginAgentId({ sessionID: 'ses_abcdef123456' })).toBe('ses_abcd');
+  });
+
+  it('uses the full session id when it is at most 8 chars', () => {
+    expect(pluginAgentId({ sessionID: 'ses' })).toBe('ses');
+  });
+
+  it('falls back to the first non-synthetic message info.sessionID', () => {
+    const messages = [
+      envelope('user', 'u1', 'ses_feedface99'),
+      envelope('assistant', 'a1', 'ses_feedface99'),
+    ];
+    expect(pluginAgentId({}, messages)).toBe('ses_feed');
+  });
+
+  it('ignores the synthetic skillstate carrier session', () => {
+    const messages = [envelope('user', 'u1', 'skillstate')];
+    expect(pluginAgentId({}, messages)).toBe(PLUGIN_DEFAULT_AGENT_ID);
+  });
+
+  it('falls back to default without any session id', () => {
+    expect(pluginAgentId({}, [])).toBe(PLUGIN_DEFAULT_AGENT_ID);
+    expect(pluginAgentId({}, undefined)).toBe(PLUGIN_DEFAULT_AGENT_ID);
+    expect(pluginAgentId({ sessionID: 42 })).toBe(PLUGIN_DEFAULT_AGENT_ID);
+  });
+});
+
 // ─── experimental.chat.messages.transform ───────────────────────────────────
 
 describe('createSkillStatePlugin — experimental.chat.messages.transform', () => {
@@ -205,12 +304,13 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
     expect(messages).toHaveLength(2); // 1 trimmed + 1 state
   });
 
-  it('injects state as a synthetic { info, parts } user element carrying the state JSON', async () => {
-    const { statePath } = makeProject();
+  it('injects the AGENT-SCOPED state derived from the message info.sessionID', async () => {
+    const { project } = makeProject();
+    const statePath = agentStatePath(project, 'ses_0123456789abcdef');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify({ progress: 42 }), 'utf-8');
     const hooks = await hooksFor(1);
-    const messages = [envelope('user', 'u1')];
+    const messages = [envelope('user', 'u1', 'ses_0123456789abcdef')];
     await hooks['experimental.chat.messages.transform']!({}, { messages });
 
     const stateElement = messages[messages.length - 1]!;
@@ -222,8 +322,22 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
     );
   });
 
-  it('falls back to {} state text for a corrupt state file', async () => {
-    const { statePath } = makeProject();
+  it('falls back to the default agent state when messages carry no sessionID', async () => {
+    const { project } = makeProject();
+    const statePath = defaultAgentStatePath(project);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ progress: 7 }), 'utf-8');
+    const hooks = await hooksFor(1);
+    const messages = [{ info: { id: 'x', role: 'user' }, parts: [{ type: 'text', text: 'u1' }] }];
+    await hooks['experimental.chat.messages.transform']!({}, { messages });
+    expect(messages[messages.length - 1]!.parts[0]!.text).toBe(
+      'Current skill state (JSON): {"progress":7}',
+    );
+  });
+
+  it('falls back to {} state text for a corrupt agent state file', async () => {
+    const { project } = makeProject();
+    const statePath = agentStatePath(project, 's');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, '{oops', 'utf-8');
     const hooks = await hooksFor(1);
@@ -252,14 +366,26 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
 // ─── experimental.session.compacting ────────────────────────────────────────
 
 describe('createSkillStatePlugin — experimental.session.compacting', () => {
-  it('pushes the state into an existing context array', async () => {
-    const { statePath } = makeProject();
+  it('pushes the session-scoped state into an existing context array', async () => {
+    const { project } = makeProject();
+    const statePath = agentStatePath(project, 's');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify({ step: 3 }), 'utf-8');
     const hooks = await hooksFor();
     const output = { context: ['existing note'] };
     await hooks['experimental.session.compacting']!({ sessionID: 's' }, output);
     expect(output.context).toEqual(['existing note', 'Skillstate: {"step":3}']);
+  });
+
+  it('uses the default agent state when the session id is missing', async () => {
+    const { project } = makeProject();
+    const statePath = defaultAgentStatePath(project);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ step: 9 }), 'utf-8');
+    const hooks = await hooksFor();
+    const output = { context: [] as string[] };
+    await hooks['experimental.session.compacting']!({} as { sessionID: string }, output);
+    expect(output.context).toEqual(['Skillstate: {"step":9}']);
   });
 
   it('initializes a missing context array', async () => {
@@ -274,8 +400,9 @@ describe('createSkillStatePlugin — experimental.session.compacting', () => {
 // ─── tool.execute.after ─────────────────────────────────────────────────────
 
 describe('createSkillStatePlugin — tool.execute.after', () => {
-  it('merges the state_patch (null deletes) from output.output and saves', async () => {
-    const { statePath } = makeProject();
+  it('merges the state_patch (null deletes) into the AGENT state from input.sessionID', async () => {
+    const { project } = makeProject();
+    const statePath = agentStatePath(project, 's');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(
       statePath,
@@ -289,40 +416,54 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
       { output: response, metadata: {} },
     );
     expect(readSkillState(statePath)).toEqual({ notes: 'kept', progress: 7 });
+    // The MAIN state file is untouched (agent scoping).
+    expect(fs.existsSync(path.join(project, '.skillstate', 'skillstate.json'))).toBe(false);
+  });
+
+  it('writes the default agent state when the session id is missing', async () => {
+    const { project } = makeProject();
+    const hooks = await hooksFor();
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', callID: 'c', args: {} } as { tool: string; sessionID: string; callID: string; args: unknown },
+      { output: '```json\n{"state_patch":{"progress":1},"action":"go"}\n```', metadata: {} },
+    );
+    expect(readSkillState(defaultAgentStatePath(project))).toEqual({ progress: 1 });
   });
 
   it('ignores non-string output.output', async () => {
-    const { statePath } = makeProject();
+    const { project } = makeProject();
     const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { output: { state_patch: { a: 1 } }, metadata: {} },
     );
-    expect(fs.existsSync(statePath)).toBe(false);
+    expect(fs.existsSync(defaultAgentStatePath(project))).toBe(false);
+    expect(fs.existsSync(agentStatePath(project, 's'))).toBe(false);
   });
 
   it('ignores a missing output.output', async () => {
-    const { statePath } = makeProject();
+    const { project } = makeProject();
     const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { metadata: {} },
     );
-    expect(fs.existsSync(statePath)).toBe(false);
+    expect(fs.existsSync(agentStatePath(project, 's'))).toBe(false);
   });
 
   it('writes nothing when the response has no state_patch', async () => {
-    const { statePath } = makeProject();
+    const { project } = makeProject();
     const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { output: 'no blocks at all', metadata: {} },
     );
-    expect(fs.existsSync(statePath)).toBe(false);
+    expect(fs.existsSync(agentStatePath(project, 's'))).toBe(false);
   });
 
-  it('starts from {} when the existing state file is corrupt', async () => {
-    const { statePath } = makeProject();
+  it('starts from {} when the existing agent state file is corrupt', async () => {
+    const { project } = makeProject();
+    const statePath = agentStatePath(project, 's');
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, '{oops', 'utf-8');
     const hooks = await hooksFor();
@@ -369,7 +510,7 @@ describe('resolveStatePathForCwd', () => {
   });
 });
 
-// ─── resolver mode: per-project state ───────────────────────────────────────
+// ─── resolver mode: per-project + agent-scoped state ────────────────────────
 
 describe('createSkillStatePlugin — per-project state resolution', () => {
   const realCwd = process.cwd();
@@ -402,10 +543,10 @@ describe('createSkillStatePlugin — per-project state resolution', () => {
     const hooks = await createSkillStatePlugin()({});
     const messages = [envelope('user', 'u1')];
     await hooks['experimental.chat.messages.transform']!({}, { messages });
-    // The injected state text is read from <project>/.skillstate/skillstate.json.
-    fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+    // The injected state text is read from the session-scoped agent state.
+    fs.mkdirSync(path.dirname(agentStatePath(project, 's')), { recursive: true });
     fs.writeFileSync(
-      path.join(project, '.skillstate', 'skillstate.json'),
+      agentStatePath(project, 's'),
       JSON.stringify({ version: 1, state: { where: 'project-a' } }),
     );
     await hooks['experimental.chat.messages.transform']!({}, { messages });
@@ -420,9 +561,9 @@ describe('createSkillStatePlugin — per-project state resolution', () => {
     const projectA = makeTmp();
     const projectB = makeTmp();
     for (const project of [projectA, projectB]) {
-      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+      fs.mkdirSync(path.dirname(agentStatePath(project, 's')), { recursive: true });
       fs.writeFileSync(
-        path.join(project, '.skillstate', 'skillstate.json'),
+        agentStatePath(project, 's'),
         JSON.stringify({ version: 1, state: { project: path.basename(project) } }),
       );
     }
@@ -459,13 +600,30 @@ describe('createSkillStatePlugin — per-project state resolution', () => {
     );
 
     const stateA = JSON.parse(
-      fs.readFileSync(path.join(projectA, '.skillstate', 'skillstate.json'), 'utf-8'),
+      fs.readFileSync(agentStatePath(projectA, 's'), 'utf-8'),
     ) as { state: Record<string, unknown> };
     const stateB = JSON.parse(
-      fs.readFileSync(path.join(projectB, '.skillstate', 'skillstate.json'), 'utf-8'),
+      fs.readFileSync(agentStatePath(projectB, 's'), 'utf-8'),
     ) as { state: Record<string, unknown> };
     expect(stateA.state).toEqual({ who: 'a' });
     expect(stateB.state).toEqual({ who: 'b' });
+  });
+
+  it('agent-scoped state files are isolated between sessions', async () => {
+    fakeHome();
+    const project = makeTmp();
+    chdir(project);
+    const hooks = await createSkillStatePlugin({})({});
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', sessionID: 'ses_one0000', callID: 'c', args: {} },
+      { output: '```json\n{"state_patch":{"who":"one"},"action":"go"}\n```', metadata: {} },
+    );
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', sessionID: 'ses_two0000', callID: 'c', args: {} },
+      { output: '```json\n{"state_patch":{"who":"two"},"action":"go"}\n```', metadata: {} },
+    );
+    expect(readSkillState(agentStatePath(project, 'ses_one0000'))).toEqual({ who: 'one' });
+    expect(readSkillState(agentStatePath(project, 'ses_two0000'))).toEqual({ who: 'two' });
   });
 
   it('compacting reads the state for the current cwd', async () => {
@@ -473,9 +631,9 @@ describe('createSkillStatePlugin — per-project state resolution', () => {
     const projectA = makeTmp();
     const projectB = makeTmp();
     for (const project of [projectA, projectB]) {
-      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+      fs.mkdirSync(path.dirname(agentStatePath(project, 's')), { recursive: true });
       fs.writeFileSync(
-        path.join(project, '.skillstate', 'skillstate.json'),
+        agentStatePath(project, 's'),
         JSON.stringify({ version: 1, state: { where: path.basename(project) } }),
       );
     }
@@ -502,7 +660,10 @@ describe('createSkillStatePlugin — per-project state resolution', () => {
       { output: '```json\n{"state_patch":{"global":true},"action":"go"}\n```', metadata: {} },
     );
     const globalState = JSON.parse(
-      fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
+      fs.readFileSync(
+        path.join(home, '.skillstate', 'global', 'agents', 's', 'skillstate.json'),
+        'utf-8',
+      ),
     ) as { state: Record<string, unknown> };
     expect(globalState.state).toEqual({ global: true });
     expect(fs.existsSync(path.join(home, '.skillstate', 'skillstate.json'))).toBe(false);

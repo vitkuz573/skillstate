@@ -96,7 +96,7 @@ opencode debug config   # mcp.skillstate appears in the resolved config
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
-# -> protocolVersion "2026-07-28" + 10 tools
+# -> protocolVersion "2026-07-28" + 13 tools
 ```
 
 ## API / Exports
@@ -111,7 +111,7 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
     `.launcherPath`, `.env`). No state path is embedded — the server resolves
     the state from its own cwd.
   - `saveMcpConfig(target, options?): Promise<string>` — atomic write.
-- `new McpServer(options: McpServerOptions)` — `{ spec, root, name, tracker? }`.
+- `new McpServer(options: McpServerOptions)` — `{ spec, root, name, agent?, tracker? }`.
   - `protocolVersion` is always `'2026-07-28'`; `initialize` answers exactly
     that regardless of what the client requested (per the MCP spec the client
     decides whether it can work with the server's revision).
@@ -129,9 +129,30 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
 before/after), `state.checkpoint` (named sidecar snapshot),
 `state.rollback` (restore from a checkpoint), `state.summary` (compact
 orientation + session info), `state.metrics`, `spec.get` (with a ready-made
-valid `example_state_patch`), and `spec.next` (goal/next/blockers guidance).
+valid `example_state_patch`), `spec.next` (goal/next/blockers guidance),
+plus the AGENT tools `agent.list` / `agent.read` / `agent.merge`.
 `state.merge` and `state.reset` are gone — `state.patch` validates, and
 rollback replaces reset.
+
+**Multi-agent (2.2.0).** Every state tool accepts `{ agent }` (sanitized
+`[A-Za-z0-9_-]`, ≤ 64) scoping the file to
+`<stateDir>/agents/<agentId>/<name>`; the server default comes from the
+`SKILLSTATE_AGENT_ID` env (`launch`) or the `McpServerOptions.agent`
+constructor option; the default `''` is the main agent. All writes
+(`state.patch`, `state.rollback`, `state.checkpoint`, `agent.merge`) run
+under `withStateLock` — a cross-process lockfile at `<state>.lock` with
+stale-TTL takeover — so 2-3 concurrent agent processes never interleave
+state writes. The `state.diff` baseline is persisted to
+`<stateDir>/.diff-baseline.json` (atomic, under the lock) — the
+"since your last look" semantics is now consistent across processes.
+The agent tools: `agent.list` scans `<stateDir>/agents/` and returns
+`{ agents: [{ id, statePath, exists, summary, lastModified }] }` (light
+summary: keys + size, no values); `agent.read` returns a sub-agent's state
+read-only; `agent.merge` folds a sub-agent copy into the main state under
+the lock — keys only in the sub state are taken, nested objects merge
+recursively, conflicting scalars follow `keep: 'main'` (default) or
+`'sub'` (schema defaults count as "never set"), and the sub copy is NOT
+deleted — it is marked `mergedAt` (history).
 
 **Resources (`resources/read`):** `skillstate://state` (the full
 `{ version, state }` envelope), `skillstate://spec`, and
