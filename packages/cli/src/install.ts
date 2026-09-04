@@ -9,7 +9,11 @@
 //   `mcp.skillstate` entry spliced into `opencode.jsonc` (with a timestamped
 //   backup, no baked env — the server resolves the state from its own cwd),
 //   `SKILL.md` into `~/.config/opencode/skills/`;
-// - Claude: `SKILL.md` into `~/.claude/skills/` + `.mcp.json` in the project;
+// - Claude: `.cjs` hook scripts into `~/.claude/hooks/skillstate/` +
+//   skillstate hook groups merged into `~/.claude/settings.json`
+//   (UserPromptSubmit / SessionStart(^compact$) / PostToolUse(^Bash$)),
+//   `SKILL.md` into `~/.claude/skills/`, `.mcp.json` (stdio server) in the
+//   project;
 // - Codex: `SKILL.md` into `~/.codex/skills/` (no MCP — TOML config untouched).
 //
 // An install manifest (`<stateDir>/install-manifest.json`) records every path
@@ -25,6 +29,7 @@ import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/sch
 import type { ProceduralSpec } from '@skillstate/core';
 import { OpenCodeAdapter } from '@skillstate/opencode';
 import { CodexAdapter, CODEX_HOOK_EVENTS } from '@skillstate/codex';
+import { ClaudeAdapter, CLAUDE_HOOK_EVENTS, removeSkillstateHookGroups } from '@skillstate/claude';
 import { findTopLevelObject, insertObjectEntry, parseJsonc, removeObjectEntry } from './jsonc.js';
 import { resolveInCwd } from './commands.js';
 
@@ -85,6 +90,8 @@ export interface InstallManifest {
   pluginPath?: string;
   skillPath?: string;
   hooksBackup?: string;
+  /** Claude: settings.json path + the generated `.cjs` script directory. */
+  hooks?: { configPath: string; scriptDir: string };
   mcp?: { configPath: string; format: 'opencode-jsonc' | 'claude-mcp-json' | 'codex-toml' };
 }
 
@@ -319,8 +326,11 @@ export function resolveInitSpec(cwd: string, flags: InitFlags): ProceduralSpec {
 }
 
 /** SKILL.md with a short frontmatter description + the adapter-generated body. */
-export function buildSkillMd(statePathRel: string, spec: ProceduralSpec): string {
-  const generated = new OpenCodeAdapter().generateSkillMd(spec, statePathRel);
+export function buildSkillMd(statePathRel: string, spec: ProceduralSpec, host: HostId = 'opencode'): string {
+  const generated =
+    host === 'claude'
+      ? new ClaudeAdapter().generateSkillMd(spec, statePathRel)
+      : new OpenCodeAdapter().generateSkillMd(spec, statePathRel);
   const body = generated.slice(generated.indexOf('\n---', 3) + '\n---\n'.length);
   return `---
 name: skillstate
@@ -344,16 +354,33 @@ export function buildMcpEntry(): Record<string, unknown> {
 }
 
 /**
- * `[mcp_servers.skillstate]` TOML block for `~/.codex/config.toml`. The
- * server resolves the per-project state from the session cwd, so no
- * `SKILLSTATE_STATE_PATH` is pinned.
+ * Claude Code `.mcp.json` entry (2.1.260 wire format: `type: "stdio"`,
+ * `command` is a string, args go to the separate `args` array). No
+ * environment is written — the server resolves the per-project state from
+ * its own cwd at startup.
+ */
+export function buildClaudeMcpEntry(): Record<string, unknown> {
+  const cmd = resolveMcpCommand();
+  return {
+    type: 'stdio',
+    command: cmd.command,
+    args: cmd.args,
+  };
+}
+
+/**
+ * `[mcp_servers.skillstate]` TOML block for `~/.codex/config.toml` (codex
+ * 0.142 wire format: `command` is a string, args go to the separate `args`
+ * array). The server resolves the per-project state from the session cwd,
+ * so no `SKILLSTATE_STATE_PATH` is pinned.
  */
 export function buildCodexMcpToml(): string {
   const cmd = resolveMcpCommand();
-  const args = [cmd.command, ...cmd.args].map((part) => JSON.stringify(part)).join(', ');
+  const args = cmd.args.map((part) => JSON.stringify(part)).join(', ');
   return [
     '[mcp_servers.skillstate]',
-    `command = [${args}]`,
+    `command = ${JSON.stringify(cmd.command)}`,
+    `args = [${args}]`,
     'enabled = true',
     '',
   ].join('\n');
@@ -469,6 +496,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     statePath: stateAbs,
     maxHistoryMessages: maxHistory,
     ...(previous.mcp !== undefined ? { mcp: previous.mcp } : {}),
+    ...(previous.hooks !== undefined ? { hooks: previous.hooks } : {}),
   };
 
   if (host === 'opencode') {
@@ -509,12 +537,44 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     manifest.pluginPath = hooksConfigPath;
   }
 
+  if (host === 'claude') {
+    const hooksDir = path.join(home, '.claude', 'hooks', 'skillstate');
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    const claude = new ClaudeAdapter();
+    if (!dry) {
+      // Self-contained .cjs scripts — one global script dir serves every
+      // project (each script resolves the state from the session cwd).
+      for (const event of CLAUDE_HOOK_EVENTS) {
+        await claude.saveHookScript(event, claude.claudeHookScriptPath(hooksDir, event));
+      }
+      // Merge the skillstate hook groups into the user settings.json.
+      // A backup is written only when the merge actually changes the file,
+      // so re-init stays byte-idempotent and never spams backups.
+      let existing = '{\n  "hooks": {}\n}\n';
+      const hadSettings = fs.existsSync(settingsPath);
+      if (hadSettings) {
+        existing = fs.readFileSync(settingsPath, 'utf-8');
+      }
+      const merged = claude.mergeHooksConfig(existing, { scriptDir: hooksDir });
+      if (merged !== existing) {
+        if (hadSettings) {
+          const backup = backupPathFor(settingsPath);
+          await atomicWriteFile(backup, existing);
+          manifest.hooksBackup = backup;
+        }
+        await atomicWriteFile(settingsPath, merged);
+      }
+    }
+    say(`hooks:    ${settingsPath} + ${hooksDir}/ (*.cjs)`);
+    manifest.hooks = { configPath: settingsPath, scriptDir: hooksDir };
+  }
+
   if (!flags.noSkill) {
     const skillAbs = path.join(skillDirFor(host, home), 'SKILL.md');
     if (!dry) {
       // The state file always lives inside cwd, so the SKILL.md reference is
       // always relative.
-      await atomicWriteFile(skillAbs, buildSkillMd('./.skillstate/skillstate.json', spec));
+      await atomicWriteFile(skillAbs, buildSkillMd('./.skillstate/skillstate.json', spec, host));
     }
     say(`skill:    ${skillAbs}`);
     manifest.skillPath = skillAbs;
@@ -564,7 +624,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
         }
         await atomicWriteFile(
           mcpJson,
-          `${JSON.stringify({ mcpServers: { ...servers, skillstate: buildMcpEntry() } }, null, 2)}\n`,
+          `${JSON.stringify({ mcpServers: { ...servers, skillstate: buildClaudeMcpEntry() } }, null, 2)}\n`,
         );
       }
       say(`mcp:      ${mcpJson} (skillstate server added)`);
@@ -649,6 +709,35 @@ export async function uninstall(options: UninstallOptions): Promise<number> {
   }
   const m = manifest as unknown as InstallManifest;
   say(`uninstall (${m.host})`);
+
+  // Claude hooks: settings.json is LIVE (env/permissions/model/etc must
+  // survive), so skillstate hook groups are removed surgically instead of
+  // restoring a backup; the generated `.cjs` script dir is deleted.
+  if (m.hooks !== undefined) {
+    if (fs.existsSync(m.hooks.configPath)) {
+      let text: string;
+      try {
+        text = fs.readFileSync(m.hooks.configPath, 'utf-8');
+      } catch {
+        text = '';
+      }
+      const result = text ? removeSkillstateHookGroups(text) : { text: '', changed: false };
+      if (result.changed) {
+        const backup = backupPathFor(m.hooks.configPath);
+        if (!dry) {
+          await atomicWriteFile(backup, text);
+          await atomicWriteFile(m.hooks.configPath, result.text);
+        }
+        say(`removed hooks: ${m.hooks.configPath} (backup: ${backup})`);
+      }
+    }
+    if (fs.existsSync(m.hooks.scriptDir)) {
+      if (!dry) {
+        fs.rmSync(m.hooks.scriptDir, { recursive: true, force: true });
+      }
+      say(`removed hook scripts: ${m.hooks.scriptDir}`);
+    }
+  }
 
   if (m.pluginPath !== undefined && fs.existsSync(m.pluginPath)) {
     if (!dry) {

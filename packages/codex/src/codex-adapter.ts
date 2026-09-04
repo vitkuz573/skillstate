@@ -25,9 +25,8 @@
  *
  * @non-paper — no adapters exist in arXiv 2608.26263v3.
  */
-import * as os from 'node:os';
 import * as path from 'node:path';
-import { atomicWriteFile, resolveStatePath } from '@skillstate/core';
+import { atomicWriteFile, resolveHostStateForCwd, resolveStatePath } from '@skillstate/core';
 import type { ProceduralSpec, StatePathRef } from '@skillstate/core';
 
 /** Codex hook events this adapter generates scripts for (script/CLI names). */
@@ -77,17 +76,11 @@ export interface CodexHooksConfigOptions {
  * Resolve the per-project state file for a working directory — the SAME
  * semantics as the OpenCode plugin (`<cwd>/.skillstate/skillstate.json`;
  * the global bucket `<home>/.skillstate/global/skillstate.json` when cwd
- * equals home). Pure path arithmetic, no filesystem access. Keep any copy
- * (generated scripts, fork-trim, MCP server) in sync.
+ * equals home). Single source of truth: {@link resolveHostStateForCwd} in
+ * `@skillstate/core` (the generated hook scripts keep a byte-equivalent
+ * embedded copy because they cannot import `@skillstate/*`).
  */
-export function resolveStateForCwd(cwd: string, home?: string): string {
-  const resolvedCwd = path.resolve(cwd);
-  const resolvedHome = path.resolve(home ?? os.homedir());
-  if (resolvedCwd === resolvedHome) {
-    return path.join(resolvedHome, '.skillstate', 'global', 'skillstate.json');
-  }
-  return path.join(resolvedCwd, '.skillstate', 'skillstate.json');
-}
+export const resolveStateForCwd = resolveHostStateForCwd;
 
 /**
  * OpenAI Codex platform adapter (@non-paper; see module doc).

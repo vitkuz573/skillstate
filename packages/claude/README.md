@@ -2,11 +2,10 @@
 
 # @skillstate/claude
 
-**Claude Code platform adapter for the @skillstate/core runtime — state injection and persistence via hook scripts.**
+**Claude Code platform adapter for the @skillstate/core runtime — state injection and patch persistence via hook scripts (2.1.260 hooks contract).**
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/claude)](https://www.npmjs.com/package/@skillstate/claude)
 [![node](https://img.shields.io/node/v/@skillstate/claude)](https://www.npmjs.com/package/@skillstate/claude)
-[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
 
 </div>
@@ -15,16 +14,40 @@
 
 `@skillstate/claude` bridges the paper-exact core ([`@skillstate/core`](../core))
 into **Claude Code** sessions. It emits self-contained CommonJS hook scripts
-(run via `node script.cjs`) that inject the persisted skill state into tool
-context and extract a validated `state_patch` from the model's response.
+(run via `node script.cjs`) that inject the persisted skill state into every
+turn, re-inject it after compaction, and merge a validated `state_patch` from
+Bash tool responses back into the state file.
 
 > **@non-paper** — no adapters exist in arXiv 2608.26263v3. This adapter is an
 > additive integration, not part of the paper.
+
+## The honest architecture (Claude Code 2.1.260)
+
+**History trimming from hooks is impossible.** The compaction-time hook cannot
+inject context (its only decision is `decision: "block"` — forbid compaction),
+and the post-compaction hook has no decision control at all (its
+`systemMessage` is discarded). So this adapter implements the state-injection
+model, not a trim model:
+
+| Event | Matcher | What the script does |
+| --- | --- | --- |
+| `UserPromptSubmit` | — (no matcher support) | Injects `Current skill state (JSON): {...}` as `additionalContext` — the model gets the authoritative state at every turn. |
+| `SessionStart` | `^compact$` | Re-injects the state right after auto/manual compaction — state SURVIVES compaction even though history was compressed. |
+| `PostToolUse` | `^Bash$` | Extracts a fenced ```json `state_patch` from the tool response (or a raw JSON / object `tool_response.state_patch`), applies the paper's ⊕ null-deletion merge, and writes `{ version: 1, state }`. stdout is `{}` or a `systemMessage` when the patch is invalid. |
+
+Reading and writing the full state is available at any time through the
+skillstate MCP server (`state.get` / `state.patch` — schema-validated) that
+`skillstate init` registers in the project's `.mcp.json`.
+
+Prompts stay O(T) with a fresh state at every turn. **True O(1) requires
+host-side trimming, which Claude Code does not expose.**
 
 ## Installation
 
 ```bash
 npm i @skillstate/core @skillstate/claude
+# or wire everything into a live host at once:
+skillstate init   # writes scripts, merges ~/.claude/settings.json, adds .mcp.json + SKILL.md
 ```
 
 Requires Node.js >= 20. TypeScript types are bundled.
@@ -37,66 +60,75 @@ import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const adapter = new ClaudeAdapter();
 
-// System-prompt boilerplate that turns any Claude Code session into
-// state-based execution mode:
-const modePrompt = adapter.generateAppendPrompt();
+// Self-contained hook scripts (Node builtins only). Each resolves the
+// per-project state from input.cwd at runtime — one global script dir
+// serves every project:
+const inject = adapter.generateHookScript('user-prompt-submit');
+const survive = adapter.generateHookScript('session-start-compact');
+const persist = adapter.generateHookScript('post-tool-use');
 
-// PreToolUse: injects the persisted state into the tool call's additionalContext.
-const pre = adapter.generateHookScript('PreToolUse', './.skillstate.json');
+// The hooks section for ~/.claude/settings.json (2.1.260 schema:
+// { hooks: { Event: [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ] } }):
+const hooksJson = adapter.generateHooksConfig('./.skillstate/skillstate.json', {
+  scriptDir: '/home/me/.claude/hooks/skillstate',
+});
 
-// PostToolUse: extracts state_patch from the response, validates it against the
-// embedded schema, applies the null-deletion ⊕ merge, and saves the state file.
-const post = adapter.generateHookScript(
-  'PostToolUse',
-  './.skillstate.json',
-  INTERCODE_CTF_SPEC.schema,
-);
+// Merge into a live settings.json — preserves env/permissions/model and
+// every foreign hook; byte-identical (no-op) when already wired:
+const merged = adapter.mergeHooksConfig(existingSettingsText, {
+  scriptDir: '/home/me/.claude/hooks/skillstate',
+});
 
-// PreCompact + SessionStart(compact): the best available O(1)-friendly pair.
-const hooks = adapter.generateAllHooksScripts('./.skillstate.json', INTERCODE_CTF_SPEC.schema);
-// hooks.preCompact       -> injects state + diff into compaction summary
-// hooks.sessionStartCompact -> re-injects state after compaction
+// Uninstall surgery: remove exactly the skillstate groups/handlers from a
+// live settings.json (mixed groups keep their foreign handlers):
+const { text, changed } = removeSkillstateHookGroups(liveSettingsText);
 
-// Persist a hook script to disk (atomic tmp + fsync + rename), returns path:
-const saved = await adapter.saveHookScript(
-  './hooks/post-tool-use.cjs',
-  'PostToolUse',
-  './.skillstate.json',
-  INTERCODE_CTF_SPEC.schema,
-);
+// Atomic persistence helpers (tmp + fsync + rename):
+await adapter.saveHookScript('post-tool-use', '/h/skillstate/post-tool-use.cjs');
+await adapter.saveSkillMd('/home/me/.claude/skills/skillstate/SKILL.md', spec);
 ```
 
 ## API / Exports
 
-Root path `@skillstate/claude` exports one thing: `ClaudeAdapter`.
+Root path `@skillstate/claude` exports:
 
-- `new ClaudeAdapter()` — implements `PlatformAdapter` (`name = 'claude'`).
-- `generateHookScript(eventType, statePath, schema?): string` — where
-  `eventType` is `'PreToolUse' | 'PostToolUse'`. Accepts a raw path or a
-  `{ root, name }` ref confined by `resolveStatePath` (`..` escapes throw).
-- `generateCompactHookScript(statePath, schema?): string` — PreCompact script
-  injecting the current state + a diff since the last compact snapshot.
-- `generateSessionStartHookScript(statePath): string` — SessionStart hook with
-  a `source: "compact"` matcher.
-- `generateAllHooksScripts(statePath, schema?): { preCompact; sessionStartCompact }`.
+- `new ClaudeAdapter()` — implements `PlatformAdapter` (`name = 'claude'`):
+  `injectState`, `extractPatch`, `extractAction`, `formatPrompt`.
+- `generateHookScript(event, statePath?): string` — `event` is
+  `'user-prompt-submit' | 'session-start-compact' | 'post-tool-use'`.
+  Accepts a raw path or a `{ root, name }` ref confined by
+  `resolveStatePath` (`..` escapes throw). The path only documents the
+  header — the script resolves the state from the session cwd.
+- `generateHooksConfig(statePath?, options?): string` — JSON with ONLY the
+  `hooks` section. Options: `scriptDir`, `command`, `timeoutSeconds`
+  (default 30).
+- `mergeHooksConfig(existingJson, options?): string` — idempotent merge into
+  a live settings.json; preserves every other key.
+- `removeSkillstateHookGroups(existingJson): { text, changed }` — surgical
+  uninstall (pure groups dropped, mixed groups trimmed, empty events
+  removed).
+- `claudeHookScriptPath(scriptDir, event): string`.
+- `generateSkillMd(spec, statePath?): string` + `saveSkillMd`,
+  `saveHookScript(event, target, statePath?)`, `saveHooksConfig(target,
+  statePath?, options?)` — atomic writes.
 - `generateAppendPrompt(): string` — mode-switch prompt boilerplate.
-- `injectState(state, spec): string` / `formatPrompt(state, observation, spec): string`.
-- `extractPatch(response): StatePatch | null` / `extractAction(response): string | null`.
-- `saveHookScript(target, eventType, statePath, schema?): Promise<string>` —
-  generates a hook script and persists it atomically; returns the destination.
+- `CLAUDE_HOOK_EVENTS`, `CLAUDE_SESSION_START_MATCHER` (`^compact$`),
+  `CLAUDE_POST_TOOL_USE_MATCHER` (`^Bash$`), `CLAUDE_HOOK_TIMEOUT_SECONDS`.
+- `resolveStateForCwd(cwd, home?)` — re-export of the core
+  `resolveHostStateForCwd` (single source of truth for the per-project
+  resolver).
 
 ## Notes
 
-- **Honest limitation.** Claude Code hooks are **append-only** — history cannot
-  be trimmed from hooks, so true O(1) is not possible. The hooks inject state
-  into the compaction summary (PreCompact) and re-inject it after compaction
-  (SessionStart), but the conversation history keeps growing until the host
-  trims it.
-- The generated scripts are self-contained CommonJS and embed the schema, so
-  unknown keys / wrong types are rejected and **malformed outputs are never
-  persisted** — state corruption by a bad patch is impossible.
-- Depends on [`@skillstate/core`](../core) for the ⊕ merge semantics
-  (`mergeState`), `PromptTransformer`, `atomicWriteFile`, and `resolveStatePath`.
+- **Honest limitation.** Claude Code hooks cannot trim history and cannot
+  inject context at compaction time, so prompts are O(T) with fresh state
+  per turn. The injected state is authoritative — history is not.
+- The generated scripts are self-contained CommonJS. Malformed patches are
+  never persisted — the ⊕ merge either fully applies or the hook reports a
+  `systemMessage` and leaves the state file untouched.
+- Depends on [`@skillstate/core`](../core) for `PromptTransformer`,
+  `atomicWriteFile`, `resolveStatePath`, and the shared
+  `resolveHostStateForCwd`.
 
 ## Related
 

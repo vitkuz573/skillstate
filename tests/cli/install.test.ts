@@ -610,17 +610,126 @@ describe('autoInstall — opencode', () => {
     expect(code).toBe(0);
     expect(fs.readFileSync(mcpJson, 'utf-8')).toBe('{"mcpServers": {}}');
     expect(fs.existsSync(path.join(home, '.claude', 'skills'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.claude', 'settings.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate'))).toBe(false);
   });
 
-  it('uninstall claude --dry-run writes nothing', async () => {
+  it('claude: uninstall --dry-run writes nothing', async () => {
     const home = makeBareHome('claude');
     const project = makeTmp();
     await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    const before = fs.readFileSync(settingsPath, 'utf-8');
     const mcpJson = path.join(project, '.mcp.json');
-    const before = fs.readFileSync(mcpJson, 'utf-8');
+    const mcpBefore = fs.readFileSync(mcpJson, 'utf-8');
     expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } })).toBe(0);
-    expect(fs.readFileSync(mcpJson, 'utf-8')).toBe(before);
+    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(before);
+    expect(fs.readFileSync(mcpJson, 'utf-8')).toBe(mcpBefore);
+    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate', 'user-prompt-submit.cjs'))).toBe(true);
     expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(true);
+    expect(output()).toContain('[dry-run]');
+  });
+
+  it('claude: uninstall removes hook groups, scripts, mcp entry; live settings survive', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify(
+        {
+          env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+          permissions: { allow: ['Bash(npm run *)'] },
+          hooks: {
+            PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    expect(await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } })).toBe(0);
+
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      env?: unknown;
+      permissions?: unknown;
+      hooks?: Record<string, unknown>;
+    };
+    expect(after.env).toEqual({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' });
+    expect(after.permissions).toEqual({ allow: ['Bash(npm run *)'] });
+    expect(after.hooks).toEqual({
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
+    });
+    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate'))).toBe(false);
+    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(true);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+  });
+
+  it('claude: uninstall with mixed skillstate groups keeps foreign handlers and is a no-op when hooks config is missing', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    // Make the skillstate group mixed with a foreign handler.
+    const doc = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    doc.hooks.UserPromptSubmit[0].hooks.unshift({ type: 'command', command: 'keep-me' });
+    fs.writeFileSync(settingsPath, JSON.stringify(doc));
+    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    const mixed = after.hooks.UserPromptSubmit.find(
+      (g) => g.hooks.some((h) => h.command === 'keep-me'),
+    );
+    expect(mixed.hooks).toHaveLength(1);
+    expect(mixed.hooks[0].command).toBe('keep-me');
+    expect(JSON.stringify(after)).not.toContain('user-prompt-submit.cjs');
+  });
+
+  it('claude: uninstall keeps foreign groups when the script dir was already deleted', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    fs.rmSync(path.join(home, '.claude', 'hooks', 'skillstate'), { recursive: true, force: true });
+    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
+    expect(code).toBe(0);
+    const after = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf-8')) as {
+      hooks?: Record<string, unknown>;
+    };
+    expect(after.hooks?.UserPromptSubmit).toBeUndefined();
+    expect(after.hooks?.SessionStart).toBeUndefined();
+    expect(after.hooks?.PostToolUse).toBeUndefined();
+  });
+
+  it('claude: uninstall survives an unreadable hooks config without failing', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    // Point the hooks record at a DIRECTORY so readFileSync throws (EISDIR).
+    const manifestPath = path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME);
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as InstallManifest;
+    manifest.hooks = {
+      configPath: path.join(home, '.claude', 'some-dir'),
+      scriptDir: path.join(home, '.claude', 'hooks', 'skillstate'),
+    };
+    fs.mkdirSync(manifest.hooks.configPath);
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
+    expect(code).toBe(0);
+    expect(fs.existsSync(manifest.hooks.scriptDir)).toBe(false);
+  });
+
+  it('claude: uninstall skips both hook steps when the settings file is already gone', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    fs.rmSync(path.join(home, '.claude', 'settings.json'));
+    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
+    expect(code).toBe(0);
+    expect(output()).not.toContain('removed hooks:');
   });
 
   it('uninstall skips the opencode mcp rollback when the entry is absent', async () => {
@@ -640,7 +749,7 @@ describe('autoInstall — opencode', () => {
 });
 
 describe('autoInstall — claude & codex', () => {
-  it('claude: installs skill + project .mcp.json, keeps existing servers', async () => {
+  it('claude: installs hooks+scripts, skill, stdio .mcp.json; keeps existing servers and hooks', async () => {
     const home = makeBareHome('claude');
     const project = makeTmp();
     const mcpJson = path.join(project, '.mcp.json');
@@ -648,13 +757,68 @@ describe('autoInstall — claude & codex', () => {
       mcpJson,
       JSON.stringify({ mcpServers: { existing: { command: 'x' } } }, null, 2),
     );
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        model: 'claude-opus-5',
+        permissions: { allow: ['Bash(ls)'] },
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }] },
+      }),
+    );
     const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
     expect(code).toBe(0);
-    const doc = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as { mcpServers: Record<string, unknown> };
+
+    // MCP: stdio server entry in the project .mcp.json.
+    const doc = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as { mcpServers: Record<string, any> };
     expect(Object.keys(doc.mcpServers).sort()).toEqual(['existing', 'skillstate']);
+    expect(doc.mcpServers.skillstate).toEqual({
+      type: 'stdio',
+      command: 'node',
+      args: [expect.stringContaining('mcp.js')],
+    });
     expect(readManifest(project).mcp).toEqual({ configPath: mcpJson, format: 'claude-mcp-json' });
-    expect(fs.existsSync(path.join(home, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
-    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(true);
+
+    // Hooks: settings.json merged, live keys + foreign hooks preserved.
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      model?: string;
+      permissions?: unknown;
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    };
+    expect(settings.model).toBe('claude-opus-5');
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls)'] });
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(settings.hooks.SessionStart[0].matcher).toBe('^compact$');
+    expect(settings.hooks.PostToolUse[0].matcher).toBe('^Bash$');
+    expect(readManifest(project).hooks).toEqual({
+      configPath: settingsPath,
+      scriptDir: path.join(home, '.claude', 'hooks', 'skillstate'),
+    });
+
+    // Scripts on disk for all three events.
+    for (const event of ['user-prompt-submit', 'session-start-compact', 'post-tool-use']) {
+      expect(
+        fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate', `${event}.cjs`)),
+      ).toBe(true);
+    }
+    // Skill installed via the Claude adapter body.
+    const skill = fs.readFileSync(
+      path.join(home, '.claude', 'skills', 'skillstate', 'SKILL.md'),
+      'utf-8',
+    );
+    expect(skill).toContain('UserPromptSubmit');
+    expect(skill).toContain('state.patch');
+
+    // A timestamped settings backup holds the ORIGINAL text.
+    const backup = fs
+      .readdirSync(path.dirname(settingsPath))
+      .find((f) => f.startsWith('settings.json.bak.'));
+    expect(backup).toBeDefined();
+    expect(JSON.parse(fs.readFileSync(path.join(path.dirname(settingsPath), backup!), 'utf-8')).model).toBe(
+      'claude-opus-5',
+    );
   });
 
   it('claude: is idempotent and corrupt .mcp.json is treated as empty', async () => {
@@ -663,9 +827,20 @@ describe('autoInstall — claude & codex', () => {
     fs.writeFileSync(path.join(project, '.mcp.json'), '{oops', 'utf-8');
     expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
     const first = fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8');
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    const settingsFirst = fs.readFileSync(settingsPath, 'utf-8');
+    const backupsFirst = fs
+      .readdirSync(path.dirname(settingsPath))
+      .filter((f) => f.startsWith('settings.json.bak.'));
     expect(JSON.parse(first).mcpServers.skillstate).toBeDefined();
     expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
     expect(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).toBe(first);
+    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(settingsFirst);
+    expect(
+      fs
+        .readdirSync(path.dirname(settingsPath))
+        .filter((f) => f.startsWith('settings.json.bak.')),
+    ).toHaveLength(backupsFirst.length);
   });
 
   it('claude: creates .mcp.json when none exists and skips existing skillstate entry', async () => {

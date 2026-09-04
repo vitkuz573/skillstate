@@ -23,5 +23,6 @@ export * from './logger.js';
 // @non-paper Wave-4 DX helpers (additive, opt-in).
 export * from './provider.js';
 export * from './config.js';
+export * from './host-state.js';
 export * from './shutdown.js';
 export * from './schemas/index.js';

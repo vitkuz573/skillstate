@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-924%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-969%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -182,7 +182,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 
 | Host | Mechanism | State injection | O(1)? |
 | --- | --- | --- | --- |
-| **Claude Code** | `PreCompact` / `PostToolUse` / `SessionStart(compact)` hook scripts + append prompt | state injected into compaction summary and tool context (`additionalContext`) | additive — host history is never trimmed |
+| **Claude Code** | `UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)` hook scripts + `~/.claude/settings.json` merge + stdio `.mcp.json` + SKILL.md | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
 | **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
 | **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
 | **MCP** | stdio JSON-RPC server (`state.get` / `state.patch` / `state.merge` / `state.reset` / `spec.get` / `state.metrics`) | any MCP client accesses the runtime state as tools | n/a — runtime access, not prompting |
@@ -406,25 +406,42 @@ The plugin also hooks:
 - `experimental.session.compacting`: injects state into compaction context so the summary preserves it.
 - `tool.execute.after`: persists state patches from LLM responses to disk.
 
-### Claude Code — best available strategy
+### Claude Code — state-injection strategy (2.1.260)
 
-Claude Code hooks are **append-only** — history cannot be trimmed from hooks. The best strategy uses two hooks:
+History trimming from Claude Code hooks is **impossible**: the
+compaction-time hook supports only `decision: "block"` (forbid compaction —
+no context injection), and the post-compaction hook has no decision control
+at all (its `systemMessage` is discarded). The adapter therefore implements
+the **state-injection model**:
 
 ```ts
 const adapter = new ClaudeAdapter();
 
-// PreCompact: injects current state + diff into compaction summary
-const preCompact = adapter.generateCompactHookScript('./.skillstate.json', schema);
+// Injects the state into every turn (no matcher — fires on every prompt):
+const inject = adapter.generateHookScript('user-prompt-submit');
 
-// SessionStart (source: compact): re-injects state after compaction
-const sessionStart = adapter.generateSessionStartHookScript('./.skillstate.json');
+// Matcher ^compact$: re-injects the state right after compaction —
+// state survives the compressed history:
+const survive = adapter.generateHookScript('session-start-compact');
 
-// Or generate both at once:
-const hooks = adapter.generateAllHooksScripts('./.skillstate.json', schema);
-// hooks.preCompact, hooks.sessionStartCompact
+// Matcher ^Bash$: extracts state_patch from the tool response, applies the
+// ⊕ null-deletion merge, saves the state file:
+const persist = adapter.generateHookScript('post-tool-use');
+
+// Hooks section for ~/.claude/settings.json, or merge it into a live
+// settings.json (idempotent; env/permissions/model and foreign hooks
+// preserved):
+const hooksJson = adapter.generateHooksConfig('./.skillstate/skillstate.json', { scriptDir });
+const merged = adapter.mergeHooksConfig(existingSettingsText, { scriptDir });
 ```
 
-**Honest limitation**: True O(1) is not possible in Claude Code without host-side trimming. The hooks inject state into the compaction summary and re-inject after compaction, but the conversation history itself continues to grow until the host trims it.
+`skillstate init` wires all of it: scripts to `~/.claude/hooks/skillstate/`,
+groups merged into `~/.claude/settings.json`, a stdio `skillstate` server in
+the project `.mcp.json` (`state.get` / `state.patch` MCP tools), and
+`SKILL.md` into `~/.claude/skills/`.
+
+**Honest limitation**: prompts stay O(T) with a fresh state at every turn —
+true O(1) requires host-side trimming, which Claude Code does not expose.
 
 ## Metrics
 
@@ -497,17 +514,17 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
 - [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios fixed as fixtures (`tests/core/paper-fidelity.test.ts`)
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
-- [x] Claude adapter: `PreCompact` hook injects state + diff into compaction summary; `SessionStart(compact)` re-injects after compaction
+- [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into `~/.claude/settings.json`; stdio `.mcp.json` + `SKILL.md` installed by `skillstate init`
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` inject and persist state; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
 - [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server exposing `state.get`/`state.patch`/`state.merge`/`state.reset`/`spec.get`/`state.metrics`, with `Content-Length` framing support and secret redaction
-- [ ] Claude Code limitation: history is append-only from hooks — true O(1) requires host-side trimming
+- [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming
 - [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 
 ## Development
 
 ```bash
 npm ci
-npm test                # 924 tests
+npm test                # 969 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc -b
 npm run build           # tsc -b — emits each packages/*/dist/

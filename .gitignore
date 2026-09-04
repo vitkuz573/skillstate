@@ -36,5 +36,8 @@ state.json.*
 /skillstate.json
 /skillstate-report.json
 
+# per-project MCP runtime config — NEVER commit
+/.mcp.json
+
 # NOTE: skill-spec.json is NOT ignored — it is the declarative task config.
 # Committing it is the user's choice (recommended for sharing a procedure).
