@@ -1,399 +1,438 @@
 /**
- * @non-paper adapter — no adapters exist in arXiv 2608.26263v3.
+ * OpenAI Codex CLI adapter (codex 0.142 hooks contract, verified against
+ * codex-rs `features.hooks` documentation and the hooks schema):
  *
- * This file bridges the paper-exact core (Algorithm 1 prompt, ⊕ merge,
- * §7 rollback-retry rejection) into OpenAI Codex CLI sessions.
+ * - hooks live in `~/.codex/hooks.json` (or inline `[hooks]` TOML tables,
+ *   `<repo>/.codex/hooks.json`, plugin-bundled `hooks/hooks.json`);
+ * - each hook is a `command` receiving ONE JSON document on stdin
+ *   (`{ session_id, transcript_path, cwd, hook_event_name, model,
+ *   permission_mode, ...event-specific }`) and running in the session cwd;
+ * - `UserPromptSubmit` (+`input`): JSON stdout
+ *   `{ hookSpecificOutput: { hookEventName: "UserPromptSubmit",
+ *   additionalContext } }` is added as developer context (plain stdout is
+ *   added too); `matcher` is ignored;
+ * - `SessionStart` (+`source`): same output shape with
+ *   `hookEventName: "SessionStart"`; `matcher` matches the source —
+ *   `^compact$` re-injects state after compaction;
+ * - `PostToolUse` (+`turn_id`, `tool_name`, `tool_use_id`, `tool_input`,
+ *   `tool_response`): `matcher` matches `tool_name` (Bash, apply_patch,
+ *   mcp__...); stdout may carry `systemMessage` / `hookSpecificOutput`.
  *
- * RESEARCH (github.com/openai/codex, docs "Hooks" / "AGENTS.md"): Codex
- * exposes a real hook system configured as `hooks.json` (or inline
- * `[hooks]` tables) under `~/.codex/` and `<repo>/.codex/`, plus the
- * `AGENTS.md` project-instructions file that Codex loads into the agent's
- * context. Hooks relevant to skillstate:
+ * There is NO history-trimming hook in Codex (hook outputs are limited to
+ * additionalContext / decision / systemMessage), so hooks give O(T) prompts
+ * with fresh state injection. The programmatic O(1) path lives in
+ * `fork-trim.ts` (codex app-server thread/fork + thread/rollback).
  *
- * - `UserPromptSubmit`  → `hookSpecificOutput.additionalContext` is added
- *   as extra developer context on every prompt submit (state injection).
- * - `PostToolUse`       → receives `tool_response` on stdin (JSON); a
- *   command hook can read it, extract `state_patch`, and write the state
- *   file (state persistence).
- * - `SessionStart`      → `matcher: "compact"` fires after compaction and
- *   can emit `additionalContext` (post-compaction re-injection).
- * - `PreCompact`        → Codex only honours the shared output fields
- *   (`continue`/`stopReason`/`systemMessage`) — it does NOT take
- *   `additionalContext` for this event, so compaction injection is done
- *   via `SessionStart(compact)` instead.
- *
- * LIMITATION: there is no `messages.transform` equivalent (unlike
- * OpenCode). Codex hooks are additive — host history is never trimmed, so
- * true O(1) is not possible. The best strategy is: `AGENTS.md` instructs
- * the model to read `.skillstate.json` each step and patch it, while the
- * hooks keep state injected/persisted around prompt submission and
- * compaction. No host history is dropped, hence @non-paper best-effort.
+ * @non-paper — no adapters exist in arXiv 2608.26263v3.
  */
+import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  atomicWriteFile,
-  resolveStatePath,
-} from '@skillstate/core';
-import type { StatePathRef } from '@skillstate/core';
-import type { ProceduralSpec } from '@skillstate/core';
+import { atomicWriteFile, resolveStatePath } from '@skillstate/core';
+import type { ProceduralSpec, StatePathRef } from '@skillstate/core';
 
-/** Codex lifecycle hook events this adapter can generate scripted hooks for. */
+/** Codex hook events this adapter generates scripts for (script/CLI names). */
 export type CodexHookEvent =
-  | 'UserPromptSubmit'
-  | 'PostToolUse'
-  | 'SessionStart';
+  | 'user-prompt-submit'
+  | 'session-start-compact'
+  | 'post-tool-use';
+
+/** All {@link CodexHookEvent} values in generation order. */
+export const CODEX_HOOK_EVENTS = [
+  'user-prompt-submit',
+  'session-start-compact',
+  'post-tool-use',
+] as const satisfies readonly CodexHookEvent[];
+
+/** SessionStart matcher that fires after Codex compacts the conversation. */
+export const CODEX_SESSION_START_MATCHER = '^compact$';
+
+/** PostToolUse matcher restricted to Bash tool results. */
+export const CODEX_POST_TOOL_USE_MATCHER = '^Bash$';
 
 /**
- * Canonical `.cjs` filename suffix per Codex hook event, used by
- * {@link CodexAdapter.codexHookScriptPath} so `hooks.json` commands and the
- * on-disk hook scripts always agree.
+ * `additionalContextLimit` written into every generated hook entry — the
+ * schema default (2500 chars), spelled out so the budget is explicit.
  */
-export const CODEX_HOOK_SCRIPT_SUFFIX = {
-  UserPromptSubmit: 'user-prompt-submit',
-  PostToolUse: 'post-tool-use',
-  SessionStart: 'session-start-compact',
-} as const;
+export const CODEX_ADDITIONAL_CONTEXT_LIMIT = 2500;
 
-/** Executable hook-script suffix for a {@link CodexHookEvent}. */
-export type CodexHookEventSuffix =
-  (typeof CODEX_HOOK_SCRIPT_SUFFIX)[CodexHookEvent];
+/** Default hook `timeout` in seconds (the scripts are tiny readers/writers). */
+export const CODEX_HOOK_TIMEOUT_SECONDS = 30;
 
-/** Options for {@link CodexAdapter.generateCodexAmendments}. */
-export interface CodexAmendmentsOptions {
-  /** Fill a `## State schema` section from the provided spec. */
-  spec?: ProceduralSpec;
-  /** Append the hook setup note (default true). */
-  includeHooksNote?: boolean;
+/** Options for {@link CodexAdapter.generateHooksConfig}. */
+export interface CodexHooksConfigOptions {
+  /**
+   * Directory holding the generated `.cjs` hook scripts. Defaults to the
+   * state file's directory; the CLI install passes `~/.codex/hooks/skillstate`.
+   */
+  scriptDir?: string;
+  /** Non-system messages the plugin keeps (records intent in the header). */
+  maxHistoryMessages?: number;
+  /** Full command override for every event (defaults to `node <script> <event>`). */
+  command?: string;
+  /** Hook `timeout` in seconds (default {@link CODEX_HOOK_TIMEOUT_SECONDS}). */
+  timeoutSeconds?: number;
 }
 
-/** Options for {@link CodexAdapter.generateCodexHooksConfig}. */
-export interface CodexHooksConfigOptions {
-  /** Command that runs the per-event hook scripts. Overrides the default. */
-  command?: string;
-  /** `matcher` for the `SessionStart` hook (default `compact`). */
-  sessionStartMatcher?: string;
+/**
+ * Resolve the per-project state file for a working directory — the SAME
+ * semantics as the OpenCode plugin (`<cwd>/.skillstate/skillstate.json`;
+ * the global bucket `<home>/.skillstate/global/skillstate.json` when cwd
+ * equals home). Pure path arithmetic, no filesystem access. Keep any copy
+ * (generated scripts, fork-trim, MCP server) in sync.
+ */
+export function resolveStateForCwd(cwd: string, home?: string): string {
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedHome = path.resolve(home ?? os.homedir());
+  if (resolvedCwd === resolvedHome) {
+    return path.join(resolvedHome, '.skillstate', 'global', 'skillstate.json');
+  }
+  return path.join(resolvedCwd, '.skillstate', 'skillstate.json');
 }
 
 /**
  * OpenAI Codex platform adapter (@non-paper; see module doc).
  *
- * Codegen mirrors the Claude adapter's shape: every generator accepts a
- * raw path or a `{ root, name }` ref confined by
- * `resolveStatePath` — `..` escapes throw instead of embedding an unsafe
- * path into the generated artifact.
+ * Every generated hook script is a SELF-CONTAINED CommonJS file (Node
+ * builtins only, no `@skillstate/*` import): Codex executes them directly
+ * via `node <script> <event>` with the hook JSON on stdin, and each script
+ * resolves the per-project state from `input.cwd` at runtime — so one
+ * global `hooks.json` + one script directory serve every project.
  */
+/** Narrow record check for hooks.json documents (module scope). */
+function isPlainObjectDoc(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export class CodexAdapter {
   readonly name = 'codex';
 
   /**
-   * Generate an `AGENTS.md`-compatible amendment that puts the agent in
-   * state-based execution mode: read `.skillstate.json` each step, treat
-   * reasoning as discarded, and emit a `state_patch` that the hooks merge
-   * back into the state file.
+   * Canonical absolute path of the hook script for `event` inside
+   * `scriptDir` (e.g. `~/.codex/hooks/skillstate/post-tool-use.cjs`).
+   * {@link generateHooksConfig} and {@link saveHookScript} share this
+   * convention so the hooks.json commands and the on-disk scripts agree.
    */
-  generateCodexAmendments(
-    statePath: string | StatePathRef,
-    options?: CodexAmendmentsOptions,
-  ): string {
-    const resolved = this.resolve(statePath);
-    const spec = options?.spec;
-
-    const sections: string[] = [
-      `## State-based execution (skillstate)`,
-      ``,
-      `You are running in state-based execution mode. Your execution state is`,
-      `persisted in the JSON file at \\\`${resolved}\\\`.`,
-      ``,
-      `Read \\\`${resolved}\\\` at the start of EVERY step and trust it over`,
-      `this conversation; reasoning and history are discarded between steps.`,
-      ``,
-      `After each step, respond with a JSON block containing exactly two keys:`,
-      `\`state_patch\` and \`action\`.`,
-      ``,
-      '```json',
-      `{`,
-      `  "state_patch": { "field_to_update": "new_value", "obsolete_field": null },`,
-      `  "action": "next_action_name"`,
-      `}`,
-      '```',
-      ``,
-      `- In \`state_patch\`, set keys to \`null\` to delete them. Only include`,
-      `  fields you want to change. Omit fields to leave them unchanged.`,
-      `- Put anything you need to persist into \`state_patch\`; never rely on`,
-      `  the model remembering it from history.`,
-      `- \`action\` names what you will do next.`,
-    ];
-
-    if (spec) {
-      sections.push('', '## Skill state schema', '');
-      for (const [name, field] of Object.entries(spec.schema)) {
-        sections.push(
-          `- \`${name}\` (${field.type}): ${field.description ?? 'no description'}`,
-        );
-      }
-    }
-
-    if (options?.includeHooksNote !== false) {
-      sections.push(
-        '',
-        'A Codex hooks config (`.codex/hooks.json`) keeps this state injected on',
-        '`UserPromptSubmit` and re-injected after compaction, and persists your',
-        '`state_patch` on `PostToolUse`. Generate one with',
-        '`CodexAdapter.generateCodexHooksConfig`.',
-      );
-    }
-
-    return sections.join('\n') + '\n';
+  codexHookScriptPath(scriptDir: string, event: CodexHookEvent): string {
+    return path.join(scriptDir, `${event}.cjs`);
   }
 
   /**
-   * Generate a markdown "read the state file" instruction block — the
-   * inline form of the state-read contract (the core line the model
-   * must follow), suitable for embedding in an AGENTS.md, a skill body, or
-   * a system prompt.
-   */
-  generateCodexStateRead(statePath: string | StatePathRef): string {
-    const resolved = this.resolve(statePath);
-    return [
-      `You operate in state-based execution mode.`,
-      ``,
-      `1. Read \\\`${resolved}\\\` at the start of every step.`,
-      `2. Trust it over conversation history — history is discarded between steps.`,
-      `3. Reason about the next step, then output a fenced JSON block with`,
-      `   exactly two keys: \`state_patch\` (sparse update) and \`action\`.`,
-      `4. Set any key in \`state_patch\` to \`null\` to delete it.`,
-      ``,
-      `Never persist reasoning in the state; keep it only in \`state_patch\`.`,
-    ].join('\n');
-  }
-
-  /**
-   * Generate a self-contained Node CommonJS hook script for a Codex
-   * lifecycle event. The script is invoked by the hook's `command`; the
-   * event config (matcher) lives in the hooks.json document.
+   * Generate a Codex `hooks.json` document wiring the state lifecycle:
    *
-   * - `UserPromptSubmit`: read the state file and inject it as
-   *   `additionalContext` (runs on every prompt submit).
-   * - `SessionStart`: same injection shape; combined with a `compact`
-   *   matcher it re-injects state after Codex compacts the chat.
-   * - `PostToolUse`: read `tool_response` from stdin, extract
-   *   `state_patch`, schema-validate (when a schema is provided) and merge
-   *   it into the state file via the paper ⊕ operator. Malformed outputs
-   *   are rejected and never persisted.
-   */
-  generateCodexHookScript(
-    eventType: CodexHookEvent,
-    statePath: string,
-    schema?: ProceduralSpec['schema'],
-  ): string;
-  generateCodexHookScript(
-    eventType: CodexHookEvent,
-    stateRef: StatePathRef,
-    schema?: ProceduralSpec['schema'],
-  ): string;
-  generateCodexHookScript(
-    eventType: CodexHookEvent,
-    statePathOrRef: string | StatePathRef,
-    schema?: ProceduralSpec['schema'],
-  ): string {
-    const resolved = this.resolve(statePathOrRef);
-    const sp = JSON.stringify(resolved);
-
-    if (eventType === 'PostToolUse') {
-      return this.buildPostToolUse(sp, schema ?? {});
-    }
-    // UserPromptSubmit and SessionStart share the same injection body.
-    const context = this.buildInjection(sp);
-    return [
-      `// Codex hook: ${
-        eventType === 'SessionStart'
-          ? 'SessionStart (matcher: compact)'
-          : 'UserPromptSubmit'
-      }`,
-      `// Injects the current skill state as additionalContext so the model`,
-      `// never has to reconstruct execution context from history.`,
-      ...context,
-    ].join('\n');
-  }
-
-  /**
-   * Generate a Codex `hooks.json` document that wires the state-injection /
-   * persistence hooks into the agent lifecycle:
+   * - `UserPromptSubmit` → inject the current state as additionalContext;
+   * - `SessionStart` (matcher `^compact$`) → re-inject after compaction;
+   * - `PostToolUse` (matcher `^Bash$`) → persist `state_patch` blocks from
+   *   Bash tool outputs.
    *
-   * - `UserPromptSubmit` → inject current state (every prompt).
-   * - `SessionStart` (matcher `compact`) → re-inject state after compaction.
-   * - `PostToolUse` → extract `state_patch` and persist it.
+   * Commands are absolute `node <script> <event>` lines pointing at the
+   * generated `.cjs` scripts in `options.scriptDir` (default: the state
+   * file's directory).
    */
-  generateCodexHooksConfig(
+  generateHooksConfig(
     statePath: string | StatePathRef,
     options?: CodexHooksConfigOptions,
   ): string {
     const resolved = this.resolve(statePath);
-    const defaultCommand = (eventType: CodexHookEvent): string =>
-      `node ${JSON.stringify(this.codexHookScriptPath(resolved, eventType))}`;
+    const scriptDir = options?.scriptDir ?? path.dirname(resolved);
+    const command = (event: CodexHookEvent): string =>
+      options?.command ?? `node ${JSON.stringify(this.codexHookScriptPath(scriptDir, event))} ${event}`;
+    const timeout = options?.timeoutSeconds ?? CODEX_HOOK_TIMEOUT_SECONDS;
 
-    const sessionStartMatcher = options?.sessionStartMatcher ?? 'compact';
-    const command = options?.command;
+    const entry = (event: CodexHookEvent, statusMessage: string) => ({
+      type: 'command',
+      command: command(event),
+      timeout,
+      statusMessage,
+      additionalContextLimit: CODEX_ADDITIONAL_CONTEXT_LIMIT,
+    });
 
     const doc = {
       description:
-        'Skillstate lifecycle hooks: inject state per prompt, re-inject after compaction, persist state_patch.',
+        'skillstate lifecycle hooks: inject the per-project state on every prompt submit, re-inject after compaction, and persist state_patch blocks from Bash tool outputs.',
       hooks: {
         UserPromptSubmit: [
           {
-            hooks: [
-              {
-                type: 'command',
-                command:
-                  command ?? defaultCommand('UserPromptSubmit'),
-                statusMessage: 'Injecting skill state',
-              },
-            ],
+            hooks: [entry('user-prompt-submit', 'Injecting skill state')],
           },
         ],
         SessionStart: [
           {
-            matcher: sessionStartMatcher,
+            matcher: CODEX_SESSION_START_MATCHER,
             hooks: [
-              {
-                type: 'command',
-                command: command ?? defaultCommand('SessionStart'),
-                statusMessage: 'Re-injecting skill state after compaction',
-              },
+              entry(
+                'session-start-compact',
+                'Re-injecting skill state after compaction',
+              ),
             ],
           },
         ],
         PostToolUse: [
           {
-            hooks: [
-              {
-                type: 'command',
-                command: command ?? defaultCommand('PostToolUse'),
-                statusMessage: 'Persisting skill state patch',
-              },
-            ],
+            matcher: CODEX_POST_TOOL_USE_MATCHER,
+            hooks: [entry('post-tool-use', 'Persisting skill state patch')],
           },
         ],
       },
     };
 
-    return JSON.stringify(doc, null, 2) + '\n';
+    return `${JSON.stringify(doc, null, 2)}\n`;
   }
 
   /**
-   * Canonical absolute path of the generated hook script for a Codex event,
-   * derived from the state file name. Both {@link generateCodexHooksConfig}
-   * and {@link saveCodexHookScript} use this single convention so the
-   * `hooks.json` commands and the on-disk scripts always agree.
+   * Generate a self-contained CommonJS hook script for a Codex lifecycle
+   * event. The script reads ONE hook JSON document from stdin, resolves the
+   * state file from `input.cwd` (the session cwd) via the
+   * {@link resolveStateForCwd} semantics, and:
    *
-   * For `./.skillstate.json`:
-   * - `UserPromptSubmit` → `.../.codex-.skillstate-user-prompt-submit.cjs`
-   * - `SessionStart`    → `.../.codex-.skillstate-session-start-compact.cjs`
-   * - `PostToolUse`     → `.../.codex-.skillstate-post-tool-use.cjs`
+   * - `user-prompt-submit`: emits
+   *   `{ hookSpecificOutput: { hookEventName: "UserPromptSubmit",
+   *   additionalContext } }` carrying the current state JSON;
+   * - `session-start-compact`: the same injection with
+   *   `hookEventName: "SessionStart"` (state survives compaction);
+   * - `post-tool-use`: extracts a `state_patch` from the tool_response
+   *   (fenced ```json block or raw JSON), applies the ⊕ null-deletion merge
+   *   and writes the state file; stdout is `{}` or a `systemMessage` when
+   *   the patch is invalid.
    *
-   * Accepts a raw state path or a `{ root, name }` ref resolved via
-   * `resolveStatePath`.
+   * `statePath` is accepted for `{ root, name }` confinement (traversal
+   * refs throw) and documented in the script header; the content itself is
+   * cwd-resolving and never bakes an absolute state path in.
    */
-  codexHookScriptPath(
-    statePath: string | StatePathRef,
-    eventType: CodexHookEvent,
+  generateHookScript(
+    event: CodexHookEvent,
+    statePath?: string | StatePathRef,
   ): string {
-    const resolved = this.resolve(statePath);
-    const dir = path.dirname(resolved);
-    const base = path.basename(resolved, '.json');
-    return path.join(dir, `.codex-${base}-${CODEX_HOOK_SCRIPT_SUFFIX[eventType]}.cjs`);
+    const resolved = statePath === undefined ? undefined : this.resolve(statePath);
+    const header = `// State file (per-project resolver): ${
+      resolved ?? '<cwd>/.skillstate/skillstate.json (global bucket when cwd === home)'
+    }`;
+    if (event === 'post-tool-use') {
+      return this.buildPostToolUseScript(header);
+    }
+    const hookEventName =
+      event === 'session-start-compact' ? 'SessionStart' : 'UserPromptSubmit';
+    return [
+      '#!/usr/bin/env node',
+      `// skillstate Codex hook — ${hookEventName} (generated by @skillstate/codex).`,
+      '// Self-contained CommonJS: reads one hook JSON document on stdin,',
+      '// resolves the state from the SESSION cwd, and emits',
+      '// { hookSpecificOutput: { hookEventName, additionalContext } }.',
+      header,
+      "'use strict';",
+      'const fs = require("fs");',
+      'const os = require("os");',
+      'const path = require("path");',
+      '',
+      `const HOOK_EVENT_NAME = ${JSON.stringify(hookEventName)};`,
+      '',
+      'function resolveStatePathForCwd(cwd) {',
+      '  const resolvedCwd = path.resolve(cwd);',
+      '  const resolvedHome = path.resolve(os.homedir());',
+      '  if (resolvedCwd === resolvedHome) {',
+      '    return path.join(resolvedHome, ".skillstate", "global", "skillstate.json");',
+      '  }',
+      '  return path.join(resolvedCwd, ".skillstate", "skillstate.json");',
+      '}',
+      '',
+      'function readState(statePath) {',
+      '  try {',
+      '    if (fs.existsSync(statePath)) {',
+      '      const parsed = JSON.parse(fs.readFileSync(statePath, "utf-8"));',
+      '      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {',
+      '        if (parsed.state !== null && typeof parsed.state === "object" && !Array.isArray(parsed.state)) {',
+      '          return parsed.state;',
+      '        }',
+      '        return parsed;',
+      '      }',
+      '    }',
+      '  } catch (error) {}',
+      '  return {};',
+      '}',
+      '',
+      'let raw = "";',
+      'process.stdin.setEncoding("utf-8");',
+      'process.stdin.on("data", (chunk) => { raw += chunk; });',
+      'process.stdin.on("end", () => {',
+      '  let cwd = process.cwd();',
+      '  try {',
+      '    const input = JSON.parse(raw);',
+      '    if (typeof input.cwd === "string" && input.cwd.length > 0) {',
+      '      cwd = input.cwd;',
+      '    }',
+      '  } catch (error) {}',
+      '  const state = readState(resolveStatePathForCwd(cwd));',
+      '  const output = {',
+      '    hookSpecificOutput: {',
+      '      hookEventName: HOOK_EVENT_NAME,',
+      '      additionalContext: "Current skill state (JSON): " + JSON.stringify(state)',
+      '        + "\\nPersist anything you need into state via the skillstate MCP tools (state.patch). History is not reliable.",',
+      '    },',
+      '  };',
+      '  process.stdout.write(JSON.stringify(output));',
+      '});',
+      '',
+    ].join('\n');
   }
 
   /**
-   * @non-paper additive helper: generate the AGENTS.md amendment and persist
-   * it via `atomicWriteFile` (tmp + fsync + rename). Both the destination and
-   * the embedded state path accept raw strings or
+   * Generate a SKILL.md for Codex's skill directory
+   * (`~/.codex/skills/<name>/SKILL.md`). The body instructs the agent to
+   * treat the hook-injected state as authoritative (history is not
+   * reliable), to read state via the skillstate MCP tool `state.get`, and
+   * to persist via `state.patch` — the PostToolUse hook also merges any
+   * fenced ```json `state_patch` block printed by a Bash tool call.
+   */
+  generateSkillMd(spec: ProceduralSpec, statePath?: string): string {
+    const resolvedStatePath = statePath ?? './.skillstate/skillstate.json';
+    const fence = '```';
+    return [
+      '---',
+      `name: ${JSON.stringify(spec.name)}`,
+      `description: ${JSON.stringify(spec.instructions)}`,
+      `version: ${spec.version}`,
+      'execution_context:',
+      `  state_path: ${resolvedStatePath}`,
+      '  format: json',
+      '---',
+      '',
+      `# ${spec.name}`,
+      '',
+      spec.instructions,
+      '',
+      '## Execution Context',
+      '',
+      `Your execution state lives at \`${resolvedStatePath}\` (per project; a`,
+      'session started in $HOME uses `~/.skillstate/global/skillstate.json`).',
+      'The skillstate Codex hooks:',
+      '',
+      '- inject the CURRENT state as developer context on every prompt submit',
+      '  (`UserPromptSubmit`) and re-inject it after compaction',
+      '  (`SessionStart` matcher `^compact$`);',
+      '- watch every Bash tool result and merge a fenced ```json block carrying',
+      '  a `state_patch` into the state file (`PostToolUse`).',
+      '',
+      'The injected state is authoritative — history is not reliable. Never',
+      'reconstruct execution context from the conversation.',
+      '',
+      '## Process',
+      '',
+      '1. Read the current state from the injected context, or fetch it with',
+      '   the skillstate MCP tool `state.get`.',
+      '2. Observe the result of your last action.',
+      '3. Reason about what to do next, given the state and the observation.',
+      '4. Persist progress with the skillstate MCP tool `state.patch` (sparse',
+      '   patch; set a key to `null` to delete it), and/or emit a fenced JSON',
+      '   block with exactly two keys inside a Bash tool call so the',
+      '   `PostToolUse` hook merges it:',
+      '',
+      `${fence}json`,
+      '{',
+      '  "state_patch": { "key": "new_value", "obsolete_key": null },',
+      '  "action": "next_action_name"',
+      '}',
+      fence,
+      '',
+      '- In `state_patch`, set keys to `null` to delete them. Only include',
+      '  fields you want to change. Omit fields to leave them unchanged.',
+      '- Put anything you need to survive into `state_patch`; never rely on',
+      '  the conversation remembering it.',
+      '- `action` names what you will do next (e.g. "continue", "done").',
+      '',
+    ].join('\n');
+  }
+
+  /**
+   * Generate the hooks.json document and persist it via `atomicWriteFile`.
+   * Both the destination and the embedded state path accept raw strings or
    * `{ root, name }` refs confined by `resolveStatePath`. Returns the
    * absolute destination path.
    */
-  async saveCodexAmendments(
-    target: string | StatePathRef,
-    statePath: string | StatePathRef,
-    options?: CodexAmendmentsOptions,
-  ): Promise<string> {
-    const dest = this.resolve(target);
-    const resolved = this.resolve(statePath);
-    const content = this.generateCodexAmendments(resolved, options);
-    await atomicWriteFile(dest, content);
-    return dest;
-  }
-
-  /**
-   * @non-paper additive helper: generate the hooks.json document and persist
-   * it via `atomicWriteFile`. Both the destination and the embedded state
-   * path accept raw strings or `{ root, name }` refs. Returns the absolute
-   * destination path.
-   */
-  async saveCodexHooksConfig(
+  async saveHooksConfig(
     target: string | StatePathRef,
     statePath: string | StatePathRef,
     options?: CodexHooksConfigOptions,
   ): Promise<string> {
     const dest = this.resolve(target);
-    const resolved = this.resolve(statePath);
-    const content = this.generateCodexHooksConfig(resolved, options);
-    await atomicWriteFile(dest, content);
+    await atomicWriteFile(dest, this.generateHooksConfig(statePath, options));
     return dest;
   }
 
   /**
-   * @non-paper additive helper: generate a single hook script and persist it
-   * via `atomicWriteFile`. Accepts raw strings or `{ root, name }` refs for
-   * both the destination and the embedded state path. Returns the absolute
-   * destination path.
+   * Merge the skillstate hook groups into an existing `hooks.json` text.
+   * Idempotent: if any skillstate command is already wired, the document is
+   * returned unchanged. Existing (non-skillstate) hooks are preserved.
    */
-  async saveCodexHookScript(
-    eventType: CodexHookEvent,
-    statePath: string | StatePathRef,
-    schema?: ProceduralSpec['schema'],
-  ): Promise<string>;
-  async saveCodexHookScript(
-    target: string | StatePathRef,
-    eventType: CodexHookEvent,
-    statePath: string | StatePathRef,
-    schema?: ProceduralSpec['schema'],
-  ): Promise<string>;
-  async saveCodexHookScript(
-    targetOrEvent: string | StatePathRef | CodexHookEvent,
-    eventTypeOrPath: CodexHookEvent | string | StatePathRef,
-    statePathOrSchema?: string | StatePathRef | ProceduralSpec['schema'],
-    schema?: ProceduralSpec['schema'],
-  ): Promise<string> {
-    const refForm =
-      typeof targetOrEvent === 'string' &&
-      (targetOrEvent === 'UserPromptSubmit' ||
-        targetOrEvent === 'PostToolUse' ||
-        targetOrEvent === 'SessionStart');
-
-    const target: string | StatePathRef = refForm
-      ? this.codexHookScriptPath(
-          eventTypeOrPath as string | StatePathRef,
-          targetOrEvent as CodexHookEvent,
-        )
-      : (targetOrEvent as string | StatePathRef);
-    const eventType: CodexHookEvent = refForm
-      ? (targetOrEvent as CodexHookEvent)
-      : (eventTypeOrPath as CodexHookEvent);
-    const statePath: string | StatePathRef = refForm
-      ? (eventTypeOrPath as string | StatePathRef)
-      : (statePathOrSchema as string | StatePathRef);
-    const effectiveSchema: ProceduralSpec['schema'] | undefined = refForm
-      ? (statePathOrSchema as ProceduralSpec['schema'] | undefined)
-      : schema;
-
-    const dest = this.resolve(target);
-    const resolved = this.resolve(statePath);
-    const content = this.generateCodexHookScript(
-      eventType,
-      resolved,
-      effectiveSchema,
+  mergeHooksConfig(existingJson: string, options?: CodexHooksConfigOptions): string {
+    let doc: { description?: string; hooks?: Record<string, unknown> } = {};
+    try {
+      doc = JSON.parse(existingJson) as typeof doc;
+    } catch {
+      // Missing or malformed user file: start from a fresh document.
+    }
+    if (!isPlainObjectDoc(doc.hooks)) {
+      doc.hooks = {};
+    }
+    const scriptDir = options?.scriptDir ?? '<stateDir>/hooks';
+    const command = (event: CodexHookEvent): string =>
+      `node ${JSON.stringify(this.codexHookScriptPath(scriptDir, event))} ${event}`;
+    const skillstateCommands = new Set(
+      CODEX_HOOK_EVENTS.map((event) => JSON.stringify(command(event))),
     );
-    await atomicWriteFile(dest, content);
+    let alreadyWired = false;
+    for (const groups of Object.values(doc.hooks)) {
+      if (!Array.isArray(groups)) continue;
+      for (const group of groups) {
+        if (!isPlainObjectDoc(group) || !Array.isArray(group['hooks'])) continue;
+        for (const handler of group['hooks']) {
+          if (isPlainObjectDoc(handler) && skillstateCommands.has(JSON.stringify(handler['command']))) {
+            alreadyWired = true;
+          }
+        }
+      }
+    }
+    if (alreadyWired) {
+      return `${JSON.stringify(doc, null, 2)}\n`;
+    }
+    const statePathRef = { root: path.dirname(options?.scriptDir ?? '.'), name: 'skillstate.json' };
+    const generated = JSON.parse(
+      this.generateHooksConfig(statePathRef, { ...options, scriptDir }),
+    ) as { description?: string; hooks: Record<string, unknown> };
+    for (const [event, groups] of Object.entries(generated.hooks)) {
+      const existing = Array.isArray(doc.hooks[event])
+        ? (doc.hooks[event] as unknown[])
+        : [];
+      doc.hooks[event] = [...existing, ...(groups as unknown[])];
+    }
+    return `${JSON.stringify(doc, null, 2)}\n`;
+  }
+
+  /**
+   * Generate a hook script and persist it via `atomicWriteFile`. `target`
+   * is the script destination (usually
+   * {@link CodexAdapter.codexHookScriptPath}); `statePath` is forwarded to
+   * {@link generateHookScript}. Returns the absolute destination path.
+   */
+  async saveHookScript(
+    event: CodexHookEvent,
+    target: string | StatePathRef,
+    statePath?: string | StatePathRef,
+  ): Promise<string> {
+    const dest = this.resolve(target);
+    await atomicWriteFile(dest, this.generateHookScript(event, statePath));
+    return dest;
+  }
+
+  /**
+   * Generate a SKILL.md and persist it via `atomicWriteFile`. Returns the
+   * absolute destination path.
+   */
+  async saveSkillMd(
+    target: string | StatePathRef,
+    spec: ProceduralSpec,
+    statePath?: string,
+  ): Promise<string> {
+    const dest = this.resolve(target);
+    await atomicWriteFile(dest, this.generateSkillMd(spec, statePath));
     return dest;
   }
 
@@ -408,169 +447,168 @@ export class CodexAdapter {
       : resolveStatePath(target.root, target.name);
   }
 
-  /** Shared injection body for injection-only hooks (read + emit context). */
-  private buildInjection(sp: string): string[] {
+  /** PostToolUse script: extract state_patch, ⊕ merge, persist. */
+  private buildPostToolUseScript(header: string): string {
+    const fence = '```';
     return [
+      '#!/usr/bin/env node',
+      '// skillstate Codex hook — PostToolUse (generated by @skillstate/codex).',
+      '// Self-contained CommonJS: reads one hook JSON document on stdin,',
+      '// extracts state_patch from the tool_response (fenced ```json block or',
+      '// raw JSON), applies the null-deletion merge and writes the state file.',
+      '// stdout is "{}" or a systemMessage when the patch is invalid.',
+      header,
+      "'use strict';",
       'const fs = require("fs");',
-      `const stateFilePath = ${sp};`,
-      'let state = {};',
-      'try {',
-      '  if (fs.existsSync(stateFilePath)) {',
-      '    state = JSON.parse(fs.readFileSync(stateFilePath, "utf-8"));',
-      '  }',
-      '} catch (e) { state = {}; }',
-      'const output = {',
-      '  hookSpecificOutput: {',
-      '    additionalContext: "Current skill state (JSON): " + JSON.stringify(state)',
-      '  }',
-      '};',
-      'process.stdout.write(JSON.stringify(output));',
-    ];
-  }
-
-  /** PostToolUse body: extract, validate (if schema given), merge, persist. */
-  private buildPostToolUse(sp: string, schema: Record<string, unknown>): string {
-    const fence = '`' + '`' + '`';
-    const schemaJson = JSON.stringify(schema);
-
-    return [
-      '// Codex hook: PostToolUse',
-      '// Extracts state_patch from the tool_response, validates it against the',
-      '// embedded schema (when provided), applies the null-deletion merge, and',
-      '// saves. Malformed output is rejected and never persisted.',
-      'const fs = require("fs");',
-      `const stateFilePath = ${sp};`,
-      `const schema = ${schemaJson};`,
+      'const os = require("os");',
+      'const path = require("path");',
       '',
-      'function isPlainObject(v) {',
-      '  return typeof v === "object" && v !== null && !Array.isArray(v);',
+      'function isPlainObject(value) {',
+      '  return typeof value === "object" && value !== null && !Array.isArray(value);',
       '}',
       '',
-      'function mergePatch(base, patch) {',
-      '  function mergeInto(result, patchObj) {',
-      '    for (const key of Object.keys(patchObj)) {',
-      '      const value = patchObj[key];',
-      '      if (value === null) {',
-      '        delete result[key];',
-      '      } else if (isPlainObject(value) && isPlainObject(result[key])) {',
-      '        result[key] = mergeInto({ ...result[key] }, value);',
-      '      } else {',
-      '        result[key] = value;',
+      'function resolveStatePathForCwd(cwd) {',
+      '  const resolvedCwd = path.resolve(cwd);',
+      '  const resolvedHome = path.resolve(os.homedir());',
+      '  if (resolvedCwd === resolvedHome) {',
+      '    return path.join(resolvedHome, ".skillstate", "global", "skillstate.json");',
+      '  }',
+      '  return path.join(resolvedCwd, ".skillstate", "skillstate.json");',
+      '}',
+      '',
+      'function readState(statePath) {',
+      '  try {',
+      '    if (fs.existsSync(statePath)) {',
+      '      const parsed = JSON.parse(fs.readFileSync(statePath, "utf-8"));',
+      '      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {',
+      '        if (parsed.state !== null && typeof parsed.state === "object" && !Array.isArray(parsed.state)) {',
+      '          return parsed.state;',
+      '        }',
+      '        return parsed;',
       '      }',
       '    }',
-      '    return result;',
-      '  }',
-      '  return mergeInto({ ...base }, patch);',
+      '  } catch (error) {}',
+      '  return {};',
       '}',
       '',
-      'function validatePatchAgainstSchema(patch) {',
+      '// Paper ⊕ merge: null deletes a key, nested plain objects merge',
+      '// recursively, everything else replaces.',
+      'function mergePatch(base, patch) {',
+      '  const result = { ...base };',
       '  for (const key of Object.keys(patch)) {',
-      '    const field = schema[key];',
-      '    if (!field) {',
-      '      return "Unknown key: " + key;',
-      '    }',
       '    const value = patch[key];',
-      '    if (value === null) continue;',
-      '    const expected = field.type;',
-      '    let ok = false;',
-      '    if (expected === "string") ok = typeof value === "string";',
-      '    else if (expected === "number") ok = typeof value === "number";',
-      '    else if (expected === "boolean") ok = typeof value === "boolean";',
-      '    else if (expected === "array") ok = Array.isArray(value);',
-      '    else if (expected === "object") ok = isPlainObject(value);',
-      '    if (!ok) {',
-      '      return "Invalid type for field \'" + key + "\': expected " + expected +',
-      '        ", got " + (Array.isArray(value) ? "array" : typeof value);',
+      '    if (value === null) {',
+      '      delete result[key];',
+      '    } else if (isPlainObject(value) && isPlainObject(result[key])) {',
+      '      result[key] = mergePatch(result[key], value);',
+      '    } else {',
+      '      result[key] = value;',
       '    }',
       '  }',
-      '  return null;',
-      '}',
-      '',
-      'function isJsonObjectWithStatePatch(value) {',
-      '  return value !== null &&',
-      '    typeof value === "object" &&',
-      '    !Array.isArray(value) &&',
-      '    value.state_patch !== null &&',
-      '    typeof value.state_patch === "object" &&',
-      '    !Array.isArray(value.state_patch);',
-      '}',
-      '',
-      'function tryParseStandaloneJson(text) {',
-      '  const trimmed = String(text).trim();',
-      '  try {',
-      '    const parsed = JSON.parse(trimmed);',
-      '    if (isJsonObjectWithStatePatch(parsed)) return parsed;',
-      '  } catch (e) {}',
-      '  const first = trimmed.indexOf("{");',
-      '  const last = trimmed.lastIndexOf("}");',
-      '  if (first !== -1 && last > first) {',
-      '    try {',
-      '      const parsed = JSON.parse(trimmed.slice(first, last + 1));',
-      '      if (isJsonObjectWithStatePatch(parsed)) return parsed;',
-      '    } catch (e) {}',
-      '  }',
-      '  return null;',
-      '}',
-      '',
-      'function extractPatchString(content) {',
-      '  if (typeof content !== "string") return null;',
-      '  const match = content.match(/' + fence + 'json\\s*\\n?([\\s\\S]*?)\\n?\\s*' + fence + '/);',
-      '  if (match) {',
-      '    try {',
-      '      const parsed = JSON.parse(match[1]);',
-      '      if (isJsonObjectWithStatePatch(parsed)) return parsed;',
-      '    } catch (e) {}',
-      '  }',
-      '  return tryParseStandaloneJson(content);',
+      '  return result;',
       '}',
       '',
       'function readResponseText(response) {',
-      '  if (response === null || response === undefined) return "";',
       '  if (typeof response === "string") return response;',
       '  if (isPlainObject(response)) {',
       '    if (typeof response.content === "string") return response.content;',
       '    if (typeof response.text === "string") return response.text;',
       '    return JSON.stringify(response);',
       '  }',
-      '  return JSON.stringify(response);',
+      '  return response === null || response === undefined ? "" : String(response);',
       '}',
       '',
-      'let state = {};',
-      'try {',
-      '  if (fs.existsSync(stateFilePath)) {',
-      '    state = JSON.parse(fs.readFileSync(stateFilePath, "utf-8"));',
+      `const FENCE = ${JSON.stringify(fence)};`,
+      'const FENCE_RE = /' + '```' + 'json\\s*\\n?([\\s\\S]*?)\\n?\\s*' + '```' + '/;',
+      '// An open fence that never closes (truncated output) is still a patch',
+      '// attempt: match from ```json to end-of-text so it classifies as invalid.',
+      'const OPEN_FENCE_RE = /' + '```' + 'json\\s*\\n?([\\s\\S]+)$/',
+      '',
+      '// Look for a fenced ```json block: { patch } when it parses and carries',
+      '// an object state_patch, { invalid: true } when a block exists but is',
+      '// malformed, { absent: true } when there is no block at all.',
+      'function findFencedPatch(text) {',
+      '  const match = text.match(FENCE_RE) || text.match(OPEN_FENCE_RE);',
+      '  if (!match) return { absent: true };',
+      '  try {',
+      '    const parsed = JSON.parse(match[1]);',
+      '    if (isPlainObject(parsed) && isPlainObject(parsed.state_patch)) {',
+      '      return { patch: parsed.state_patch };',
+      '    }',
+      '  } catch (error) {}',
+      '  return { invalid: true };',
+      '}',
+      '',
+      '// Fallback: a raw JSON object with state_patch anywhere in the text.',
+      '// Ordinary JSON output without a state_patch key is simply not a patch.',
+      'function findRawPatch(text) {',
+      '  const trimmed = text.trim();',
+      '  const candidates = [];',
+      '  try {',
+      '    candidates.push(JSON.parse(trimmed));',
+      '  } catch (error) {}',
+      '  const first = trimmed.indexOf("{");',
+      '  const last = trimmed.lastIndexOf("}");',
+      '  if (first !== -1 && last > first) {',
+      '    try {',
+      '      candidates.push(JSON.parse(trimmed.slice(first, last + 1)));',
+      '    } catch (error) {}',
       '  }',
-      '} catch (e) { state = {}; }',
-      'let input = "";',
+      '  for (const candidate of candidates) {',
+      '    if (isPlainObject(candidate)) {',
+      '      if (isPlainObject(candidate.state_patch)) {',
+      '        return { patch: candidate.state_patch };',
+      '      }',
+      '      if (Object.prototype.hasOwnProperty.call(candidate, "state_patch")) {',
+      '        return { invalid: true };',
+      '      }',
+      '    }',
+      '  }',
+      '  return { absent: true };',
+      '}',
+      '',
+      'let raw = "";',
       'process.stdin.setEncoding("utf-8");',
-      'process.stdin.on("data", (chunk) => { input += chunk; });',
+      'process.stdin.on("data", (chunk) => { raw += chunk; });',
       'process.stdin.on("end", () => {',
       '  const output = {};',
       '  try {',
-      '    const parsed = JSON.parse(input);',
-      '    const response = parsed.tool_response ?? parsed.content ?? "";',
-      '    const text = readResponseText(response);',
-      '    let json;',
+      '    const input = JSON.parse(raw);',
+      '    let cwd = process.cwd();',
+      '    if (typeof input.cwd === "string" && input.cwd.length > 0) {',
+      '      cwd = input.cwd;',
+      '    }',
+      '    const statePath = resolveStatePathForCwd(cwd);',
+      '    const response = input.tool_response;',
+      '    let result;',
       '    if (isPlainObject(response) && isPlainObject(response.state_patch)) {',
-      '      json = response;',
+      '      result = { patch: response.state_patch };',
       '    } else {',
-      '      json = extractPatchString(text);',
+      '      const text = readResponseText(response);',
+      '      result = findFencedPatch(text);',
+      '      if (result.absent) result = findRawPatch(text);',
       '    }',
-      '    if (json && json.state_patch && typeof json.state_patch === "object" && !Array.isArray(json.state_patch)) {',
-      '      const validationError = validatePatchAgainstSchema(json.state_patch);',
-      '      if (validationError) {',
-      '        output.error = validationError;',
-      '        process.stdout.write(JSON.stringify(output));',
-      '        return;',
-      '      }',
-      '      state = mergePatch(state, json.state_patch);',
-      '      fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2));',
-      '    }',
-      '  } catch (e) {',
-      '    output.error = "Failed to process PostToolUse input: " + e.message;',
+    '    if (result.patch !== undefined) {',
+    '      const merged = mergePatch(readState(statePath), result.patch);',
+    '      try {',
+    '        fs.mkdirSync(path.dirname(statePath), { recursive: true });',
+    '        fs.writeFileSync(statePath, JSON.stringify({ version: 1, state: merged }, null, 2) + "\\n");',
+    '      } catch (writeError) {',
+    "        output.systemMessage = 'skillstate: failed to persist state (' + writeError.message + ')';",
+    '      }',
+    '      process.stdout.write(JSON.stringify(output));',
+    '      return;',
+    '    }',
+    '    if (result.invalid) {',
+    '      output.systemMessage =',
+    '        "skillstate: ignored an invalid state patch (expected a " + FENCE + "json block with a state_patch object)";',
+    '    }',
+      '  } catch (error) {',
+      '    output.systemMessage = "skillstate: failed to process PostToolUse input: " + error.message;',
       '  }',
       '  process.stdout.write(JSON.stringify(output));',
       '});',
+      '',
     ].join('\n');
   }
 }

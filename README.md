@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-924%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -184,7 +184,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | --- | --- | --- | --- |
 | **Claude Code** | `PreCompact` / `PostToolUse` / `SessionStart(compact)` hook scripts + append prompt | state injected into compaction summary and tool context (`additionalContext`) | additive — host history is never trimmed |
 | **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
-| **Codex** | `AGENTS.md` amendment + `UserPromptSubmit` / `PostToolUse` / `SessionStart(compact)` hooks | state injected per prompt and re-injected after compaction | no — host history is never trimmed |
+| **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
 | **MCP** | stdio JSON-RPC server (`state.get` / `state.patch` / `state.merge` / `state.reset` / `spec.get` / `state.metrics`) | any MCP client accesses the runtime state as tools | n/a — runtime access, not prompting |
 
 ### Claude Code
@@ -243,44 +243,68 @@ const plugin = adapter.generatePluginCode();
 ### codex
 
 ```ts
-import { CodexAdapter } from '@skillstate/codex';
+import { CodexAdapter, CodexForkSession, resolveStateForCwd } from '@skillstate/codex';
 
 const adapter = new CodexAdapter();
 
-// AGENTS.md amendment: read .skillstate.json each step, discard reasoning,
-// emit a two-key state_patch/action JSON block:
-const agentsMd = adapter.generateCodexAmendments('./.skillstate.json');
+// Per-project state file for a cwd — <cwd>/.skillstate/skillstate.json
+// (global bucket ~/.skillstate/global/skillstate.json when cwd === home):
+const statePath = resolveStateForCwd(process.cwd());
 
-// Standalone "read the state file" instruction block (skill / system prompt):
-const stateRead = adapter.generateCodexStateRead('./.skillstate.json');
+// Codex hooks.json (three events): inject state on UserPromptSubmit,
+// re-inject after compaction (SessionStart matcher ^compact$), persist
+// state_patch from Bash outputs (PostToolUse matcher ^Bash$):
+const hooksJson = adapter.generateHooksConfig(statePath, {
+  scriptDir: '~/.codex/hooks/skillstate',
+});
 
-// Codex hooks.json: inject state on UserPromptSubmit, re-inject after
-// compaction (SessionStart matcher: compact), persist state_patch on PostToolUse:
-const hooksJson = adapter.generateCodexHooksConfig('./.skillstate.json');
+// Idempotent merge into an existing hooks.json (foreign hooks preserved):
+const merged = adapter.mergeHooksConfig(existingHooksJson, {
+  scriptDir: '/home/me/.codex/hooks/skillstate',
+});
 
-// Canonical hook-script path for a given event. Both `generateCodexHooksConfig`
-// and `saveCodexHookScript` use this single convention so the hooks.json
-// commands and the on-disk scripts ALWAYS agree by filename:
-const script = adapter.codexHookScriptPath('./.skillstate.json', 'PostToolUse');
-// -> path/to/.codex-.skillstate-post-tool-use.cjs
+// Canonical hook-script path — generateHooksConfig and saveHookScript share
+// this convention so the hooks.json commands and the on-disk .cjs scripts
+// ALWAYS agree:
+const script = adapter.codexHookScriptPath(
+  '/home/me/.codex/hooks/skillstate',
+  'post-tool-use',
+); // -> /home/me/.codex/hooks/skillstate/post-tool-use.cjs
 
-// Generate a single hook script and persist it to the canonical path (no
-// explicit target) or to an explicit target you pass as the first argument:
-const scriptPath = await adapter.saveCodexHookScript(
-  'PostToolUse',
-  './.skillstate.json',
+// Generate a self-contained .cjs hook script and persist it:
+const scriptPath = await adapter.saveHookScript(
+  'post-tool-use',
+  '/home/me/.codex/hooks/skillstate/post-tool-use.cjs',
+  statePath,
 );
+
+// SKILL.md for ~/.codex/skills/skillstate/SKILL.md:
+const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate/skillstate.json');
 ```
 
-The `PostToolUse` hook parses `state_patch` from the `tool_response`: it accepts
-both fenced ```json blocks and an unfenced JSON object, and is
-tolerant of wrappers such as `Here is: {...}`. `UserPromptSubmit` and
-`SessionStart` inject the current state as `additionalContext`.
+The hook scripts are self-contained CommonJS (Node builtins only) and resolve
+the state from the session `cwd` — one global `hooks.json` + one script
+directory serve every project. The `post-tool-use` script parses
+`state_patch` from the `tool_response`: it accepts both fenced ```json
+blocks and an unfenced JSON object, and is tolerant of wrappers such as
+`Here is: {...}`. `user-prompt-submit` and `session-start-compact` inject
+the current state as `additionalContext`.
 
-**Honest limitation**: Codex has no `messages.transform` equivalent, so host
-history is never trimmed — true O(1) is not possible. The hooks keep the state
-injected per prompt and persisted per tool call, and the `AGENTS.md` amendment
-tells the model to trust the state file over the conversation.
+**Honest limitation**: Codex hooks cannot trim host conversation history —
+hooks alone give O(T) prompts. The programmatic O(1) path is
+`CodexForkSession` (experimental, non-interactive runs): it drives
+`codex app-server` over newline-delimited JSON-RPC (`thread/start`,
+`turn/start` + `turn/completed`) and trims history via
+`thread/fork { beforeTurnId }` / `thread/rollback`, so the forked thread's
+prompt holds only instructions + state file + the newest turns.
+
+```ts
+const session = new CodexForkSession({ cwd: process.cwd() });
+await session.start();
+const step = await session.step('ls -la /');   // observation + state + turnId + threadId
+await session.trim(1);                          // thread/fork → O(1) history
+await session.close();
+```
 
 ### MCP (Model Context Protocol)
 
@@ -342,8 +366,10 @@ available via `--example ctf`.
 | `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
 
 The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
-entry in `opencode.jsonc` / `.mcp.json`, and `SKILL.md` in the host skills
-directory — live in your home directory, outside any git repo.
+entry in `opencode.jsonc` / `.mcp.json` / `~/.codex/config.toml`, the Codex
+hooks in `~/.codex/hooks.json` + `~/.codex/hooks/skillstate/`, and
+`SKILL.md` in the host skills directory — live in your home directory,
+outside any git repo.
 
 Manual step-by-step guides (tested on OpenCode 1.17):
 
@@ -472,16 +498,16 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios fixed as fixtures (`tests/core/paper-fidelity.test.ts`)
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
 - [x] Claude adapter: `PreCompact` hook injects state + diff into compaction summary; `SessionStart(compact)` re-injects after compaction
-- [x] Codex adapter (`@non-paper`): `AGENTS.md` amendment + `UserPromptSubmit`/`PostToolUse`/`SessionStart(compact)` hooks inject and persist state
+- [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` inject and persist state; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
 - [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server exposing `state.get`/`state.patch`/`state.merge`/`state.reset`/`spec.get`/`state.metrics`, with `Content-Length` framing support and secret redaction
 - [ ] Claude Code limitation: history is append-only from hooks — true O(1) requires host-side trimming
-- [ ] Codex limitation: no `messages.transform` equivalent — history is never trimmed from hooks, so true O(1) requires host-side trimming
+- [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 
 ## Development
 
 ```bash
 npm ci
-npm test                # 873 tests
+npm test                # 924 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc -b
 npm run build           # tsc -b — emits each packages/*/dist/

@@ -24,6 +24,7 @@ import { atomicWriteFile } from '@skillstate/core';
 import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec } from '@skillstate/core';
 import { OpenCodeAdapter } from '@skillstate/opencode';
+import { CodexAdapter, CODEX_HOOK_EVENTS } from '@skillstate/codex';
 import { findTopLevelObject, insertObjectEntry, parseJsonc, removeObjectEntry } from './jsonc.js';
 import { resolveInCwd } from './commands.js';
 
@@ -83,7 +84,8 @@ export interface InstallManifest {
   maxHistoryMessages: number;
   pluginPath?: string;
   skillPath?: string;
-  mcp?: { configPath: string; format: 'opencode-jsonc' | 'claude-mcp-json' };
+  hooksBackup?: string;
+  mcp?: { configPath: string; format: 'opencode-jsonc' | 'claude-mcp-json' | 'codex-toml' };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -342,6 +344,22 @@ export function buildMcpEntry(): Record<string, unknown> {
 }
 
 /**
+ * `[mcp_servers.skillstate]` TOML block for `~/.codex/config.toml`. The
+ * server resolves the per-project state from the session cwd, so no
+ * `SKILLSTATE_STATE_PATH` is pinned.
+ */
+export function buildCodexMcpToml(): string {
+  const cmd = resolveMcpCommand();
+  const args = [cmd.command, ...cmd.args].map((part) => JSON.stringify(part)).join(', ');
+  return [
+    '[mcp_servers.skillstate]',
+    `command = [${args}]`,
+    'enabled = true',
+    '',
+  ].join('\n');
+}
+
+/**
  * Splice the `skillstate` server into the `mcp` object of OpenCode config
  * text. Returns the (possibly unchanged) text and whether anything changed.
  */
@@ -433,12 +451,24 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   say(`host:     ${host}${flags.host === undefined ? ' (detected)' : ''}`);
   say(`state:    ${stateAbs}${stateCreated ? ' (created)' : ''}`);
 
+  // Preserve fields recorded by a previous install (idempotent re-init must
+  // not lose e.g. the mcp record when the entry is already registered).
+  let previous: Partial<InstallManifest> = {};
+  const previousManifestPath = path.join(stateDir, MANIFEST_FILE_NAME);
+  if (fs.existsSync(previousManifestPath)) {
+    try {
+      previous = JSON.parse(fs.readFileSync(previousManifestPath, 'utf-8')) as Partial<InstallManifest>;
+    } catch {
+      previous = {};
+    }
+  }
   const manifest: InstallManifest = {
     version: 1,
     host,
     installedAt: new Date().toISOString(),
     statePath: stateAbs,
     maxHistoryMessages: maxHistory,
+    ...(previous.mcp !== undefined ? { mcp: previous.mcp } : {}),
   };
 
   if (host === 'opencode') {
@@ -452,6 +482,31 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     }
     say(`plugin:   ${pluginAbs} (auto-loaded from plugins/)`);
     manifest.pluginPath = pluginAbs;
+  }
+
+  if (host === 'codex') {
+    const hooksDir = path.join(home, '.codex', 'hooks', 'skillstate');
+    const hooksConfigPath = path.join(home, '.codex', 'hooks.json');
+    const codex = new CodexAdapter();
+    if (!dry) {
+      for (const event of CODEX_HOOK_EVENTS) {
+        await codex.saveHookScript(event, codex.codexHookScriptPath(hooksDir, event));
+      }
+      // Merge the skillstate hook groups into the user hooks.json (backup first).
+      let existing = '{\n  "hooks": {}\n}\n';
+      if (fs.existsSync(hooksConfigPath)) {
+        const backup = backupPathFor(hooksConfigPath);
+        await atomicWriteFile(backup, fs.readFileSync(hooksConfigPath, 'utf-8'));
+        existing = fs.readFileSync(hooksConfigPath, 'utf-8');
+        manifest.hooksBackup = backup;
+      }
+      await atomicWriteFile(
+        hooksConfigPath,
+        codex.mergeHooksConfig(existing, { maxHistoryMessages: maxHistory, scriptDir: hooksDir }),
+      );
+    }
+    say(`hooks:    ${hooksConfigPath} + ${hooksDir}/ (*.cjs)`);
+    manifest.pluginPath = hooksConfigPath;
   }
 
   if (!flags.noSkill) {
@@ -518,7 +573,26 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
       say(`mcp:      ${mcpJson} (skillstate already registered)`);
     }
   } else {
-    say('mcp:      skipped (codex has no JSON MCP config; register the server manually if needed)');
+    // Codex: [mcp_servers.skillstate] in ~/.codex/config.toml (idempotent).
+    const configToml = path.join(home, '.codex', 'config.toml');
+    let toml = '';
+    if (fs.existsSync(configToml)) {
+      const backup = backupPathFor(configToml);
+      await atomicWriteFile(backup, fs.readFileSync(configToml, 'utf-8'));
+      toml = fs.readFileSync(configToml, 'utf-8');
+      manifest.hooksBackup = backup;
+    }
+    const serverBlock = buildCodexMcpToml();
+    if (toml.includes('[mcp_servers.skillstate]')) {
+      say(`mcp:      ${configToml} (skillstate already registered)`);
+    } else {
+      const next = `${toml.replace(/\s*$/, '')}\n\n${serverBlock}`;
+      if (!dry) {
+        await atomicWriteFile(configToml, next);
+      }
+      say(`mcp:      ${configToml} ([mcp_servers.skillstate] added)`);
+      manifest.mcp = { configPath: configToml, format: 'codex-toml' };
+    }
   }
 
   const manifestAbs = path.join(stateDir, MANIFEST_FILE_NAME);
@@ -606,6 +680,18 @@ export async function uninstall(options: UninstallOptions): Promise<number> {
         }
       } catch {
         console.error(`Skipping mcp: ${configPath} is unreadable`);
+      }
+    } else if (m.mcp.format === 'codex-toml') {
+      // Drop the [mcp_servers.skillstate] TOML table.
+      const text = fs.readFileSync(configPath, 'utf-8');
+      const match = text.match(/\n?\[mcp_servers\.skillstate\][^[]*/);
+      if (match !== null) {
+        const backup = backupPathFor(configPath);
+        if (!dry) {
+          await atomicWriteFile(backup, text);
+          await atomicWriteFile(configPath, text.replace(match[0], '\n'));
+        }
+        say(`removed mcp entry: ${configPath} (backup: ${backup})`);
       }
     } else {
       const text = fs.readFileSync(configPath, 'utf-8');

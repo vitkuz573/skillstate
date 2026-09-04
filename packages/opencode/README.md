@@ -154,7 +154,8 @@ Root path `@skillstate/opencode` exports the adapter and the static plugin:
 
 ## Notes
 
-- **Real O(1).** Unlike Claude Code and Codex, OpenCode exposes
+- **Real O(1).** Unlike Claude Code (append-only hooks) and Codex
+  (hooks + experimental app-server fork-trim), OpenCode exposes
   `experimental.chat.messages.transform`, so the plugin drops old messages
   instead of just hiding them — only the last N non-system messages plus an
   injected state message reach the LLM.

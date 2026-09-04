@@ -704,14 +704,38 @@ describe('autoInstall — claude & codex', () => {
     expect(JSON.parse(fs.readFileSync(mcpJson, 'utf-8'))).toEqual({ mcpServers: 'scalar' });
   });
 
-  it('codex: installs the skill only and explains the MCP situation', async () => {
+  it('codex: installs hooks, skill and MCP (TOML) end-to-end', async () => {
     const home = makeBareHome('codex');
     const project = makeTmp();
     const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
     expect(code).toBe(0);
     expect(fs.existsSync(path.join(home, '.codex', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
-    expect(readManifest(project).mcp).toBeUndefined();
-    expect(output()).toContain('codex has no JSON MCP config');
+    // Hooks: hooks.json with the three skillstate groups + on-disk scripts.
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    expect(fs.existsSync(hooksJson)).toBe(true);
+    const doc = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    expect(Object.keys(doc.hooks).sort()).toEqual(['PostToolUse', 'SessionStart', 'UserPromptSubmit']);
+    for (const event of ['user-prompt-submit', 'session-start-compact', 'post-tool-use']) {
+      expect(
+        fs.existsSync(path.join(home, '.codex', 'hooks', 'skillstate', `${event}.cjs`)),
+      ).toBe(true);
+    }
+    // Re-install is idempotent (no duplicate groups).
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const doc2 = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as typeof doc;
+    expect(doc2.hooks['UserPromptSubmit']).toHaveLength(1);
+    // MCP: [mcp_servers.skillstate] spliced into config.toml with a backup.
+    const configToml = path.join(home, '.codex', 'config.toml');
+    const toml = fs.readFileSync(configToml, 'utf-8');
+    expect(toml).toContain('[mcp_servers.skillstate]');
+    expect(toml).not.toMatch(/\[mcp_servers\.skillstate\][\s\S]*\[mcp_servers\.skillstate\]/);
+    expect(readManifest(project).mcp).toEqual({
+      configPath: configToml,
+      format: 'codex-toml',
+    });
+    expect(output()).toContain('[mcp_servers.skillstate] added');
   });
 });
 
@@ -895,3 +919,75 @@ function parseJsoncSafe(text: string): unknown {
     .replace(/,(\s*[}\]])/g, '$1');
   return JSON.parse(stripped) as unknown;
 }
+
+describe('codex install/uninstall edge branches', () => {
+  it('survives a corrupt previous manifest on re-install', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), '{corrupt');
+    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    expect(code).toBe(0);
+    expect(readManifest(project).host).toBe('codex');
+  });
+
+  it('uninstall removes the [mcp_servers.skillstate] TOML table', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const configToml = path.join(home, '.codex', 'config.toml');
+    expect(fs.readFileSync(configToml, 'utf-8')).toContain('[mcp_servers.skillstate]');
+    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
+    expect(code).toBe(0);
+    expect(fs.readFileSync(configToml, 'utf-8')).not.toContain('[mcp_servers.skillstate]');
+    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+  });
+
+  it('uninstall is a no-op when the TOML table is already absent', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const configToml = path.join(home, '.codex', 'config.toml');
+    fs.rmSync(configToml);
+    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
+    expect(code).toBe(0);
+  });
+});
+
+describe('codex install — remaining branches', () => {
+  it('codex --dry-run writes nothing', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: { ...defaultFlags(), dryRun: true } });
+    expect(code).toBe(0);
+    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.codex', 'config.toml'))).toBe(false);
+    expect(output()).toContain('[dry-run]');
+  });
+
+  it('codex uninstall --dry-run with the table present writes nothing', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const configToml = path.join(home, '.codex', 'config.toml');
+    const before = fs.readFileSync(configToml, 'utf-8');
+    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } });
+    expect(code).toBe(0);
+    expect(fs.readFileSync(configToml, 'utf-8')).toBe(before);
+    expect(output()).toContain('removed mcp entry');
+  });
+
+  it('codex uninstall leaves the TOML alone when the table is absent (match null)', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    const configToml = path.join(home, '.codex', 'config.toml');
+    // Strip the table manually but keep the file — uninstall must skip the
+    // removal branch (no backup written for a no-op).
+    fs.writeFileSync(configToml, '# just a comment\n');
+    const before = fs.readFileSync(configToml, 'utf-8');
+    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } });
+    expect(code).toBe(0);
+    expect(fs.readFileSync(configToml, 'utf-8')).toBe(before);
+  });
+});

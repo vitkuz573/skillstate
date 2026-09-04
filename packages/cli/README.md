@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
 [![node](https://img.shields.io/node/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
-[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
+[![Tests](https://img.shields.io/badge/tests-924%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
 
 </div>
@@ -66,8 +66,12 @@ skillstate uninstall         # roll the host install back (manifest-driven)
    - installs `~/.config/opencode/skills/skillstate/SKILL.md`.
 4. For Claude Code: installs `~/.claude/skills/skillstate/SKILL.md` and writes
    a project `.mcp.json` (`mcpServers.skillstate`).
-5. For Codex: installs `~/.codex/skills/skillstate/SKILL.md` (no JSON MCP
-   config to edit).
+5. For Codex: writes the `.cjs` hook scripts to `~/.codex/hooks/skillstate/`,
+   merges the skillstate hook groups into `~/.codex/hooks.json`
+   (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`),
+   splices a `[mcp_servers.skillstate]` TOML block into
+   `~/.codex/config.toml` (timestamped backup, idempotent), and installs
+   `~/.codex/skills/skillstate/SKILL.md`.
 
 Flags: `--host <name>`, `--max-history <n>`, `--spec <path>`, `--example ctf`,
 `--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
@@ -94,8 +98,10 @@ spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
 | `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
 
 The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
-entry in `opencode.jsonc` / `.mcp.json`, and `SKILL.md` in the host skills
-directory — live in your home directory, outside any git repo.
+entry in `opencode.jsonc` / `.mcp.json` / `~/.codex/config.toml`, the Codex
+hooks in `~/.codex/hooks.json` + `~/.codex/hooks/skillstate/`, and
+`SKILL.md` in the host skills directory — live in your home directory,
+outside any git repo.
 
 Programmatically:
 
