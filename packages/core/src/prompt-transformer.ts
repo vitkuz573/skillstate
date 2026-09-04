@@ -5,6 +5,7 @@ import type {
   StatePatch,
   StateSchema,
 } from './types.js';
+import { STATE_PATCH_CONTRACT, describeSchema } from './prompt-contract.js';
 
 export interface PromptTransformerOptions {
   platform?: 'claude' | 'opencode' | 'generic';
@@ -88,7 +89,7 @@ export class PromptTransformer {
     observation: Observation,
   ): string {
     const stateJson = this.serializeState(state, undefined, spec.schema);
-    const schemaDesc = this.describeSchema(spec.schema);
+    const schemaDesc = describeSchema(spec.schema);
 
     return `# System
 
@@ -110,17 +111,7 @@ ${observation.content}
 
 Based on the observation and your current state, provide your response with:
 
-1. Step-by-step reasoning (will be discarded after execution)
-2. A JSON block containing both your State Patch and your Action. The JSON block MUST have exactly these two keys:
-
-\`\`\`json
-{
-  "state_patch": { "key": "new_value", "obsolete_key": null },
-  "action": "your_action_here"
-}
-\`\`\`
-
-In \`state_patch\`, set keys to null to delete them. Only include fields you want to change. Omit fields to leave them unchanged.`;
+${STATE_PATCH_CONTRACT}`;
   }
 
   /**
@@ -134,7 +125,7 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
     observation: Observation,
   ): string {
     const stateJson = this.serializeState(state, undefined, spec.schema);
-    const schemaDesc = this.describeSchema(spec.schema);
+    const schemaDesc = describeSchema(spec.schema);
 
     return `<skill name="${spec.id}">
 <instructions>${spec.instructions}</instructions>
@@ -147,16 +138,9 @@ ${observation.content}
 </observation>
 </skill>
 
-Respond with step-by-step reasoning followed by a JSON block containing both your State Patch and your Action. The JSON block MUST have exactly these two keys:
+Respond with:
 
-\`\`\`json
-{
-  "state_patch": { "key": "new_value", "obsolete_key": null },
-  "action": "action_name"
-}
-\`\`\`
-
-In \`state_patch\`, set keys to null to delete them. Only include fields you want to change. Omit fields to leave them unchanged.`;
+${STATE_PATCH_CONTRACT}`;
   }
 
   /**
@@ -206,7 +190,7 @@ Provide your response with:
     observation: Observation,
   ): string {
     const stateJson = this.serializeState(state, undefined, spec.schema);
-    const schemaDesc = this.describeSchema(spec.schema);
+    const schemaDesc = describeSchema(spec.schema);
 
     return `${spec.instructions}
 
@@ -224,17 +208,7 @@ ${observation.content}
 
 Provide your response with:
 
-1. Step-by-step reasoning (will be discarded after execution)
-2. A JSON block containing both your State Patch and your Action. The JSON block MUST have exactly these two keys:
-
-\`\`\`json
-{
-  "state_patch": { "key": "value", "obsolete_key": null },
-  "action": "action_name"
-}
-\`\`\`
-
-In \`state_patch\`, set keys to null to delete them.`;
+${STATE_PATCH_CONTRACT}`;
   }
 
   /**
@@ -334,15 +308,5 @@ In \`state_patch\`, set keys to null to delete them.`;
       return JSON.stringify(toSerialize, null, 2);
     }
     return JSON.stringify(toSerialize);
-  }
-
-  /**
-   * Describe the schema fields for inclusion in prompts.
-   */
-  private describeSchema(schema: ProceduralSpec['schema']): string {
-    const fields = Object.entries(schema)
-      .map(([name, field]) => `- ${name} (${field.type}): ${field.description ?? 'no description'}`)
-      .join('\n');
-    return `## Schema\n${fields}`;
   }
 }

@@ -185,7 +185,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | **Claude Code** | `UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)` hook scripts + `~/.claude/settings.json` merge + stdio `.mcp.json` + SKILL.md | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
 | **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
 | **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
-| **MCP** | stdio JSON-RPC server (`state.get` / `state.patch` / `state.merge` / `state.reset` / `spec.get` / `state.metrics`) | any MCP client accesses the runtime state as tools | n/a — runtime access, not prompting |
+| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `spec.get` / `spec.next`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
 
 ### Claude Code
 
@@ -330,9 +330,10 @@ const response = server.handleLine(
 stdio server; state always resolves per session from the server's own cwd
 (`<cwd>/.skillstate/skillstate.json`; the global bucket when cwd === home).
 The `skillstate-mcp` bin launches it directly. Tools: `state.get`,
-`state.patch`, `state.merge`, `state.reset`, `spec.get`, `state.metrics`.
-State is redacted on every read, and both newline-delimited JSON-RPC and
-`Content-Length`-framed messages are accepted.
+`state.patch` (validates; the single write op), `state.validate`,
+`state.diff`, `state.checkpoint`, `state.rollback`, `state.summary`,
+`state.metrics`, `spec.get`, `spec.next`. State is redacted on every read;
+the transport is newline-delimited JSON-RPC (protocol `2026-07-28`).
 
 ### Integrate into your OpenCode host
 
@@ -516,7 +517,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
 - [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into `~/.claude/settings.json`; stdio `.mcp.json` + `SKILL.md` installed by `skillstate init`
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` inject and persist state; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
-- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server exposing `state.get`/`state.patch`/`state.merge`/`state.reset`/`spec.get`/`state.metrics`, with `Content-Length` framing support and secret redaction
+- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming
 - [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 

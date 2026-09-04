@@ -2,7 +2,10 @@
  * Static OpenCode plugin — the SINGLE SOURCE OF TRUTH for the skillstate
  * host integration. `OpenCodeAdapter.generatePluginCode` emits a thin loader
  * that imports `createSkillStatePlugin` from this module; the per-project
- * state resolution lives inside the plugin itself.
+ * state resolution lives in `@skillstate/core`
+ * (`resolveHostStateForCwd`, re-exported here) and the hook logic
+ * (envelope read/write, ⊕ merge, patch extraction) in the core
+ * hook-runtime — this module only adapts it to the OpenCode hooks.
  *
  * Hooks (opencode 1.17 contract, verified on host):
  * - `experimental.chat.messages.transform` — entries are `{ info, parts }`
@@ -17,6 +20,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+  findFencedPatch,
+  mergePatch,
+  readStateEnvelope,
+  resolveHostStateForCwd,
+  saveStateEnvelope,
+} from '@skillstate/core';
 import type {
   OpenCodeMessage,
   SkillStateHooks,
@@ -25,6 +35,18 @@ import type {
 
 export * from './plugin-types.js';
 
+/**
+ * Resolve the per-project state file for a session working directory
+ * (`cwd` of the current opencode session) — the core single source of
+ * truth (`resolveHostStateForCwd`): `<cwd>/.skillstate/skillstate.json`,
+ * or the global bucket `<home>/.skillstate/global/skillstate.json` when
+ * cwd equals home. Pure path arithmetic via `path.resolve`, no filesystem
+ * access.
+ */
+export { resolveHostStateForCwd as resolveStatePathForCwd };
+
+export { mergePatch };
+
 /** Options for {@link createSkillStatePlugin}. */
 export interface SkillStatePluginOptions {
   /** Non-system messages kept in the prompt (default 3). */
@@ -32,118 +54,41 @@ export interface SkillStatePluginOptions {
 }
 
 /**
- * Resolve the per-project state file for a session working directory
- * (`cwd` of the current opencode session):
- *
- * - `cwd === home` — a session launched straight from `$HOME` has no single
- *   project, so state goes to the global bucket
- *   `<home>/.skillstate/global/skillstate.json`;
- * - any other cwd (including subdirectories of `$HOME`) — the state lives in
- *   the project: `<cwd>/.skillstate/skillstate.json`.
- *
- * Pure path arithmetic: both arguments are normalized via `path.resolve`
- * before comparison, and there is NO filesystem access. The same project
- * directory therefore always maps to the same state file no matter where
- * the host was launched from, while different projects never share state.
- * Zero-dep by design (node builtins only) so generated plugins and the MCP
- * server can inline the same semantics. Keep any copy in sync.
- */
-export function resolveStatePathForCwd(cwd: string, home: string): string {
-  const resolvedCwd = path.resolve(cwd);
-  const resolvedHome = path.resolve(home);
-  if (resolvedCwd === resolvedHome) {
-    return path.join(resolvedHome, '.skillstate', 'global', 'skillstate.json');
-  }
-  return path.join(resolvedCwd, '.skillstate', 'skillstate.json');
-}
-
-/** True for plain (non-null, non-array) objects. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
  * Read the state file. Missing or corrupt files yield `{}` (best-effort).
  * The on-disk envelope is `{ version: 1, state }` (migrations-compatible);
- * a bare object is tolerated and treated as the state itself.
+ * a bare object is tolerated and treated as the state itself. Thin fs
+ * adapter over the core hook-runtime {@link readStateEnvelope}.
  */
 export function readSkillState(statePath: string): Record<string, unknown> {
-  try {
-    if (fs.existsSync(statePath)) {
-      const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as unknown;
-      if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        'state' in parsed &&
-        typeof (parsed as Record<string, unknown>)['state'] === 'object' &&
-        (parsed as Record<string, unknown>)['state'] !== null
-      ) {
-        return (parsed as Record<string, unknown>)['state'] as Record<string, unknown>;
-      }
-      if (typeof parsed === 'object' && parsed !== null) {
-        return parsed as Record<string, unknown>;
-      }
-    }
-  } catch {
-    // Corrupt or unreadable state file — fall back to empty state.
-  }
-  return {};
+  return readStateEnvelope(statePath, (p) => fs.readFileSync(p, 'utf-8')) as Record<string, unknown>;
 }
 
 /**
  * Persist the state file (best-effort: read-only environments are ignored).
  * Creates the parent directory when missing (the per-project resolver may
  * target a fresh `<cwd>/.skillstate/`). Writes the `{ version: 1, state }`
- * envelope so `migrate()`/runtime resume read the same file.
+ * envelope so `migrate()`/runtime resume read the same file — via the core
+ * hook-runtime {@link saveStateEnvelope}.
  */
 export function saveSkillState(statePath: string, state: Record<string, unknown>): void {
   try {
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state }, null, 2)}\n`);
+    saveStateEnvelope(statePath, state, (p, data) => fs.writeFileSync(p, data));
   } catch {
     // Best-effort: read-only environments or permission issues.
   }
 }
 
 /**
- * Paper ⊕ merge: `null` deletes a key, nested plain objects merge
- * recursively, everything else replaces.
- */
-export function mergePatch(
-  base: Record<string, unknown>,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const result = { ...base };
-  for (const key of Object.keys(patch)) {
-    const value = patch[key];
-    if (value === null) {
-      delete result[key];
-    } else if (isPlainObject(value) && isPlainObject(result[key])) {
-      result[key] = mergePatch(result[key] as Record<string, unknown>, value);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
-/**
  * Extract the `state_patch` object from an LLM response's fenced ```json
  * block; `null` when there is no block, it is malformed, or it carries no
- * object-shaped `state_patch`.
+ * object-shaped `state_patch`. Thin adapter over the core hook-runtime
+ * {@link findFencedPatch} (the invalid/truncated outcomes collapse to
+ * `null`, preserving the legacy boolean contract).
  */
 export function extractPatch(response: string): Record<string, unknown> | null {
-  const match = response.match(/```json\s*\n?([\s\S]*?)\n?\s*```/);
-  if (!match) return null;
-  try {
-    const parsed: unknown = JSON.parse(match[1] as string);
-    if (isPlainObject(parsed) && isPlainObject(parsed['state_patch'])) {
-      return parsed['state_patch'];
-    }
-  } catch {
-    // Malformed JSON — ignore.
-  }
-  return null;
+  const result = findFencedPatch(response);
+  return 'patch' in result ? result.patch : null;
 }
 
 /** Synthetic message ids for the injected state carrier. */
@@ -160,7 +105,7 @@ const STATE_MESSAGE_ID = 'skillstate-state-inject';
  * `$HOME` uses the global bucket.
  */
 export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): SkillStatePlugin {
-  const resolvePath = (): string => resolveStatePathForCwd(process.cwd(), os.homedir());
+  const resolvePath = (): string => resolveHostStateForCwd(process.cwd(), os.homedir());
   const maxHistory = options.maxHistoryMessages ?? 3;
 
   return async () => {

@@ -3,9 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { once } from 'node:events';
 import { McpServer, launch, resolveStatePathForCwd } from '@skillstate/mcp';
-import { TokenTracker } from '@skillstate/core';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import { TokenTracker, validatePatchDeep } from '@skillstate/core';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec } from '@skillstate/core';
 
 type AnyRecord = Record<string, unknown>;
@@ -19,6 +20,20 @@ interface ServerOptionsShape {
   options: { spec: ProceduralSpec; root: string; name: string; tracker?: TokenTracker };
 }
 
+/** Spec with every schema type — exercises type-default example generation. */
+const KITCHEN_SINK_SPEC: ProceduralSpec = {
+  ...INTERCODE_CTF_SPEC,
+  id: 'kitchen-sink',
+  name: 'Kitchen Sink',
+  schema: {
+    title: { type: 'string', default: '' },
+    attempts: { type: 'number', default: 0 },
+    done: { type: 'boolean', default: false },
+    meta: { type: 'object', default: {} },
+    flags: { type: 'array', default: [] },
+  },
+};
+
 let dirs: string[] = [];
 let servers: McpServer[] = [];
 
@@ -28,18 +43,18 @@ function makeTmp(): string {
   return dir;
 }
 
-function makeSpec(
-  overrides?: Partial<ProceduralSpec>,
-): ProceduralSpec {
+function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
   return { ...INTERCODE_CTF_SPEC, ...overrides };
 }
 
 function makeServer(
-  opts?: Partial<Pick<ServerOptionsShape['options'], 'root' | 'name' | 'tracker'>>,
+  opts?: Partial<Pick<ServerOptionsShape['options'], 'root' | 'name' | 'tracker'>> & {
+    spec?: ProceduralSpec;
+  },
 ): McpServer {
   const dir = opts?.root ?? makeTmp();
   const server = new McpServer({
-    spec: makeSpec(),
+    spec: opts?.spec ?? makeSpec(),
     root: dir,
     name: opts?.name ?? '.skillstate.json',
     tracker: opts?.tracker,
@@ -53,35 +68,43 @@ function statePath(server: McpServer): string {
   return path.join(o.root, o.name);
 }
 
-function call(
+async function call(
   server: McpServer,
   method: string,
   params?: unknown,
   id: number | string | null = 1,
-): string | null {
+): Promise<string | null> {
   return server.handleLine(
     JSON.stringify({ jsonrpc: '2.0', id, method, params }),
   );
 }
 
-function parseResult(raw: string | null): JsonRpcResponse {
-  expect(raw).not.toBeNull();
-  return JSON.parse(raw as string) as JsonRpcResponse;
+async function parseResult(raw: Promise<string | null>): Promise<JsonRpcResponse> {
+  const text = await raw;
+  expect(text).not.toBeNull();
+  return JSON.parse(text as string) as JsonRpcResponse;
 }
 
-function toolCall(
+async function toolCall(
   server: McpServer,
   name: string,
   args: unknown,
   id = 2,
-): JsonRpcResponse {
-  return parseResult(
-    call(server, 'tools/call', { name, arguments: args }, id),
-  );
+): Promise<JsonRpcResponse> {
+  return parseResult(call(server, 'tools/call', { name, arguments: args }, id));
 }
 
 function toolText(result: AnyRecord | undefined): string {
   return (result?.content as Array<{ text: string }>)[0].text;
+}
+
+function toolJson(result: AnyRecord | undefined): AnyRecord {
+  return JSON.parse(toolText(result)) as AnyRecord;
+}
+
+function persistedState(server: McpServer): AnyRecord {
+  const doc = JSON.parse(fs.readFileSync(statePath(server), 'utf-8')) as AnyRecord;
+  return ((doc['state'] as AnyRecord | undefined) ?? doc) as AnyRecord;
 }
 
 afterEach(() => {
@@ -95,9 +118,9 @@ afterEach(() => {
 // ─── JSON-RPC handshake ──────────────────────────────────────────────────────
 
 describe('MCP JSON-RPC handshake', () => {
-  it('initialize returns protocolVersion, capabilities, serverInfo', () => {
+  it('initialize always answers protocolVersion 2026-07-28 (older client)', async () => {
     const server = makeServer();
-    const parsed = parseResult(
+    const parsed = await parseResult(
       call(server, 'initialize', {
         protocolVersion: '2024-11-05',
         capabilities: {},
@@ -105,54 +128,184 @@ describe('MCP JSON-RPC handshake', () => {
       }),
     );
     expect(parsed.id).toBe(1);
-    expect(parsed.result?.protocolVersion).toBe('2024-11-05');
-    expect(parsed.result?.serverInfo).toEqual({
-      name: 'skillstate',
-      version: '1.0.0',
+    expect(parsed.result?.protocolVersion).toBe('2026-07-28');
+    expect(parsed.result?.serverInfo).toEqual({ name: 'skillstate', version: '1.0.0' });
+  });
+
+  it('initialize answers 2026-07-28 for exact, newer, and unknown client versions', async () => {
+    const server = makeServer();
+    for (const clientVersion of ['2026-07-28', '2030-01-01', 'garbage-version']) {
+      const parsed = await parseResult(
+        call(server, 'initialize', {
+          protocolVersion: clientVersion,
+          capabilities: {},
+          clientInfo: { name: 't', version: '0' },
+        }),
+      );
+      expect(parsed.result?.protocolVersion).toBe('2026-07-28');
+    }
+  });
+
+  it('initialize advertises tools/resources/logging/prompts capabilities', async () => {
+    const server = makeServer();
+    const parsed = await parseResult(call(server, 'initialize', { protocolVersion: '2026-07-28' }));
+    expect(parsed.result?.capabilities).toEqual({
+      tools: { listChanged: true },
+      resources: {},
+      logging: {},
+      prompts: { listChanged: true },
     });
-    expect((parsed.result?.capabilities as AnyRecord).tools).toBeDefined();
   });
 
-  it('responds to ping', () => {
+  it('responds to ping', async () => {
     const server = makeServer();
-    expect(parseResult(call(server, 'ping')).result).toEqual({});
+    expect((await parseResult(call(server, 'ping'))).result).toEqual({});
   });
 
-  it('tools/list exposes the six skillstate tools', () => {
+  it('prompts/list is a graceful empty placeholder', async () => {
     const server = makeServer();
-    const tools = parseResult(call(server, 'tools/list')).result
+    expect((await parseResult(call(server, 'prompts/list'))).result).toEqual({ prompts: [] });
+  });
+
+  it('logging/setLevel is accepted', async () => {
+    const server = makeServer();
+    expect((await parseResult(call(server, 'logging/setLevel', { level: 'info' }))).result).toEqual(
+      {},
+    );
+  });
+
+  it('tools/list exposes exactly the new skillstate tools', async () => {
+    const server = makeServer();
+    const tools = (await parseResult(call(server, 'tools/list'))).result
       ?.tools as Array<{ name: string }>;
     expect(tools.map((t) => t.name).sort()).toEqual([
       'spec.get',
+      'spec.next',
+      'state.checkpoint',
+      'state.diff',
       'state.get',
-      'state.merge',
       'state.metrics',
       'state.patch',
-      'state.reset',
+      'state.rollback',
+      'state.summary',
+      'state.validate',
     ]);
   });
 
-  it('resources/list exposes the state as a resource', () => {
+  it('tools/list carries readOnlyHint/destructiveHint annotations', async () => {
     const server = makeServer();
-    const resources = parseResult(call(server, 'resources/list')).result
+    const tools = (await parseResult(call(server, 'tools/list'))).result
+      ?.tools as Array<{ name: string; annotations: AnyRecord }>;
+    const byName = new Map(tools.map((t) => [t.name, t.annotations]));
+    expect(byName.get('state.patch')).toEqual({ readOnlyHint: false, destructiveHint: false });
+    expect(byName.get('state.checkpoint')).toEqual({ readOnlyHint: false, destructiveHint: false });
+    expect(byName.get('state.rollback')).toEqual({ readOnlyHint: false, destructiveHint: true });
+    for (const readOnly of [
+      'state.get',
+      'state.validate',
+      'state.diff',
+      'state.summary',
+      'state.metrics',
+      'spec.get',
+      'spec.next',
+    ]) {
+      expect(byName.get(readOnly)).toEqual({ readOnlyHint: true, destructiveHint: false });
+    }
+  });
+
+  it('state.merge and state.reset are gone', async () => {
+    const server = makeServer();
+    const tools = (await parseResult(call(server, 'tools/list'))).result
+      ?.tools as Array<{ name: string }>;
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('state.merge');
+    expect(names).not.toContain('state.reset');
+    const merged = await toolCall(server, 'state.merge', { patch: {} });
+    expect(merged.result?.isError).toBe(true);
+    expect(toolText(merged.result)).toContain('Unknown tool: state.merge');
+    const reset = await toolCall(server, 'state.reset', {});
+    expect(reset.result?.isError).toBe(true);
+    expect(toolText(reset.result)).toContain('Unknown tool: state.reset');
+  });
+
+  it('resources/list exposes state, spec, and summary', async () => {
+    const server = makeServer();
+    const resources = (await parseResult(call(server, 'resources/list'))).result
       ?.resources as Array<{ uri: string }>;
-    expect(resources[0].uri).toBe('skillstate://state');
+    expect(resources.map((r) => r.uri)).toEqual([
+      'skillstate://state',
+      'skillstate://spec',
+      'skillstate://summary',
+    ]);
   });
 
-  it('unknown method → -32601 Method not found', () => {
+  it('resources/read returns the versioned state envelope', async () => {
     const server = makeServer();
-    expect(parseResult(call(server, 'no/such')).error?.code).toBe(-32601);
+    const parsed = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://state' }),
+    );
+    const content = (parsed.result?.contents as Array<AnyRecord>)[0];
+    expect(content.uri).toBe('skillstate://state');
+    expect(content.mimeType).toBe('application/json');
+    const envelope = JSON.parse(content.text as string) as AnyRecord;
+    expect(envelope.version).toBe(1);
+    expect(envelope.state).toEqual({
+      discovered_flags: [],
+      tested_hypotheses: [],
+      active_files: [],
+      working_dir: '/',
+      cmd_summary: '',
+    });
   });
 
-  it('requests without an id produce no response', () => {
+  it('resources/read returns the spec', async () => {
     const server = makeServer();
-    expect(server.handleLine('{"jsonrpc":"2.0","method":"ping"}')).toBeNull();
+    const parsed = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://spec' }),
+    );
+    const spec = JSON.parse(
+      (parsed.result?.contents as Array<AnyRecord>)[0].text as string,
+    ) as AnyRecord;
+    expect(spec.id).toBe('intercode-ctf');
+    expect(spec.schema).toBeDefined();
   });
 
-  it('a request with an explicit null id still responds', () => {
+  it('resources/read returns the summary projection', async () => {
     const server = makeServer();
-    const raw = server.handleLine('{"jsonrpc":"2.0","id":null,"method":"ping"}');
-    const parsed = parseResult(raw);
+    const parsed = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://summary' }),
+    );
+    const summary = JSON.parse(
+      (parsed.result?.contents as Array<AnyRecord>)[0].text as string,
+    ) as AnyRecord;
+    expect(summary.keys).toBeDefined();
+    expect(summary.size_bytes).toBeGreaterThan(0);
+  });
+
+  it('resources/read: unknown uri and missing uri → -32602', async () => {
+    const server = makeServer();
+    expect(
+      (await parseResult(call(server, 'resources/read', { uri: 'skillstate://nope' }))).error?.code,
+    ).toBe(-32602);
+    expect((await parseResult(call(server, 'resources/read', {}))).error?.code).toBe(-32602);
+    expect((await parseResult(call(server, 'resources/read', 'nope'))).error?.code).toBe(-32602);
+  });
+
+  it('unknown method → -32601 Method not found', async () => {
+    const server = makeServer();
+    expect((await parseResult(call(server, 'no/such'))).error?.code).toBe(-32601);
+  });
+
+  it('requests without an id produce no response', async () => {
+    const server = makeServer();
+    expect(await server.handleLine('{"jsonrpc":"2.0","method":"ping"}')).toBeNull();
+  });
+
+  it('a request with an explicit null id still responds', async () => {
+    const server = makeServer();
+    const parsed = await parseResult(
+      Promise.resolve(server.handleLine('{"jsonrpc":"2.0","id":null,"method":"ping"}')),
+    );
     expect(parsed.id).toBeNull();
     expect(parsed.result).toEqual({});
   });
@@ -161,26 +314,24 @@ describe('MCP JSON-RPC handshake', () => {
 // ─── Notifications ───────────────────────────────────────────────────────────
 
 describe('MCP notifications', () => {
-  it('notifications/initialized (no id) → null', () => {
+  it('notifications/initialized (no id) → null', async () => {
     const server = makeServer();
     expect(
-      server.handleLine('{"jsonrpc":"2.0","method":"notifications/initialized"}'),
+      await server.handleLine('{"jsonrpc":"2.0","method":"notifications/initialized"}'),
     ).toBeNull();
   });
 
-  it('a generic notification (no id) → null', () => {
+  it('a generic notification (no id) → null', async () => {
     const server = makeServer();
     expect(
-      server.handleLine('{"jsonrpc":"2.0","method":"notifications/cancelled"}'),
+      await server.handleLine('{"jsonrpc":"2.0","method":"notifications/cancelled"}'),
     ).toBeNull();
   });
 
-  it('a notification carrying an id → -32600', () => {
+  it('a notification carrying an id → -32600', async () => {
     const server = makeServer();
-    const parsed = parseResult(
-      server.handleLine(
-        '{"jsonrpc":"2.0","id":5,"method":"notifications/initialized"}',
-      ),
+    const parsed = await parseResult(
+      server.handleLine('{"jsonrpc":"2.0","id":5,"method":"notifications/initialized"}'),
     );
     expect(parsed.error?.code).toBe(-32600);
   });
@@ -189,43 +340,79 @@ describe('MCP notifications', () => {
 // ─── Invalid requests ────────────────────────────────────────────────────────
 
 describe('MCP invalid requests', () => {
-  it('malformed JSON → -32700 Parse error', () => {
+  it('malformed JSON → -32700 Parse error', async () => {
     const server = makeServer();
-    expect(parseResult(server.handleLine('{not json')).error?.code).toBe(-32700);
+    expect((await parseResult(server.handleLine('{not json'))).error?.code).toBe(-32700);
   });
 
-  it('a JSON array is not a valid request → -32600', () => {
+  it('a JSON array is not a valid request → -32600', async () => {
     const server = makeServer();
-    expect(parseResult(server.handleLine('[1,2,3]')).error?.code).toBe(-32600);
+    expect((await parseResult(server.handleLine('[1,2,3]'))).error?.code).toBe(-32600);
   });
 
-  it('a message with a non-string method → -32600', () => {
+  it('a message with a non-string method → -32600', async () => {
     const server = makeServer();
-    const parsed = parseResult(
+    const parsed = await parseResult(
       server.handleLine('{"jsonrpc":"2.0","id":1,"method":42}'),
     );
     expect(parsed.error?.code).toBe(-32600);
   });
 
-  it('empty/whitespace lines produce no response', () => {
+  it('empty/whitespace lines produce no response', async () => {
     const server = makeServer();
-    expect(server.handleLine('')).toBeNull();
-    expect(server.handleLine('   ')).toBeNull();
+    expect(await server.handleLine('')).toBeNull();
+    expect(await server.handleLine('   ')).toBeNull();
   });
 });
 
-// ─── tools/call: state.get, patch, merge, reset, spec, metrics ──────────────
+// ─── tools/call plumbing ─────────────────────────────────────────────────────
 
-describe('MCP tools/call', () => {
-  it('state.get returns schema defaults on an empty state file', () => {
+describe('MCP tools/call plumbing', () => {
+  it('tools/call with params lacking name → -32602', async () => {
     const server = makeServer();
-    const text = toolText(toolCall(server, 'state.get', {}).result);
-    const state = JSON.parse(text) as AnyRecord;
+    expect(
+      (await parseResult(call(server, 'tools/call', { arguments: {} }))).error?.code,
+    ).toBe(-32602);
+  });
+
+  it('tools/call with non-object params → -32602', async () => {
+    const server = makeServer();
+    expect((await parseResult(call(server, 'tools/call', 'nope'))).error?.code).toBe(-32602);
+  });
+
+  it('tools/call with non-object arguments is treated as empty args', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.get', 'not-an-object');
+    expect(result).toBeDefined();
+    expect(JSON.parse(toolText(result)).working_dir).toBe('/');
+  });
+
+  it('unknown tool → isError', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.nonexistent', {});
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Unknown tool: state.nonexistent');
+  });
+});
+
+// ─── tools/call: state.get / state.patch / state.validate ───────────────────
+
+describe('MCP state.get', () => {
+  it('returns schema defaults on an empty state file', async () => {
+    const server = makeServer();
+    const state = toolJson((await toolCall(server, 'state.get', {})).result);
     expect(state.working_dir).toBe('/');
     expect(state.discovered_flags).toEqual([]);
   });
 
-  it('state.get redacts secrets but keeps structure', () => {
+  it('falls back to defaults for a corrupted state file', async () => {
+    const server = makeServer();
+    fs.writeFileSync(statePath(server), '{not json');
+    const state = toolJson((await toolCall(server, 'state.get', {})).result);
+    expect(state.working_dir).toBe('/');
+  });
+
+  it('redacts secrets but keeps structure', async () => {
     const server = makeServer();
     fs.writeFileSync(
       statePath(server),
@@ -234,150 +421,441 @@ describe('MCP tools/call', () => {
         cmd_summary: 'sk-secret-abc123 AKIAIOSFODNN7EXAMPLE',
       }),
     );
-    const text = toolText(toolCall(server, 'state.get', {}).result);
+    const text = toolText((await toolCall(server, 'state.get', {})).result);
     expect(text).toContain('[REDACTED]');
     expect(text).not.toContain('sk-secret-abc123');
     expect(text).not.toContain('AKIAIOSFODNN7EXAMPLE');
     expect(text).toContain('working_dir');
   });
 
-  it('state.get reads an alternate state file via name', () => {
+  it('reads an alternate state file via name', async () => {
     const server = makeServer();
     const root = (server as unknown as ServerOptionsShape).options.root;
-    fs.writeFileSync(
-      path.join(root, 'alt.json'),
-      JSON.stringify({ working_dir: '/alt' }),
-    );
-    const text = toolText(toolCall(server, 'state.get', { name: 'alt.json' }).result);
-    expect(JSON.parse(text).working_dir).toBe('/alt');
+    fs.writeFileSync(path.join(root, 'alt.json'), JSON.stringify({ working_dir: '/alt' }));
+    const state = toolJson((await toolCall(server, 'state.get', { name: 'alt.json' })).result);
+    expect(state.working_dir).toBe('/alt');
   });
+});
 
-  it('state.patch applies the ⊕ merge and persists it', () => {
+describe('MCP state.patch', () => {
+  it('validates, applies the ⊕ merge, persists the envelope, and reports changes', async () => {
     const server = makeServer();
-    const text = toolText(
-      toolCall(server, 'state.patch', {
-        patch: { working_dir: '/home', cmd_summary: 'moved' },
-      }).result,
+    const payload = toolJson(
+      (
+        await toolCall(server, 'state.patch', {
+          patch: { working_dir: '/home', cmd_summary: 'moved' },
+        })
+      ).result,
     );
-    expect(JSON.parse(text).cmd_summary).toBe('moved');
-    const persisted = JSON.parse(
-      fs.readFileSync(statePath(server), 'utf-8'),
-    ) as AnyRecord;
+    expect((payload.state as AnyRecord).cmd_summary).toBe('moved');
+    expect(payload.changes).toEqual({ added: [], updated: ['working_dir', 'cmd_summary'], deleted: [] });
+    expect(payload.warnings).toEqual([]);
+    const persisted = persistedState(server);
     expect(persisted.working_dir).toBe('/home');
   });
 
-  it('state.patch null value deletes a key', () => {
+  it('reports added keys when the stored state lacked them', async () => {
     const server = makeServer();
-    toolCall(server, 'state.patch', {
-      patch: { working_dir: '/x', cmd_summary: 'temp' },
-    });
-    const text = toolText(
-      toolCall(server, 'state.patch', { patch: { cmd_summary: null } }).result,
+    fs.writeFileSync(statePath(server), JSON.stringify({ working_dir: '/x' }));
+    const payload = toolJson(
+      (await toolCall(server, 'state.patch', { patch: { cmd_summary: 'new' } })).result,
     );
-    const state = JSON.parse(text) as AnyRecord;
-    expect('cmd_summary' in state).toBe(false);
-    expect(state.working_dir).toBe('/x');
+    expect(payload.changes).toEqual({ added: ['cmd_summary'], updated: [], deleted: [] });
   });
 
-  it('state.patch rejects a non-object patch', () => {
+  it('null value deletes a key and reports it as deleted', async () => {
     const server = makeServer();
-    const { result } = toolCall(server, 'state.patch', { patch: 'nope' });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/x', cmd_summary: 'temp' } });
+    const payload = toolJson(
+      (await toolCall(server, 'state.patch', { patch: { cmd_summary: null } })).result,
+    );
+    expect((payload.state as AnyRecord).working_dir).toBe('/x');
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: ['cmd_summary'] });
+    expect('cmd_summary' in (payload.state as AnyRecord)).toBe(false);
+  });
+
+  it('warns when a patch object merges into an existing object', async () => {
+    const server = makeServer({ spec: KITCHEN_SINK_SPEC });
+    await toolCall(server, 'state.patch', { patch: { meta: { a: 1 } } });
+    const payload = toolJson(
+      (await toolCall(server, 'state.patch', { patch: { meta: { b: 2 } } })).result,
+    );
+    expect((payload.state as AnyRecord).meta).toEqual({ a: 1, b: 2 });
+    expect(payload.warnings).toHaveLength(1);
+    expect(String(payload.warnings[0])).toContain("nested merge under 'meta'");
+  });
+
+  it('rejects an invalid patch with isError, error, and field; persists nothing', async () => {
+    const server = makeServer();
+    fs.writeFileSync(statePath(server), JSON.stringify({ working_dir: '/keep' }));
+    const { result } = await toolCall(server, 'state.patch', { patch: { bogus_key: 1 } });
+    expect(result?.isError).toBe(true);
+    const payload = JSON.parse(toolText(result)) as AnyRecord;
+    expect(payload.valid).toBe(false);
+    expect(payload.error).toContain('Unknown key: bogus_key');
+    expect(payload.field).toBe('bogus_key');
+    expect(persistedState(server).bogus_key).toBeUndefined();
+    expect(persistedState(server).working_dir).toBe('/keep');
+  });
+
+  it('rejects a wrong-typed value with the offending field', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.patch', { patch: { working_dir: 42 } });
+    expect(result?.isError).toBe(true);
+    const payload = JSON.parse(toolText(result)) as AnyRecord;
+    expect(payload.field).toBe('working_dir');
+    expect(payload.error).toContain('expected string');
+  });
+
+  it('rejects a non-object patch', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.patch', { patch: 'nope' });
     expect(result?.isError).toBe(true);
     expect(toolText(result)).toContain('patch must be an object');
   });
 
-  it('state.patch supports a { root, name } override target', () => {
+  it('supports a { root, name } override target', async () => {
     const server = makeServer();
     const root = makeTmp();
-    const text = toolText(
-      toolCall(server, 'state.patch', {
-        patch: { working_dir: '/overridden' },
-        root,
-        name: 'alt.json',
-      }).result,
+    const payload = toolJson(
+      (
+        await toolCall(server, 'state.patch', {
+          patch: { working_dir: '/overridden' },
+          root,
+          name: 'alt.json',
+        })
+      ).result,
     );
-    expect(JSON.parse(text).working_dir).toBe('/overridden');
-    expect(fs.existsSync(path.join(root, 'alt.json'))).toBe(true);
+    expect((payload.state as AnyRecord).working_dir).toBe('/overridden');
+    const envelope = JSON.parse(fs.readFileSync(path.join(root, 'alt.json'), 'utf-8')) as AnyRecord;
+    expect((envelope.state as AnyRecord).working_dir).toBe('/overridden');
   });
 
-  it('state.patch rejects a path-traversal name', () => {
+  it('rejects a path-traversal name', async () => {
     const server = makeServer();
-    const { result } = toolCall(server, 'state.patch', {
+    const { result } = await toolCall(server, 'state.patch', {
       patch: { working_dir: 'x' },
       root: makeTmp(),
       name: '../evil.json',
     });
     expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Path traversal blocked');
   });
+});
 
-  it('state.merge validates and applies a valid patch', () => {
+describe('MCP state.validate', () => {
+  it('accepts a valid patch without writing anything', async () => {
     const server = makeServer();
-    const text = toolText(
-      toolCall(server, 'state.merge', { patch: { working_dir: '/src' } }).result,
+    const payload = toolJson(
+      (await toolCall(server, 'state.validate', { patch: { working_dir: '/src' } })).result,
     );
-    expect(JSON.parse(text).working_dir).toBe('/src');
+    expect(payload).toEqual({ valid: true });
+    expect(fs.existsSync(statePath(server))).toBe(false);
   });
 
-  it('state.merge rejects an unknown key and persists nothing', () => {
+  it('reports { valid: false, error, field } for an invalid patch', async () => {
     const server = makeServer();
-    fs.writeFileSync(statePath(server), JSON.stringify({ working_dir: '/keep' }));
-    const { result } = toolCall(server, 'state.merge', {
-      patch: { bogus_key: 1 },
-    });
-    expect(result?.isError).toBe(true);
-    expect(toolText(result)).toContain('Unknown key: bogus_key');
-    const persisted = JSON.parse(
-      fs.readFileSync(statePath(server), 'utf-8'),
-    ) as AnyRecord;
-    expect(persisted.bogus_key).toBeUndefined();
-    expect(persisted.working_dir).toBe('/keep');
+    const payload = toolJson(
+      (await toolCall(server, 'state.validate', { patch: { bogus_key: 1 } })).result,
+    );
+    expect(payload.valid).toBe(false);
+    expect(payload.error).toContain('Unknown key: bogus_key');
+    expect(payload.field).toBe('bogus_key');
+    expect(fs.existsSync(statePath(server))).toBe(false);
   });
 
-  it('state.merge rejects a wrong-typed value', () => {
+  it('rejects a non-object patch', async () => {
     const server = makeServer();
-    const { result } = toolCall(server, 'state.merge', {
-      patch: { working_dir: 42 },
-    });
-    expect(result?.isError).toBe(true);
-  });
-
-  it('state.merge rejects a non-object patch', () => {
-    const server = makeServer();
-    const { result } = toolCall(server, 'state.merge', { patch: 7 });
+    const { result } = await toolCall(server, 'state.validate', { patch: 7 });
     expect(result?.isError).toBe(true);
     expect(toolText(result)).toContain('patch must be an object');
   });
+});
 
-  it('state.reset rehydrates the state to schema defaults', () => {
+// ─── state.diff ──────────────────────────────────────────────────────────────
+
+describe('MCP state.diff', () => {
+  it('returns an empty diff before anything changed', async () => {
     const server = makeServer();
-    toolCall(server, 'state.patch', {
-      patch: { working_dir: '/tmp', cmd_summary: 'done' },
+    const payload = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: [] });
+  });
+
+  it('shows changes after a patch and stays empty on the next call', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.diff', {});
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/moved', cmd_summary: 'go' } });
+    const payload = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(payload.changes).toEqual({
+      added: [],
+      updated: ['working_dir', 'cmd_summary'],
+      deleted: [],
     });
-    const state = JSON.parse(
-      toolText(toolCall(server, 'state.reset', {}).result),
-    ) as AnyRecord;
-    expect(state.working_dir).toBe('/');
-    expect(state.cmd_summary).toBe('');
+    const again = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(again.changes).toEqual({ added: [], updated: [], deleted: [] });
   });
 
-  it('spec.get returns the spec identity and schema', () => {
+  it('tracks state paths independently (per resolved path baselines)', async () => {
     const server = makeServer();
-    const spec = JSON.parse(
-      toolText(toolCall(server, 'spec.get', {}).result),
-    ) as AnyRecord;
-    expect(spec.id).toBe('intercode-ctf');
-    expect(spec.version).toBe('1.0.0');
-    expect((spec.schema as AnyRecord).discovered_flags).toBeDefined();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/main' } });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/alt' }, name: 'alt.json' });
+    const alt = toolJson((await toolCall(server, 'state.diff', { name: 'alt.json' })).result);
+    expect(alt.changes).toEqual({ added: [], updated: ['working_dir'], deleted: [] });
+    const main = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(main.changes).toEqual({ added: [], updated: ['working_dir'], deleted: [] });
   });
 
-  it('state.metrics errors when no tracker is configured', () => {
+  it('includes full before/after states with full: true', async () => {
     const server = makeServer();
-    const { result } = toolCall(server, 'state.metrics', {});
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/full' } });
+    const payload = toolJson((await toolCall(server, 'state.diff', { full: true })).result);
+    expect((payload.before as AnyRecord).working_dir).toBe('/');
+    expect((payload.after as AnyRecord).working_dir).toBe('/full');
+  });
+
+  it('reports null-deletions since the last look', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { cmd_summary: 'temp' } });
+    await toolCall(server, 'state.patch', { patch: { cmd_summary: null } });
+    const payload = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(payload.changes).toEqual({ added: [], updated: [], deleted: ['cmd_summary'] });
+  });
+});
+
+// ─── state.checkpoint / state.rollback ──────────────────────────────────────
+
+describe('MCP state.checkpoint', () => {
+  it('writes a labeled sidecar, the FileStore snapshot, and lists checkpoints', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/ck' } });
+    const payload = toolJson(
+      (await toolCall(server, 'state.checkpoint', { label: 'before risk!' })).result,
+    );
+    expect(payload.checkpointId).toBe('1-before-risk');
+    expect(payload.seq).toBe(1);
+    expect(payload.label).toBe('before-risk');
+    const checkpoints = payload.checkpoints as Array<AnyRecord>;
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0].checkpointId).toBe('1-before-risk');
+    const stateDir = path.dirname(statePath(server));
+    expect(
+      fs.existsSync(path.join(stateDir, 'checkpoints', '1-before-risk.json')),
+    ).toBe(true);
+    expect(fs.existsSync(`${statePath(server)}.snapshot`)).toBe(true);
+  });
+
+  it('increments seq across checkpoints and defaults the label', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', { label: 'first' });
+    const second = toolJson((await toolCall(server, 'state.checkpoint', {})).result);
+    expect(second.checkpointId).toBe('2-checkpoint');
+    expect(second.seq).toBe(2);
+    expect(second.label).toBe('checkpoint');
+    expect((second.checkpoints as Array<AnyRecord>).map((c) => c.checkpointId)).toEqual([
+      '1-first',
+      '2-checkpoint',
+    ]);
+  });
+
+  it('checkpoints a never-written state file using schema defaults', async () => {
+    const server = makeServer();
+    const payload = toolJson((await toolCall(server, 'state.checkpoint', {})).result);
+    expect(payload.seq).toBe(1);
+    const record = JSON.parse(
+      fs.readFileSync(
+        path.join(path.dirname(statePath(server)), 'checkpoints', '1-checkpoint.json'),
+        'utf-8',
+      ),
+    ) as AnyRecord;
+    expect((record.state as AnyRecord).working_dir).toBe('/');
+  });
+
+  it('listCheckpoints skips non-json and malformed sidecars', async () => {
+    const server = makeServer();
+    const dir = path.join(path.dirname(statePath(server)), 'checkpoints');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore me');
+    fs.writeFileSync(path.join(dir, 'x.json'), '{broken');
+    fs.writeFileSync(path.join(dir, '9-partial.json'), JSON.stringify({ checkpointId: 'z' }));
+    const payload = toolJson((await toolCall(server, 'state.checkpoint', { label: 'ok' })).result);
+    expect(payload.seq).toBe(1);
+    expect(payload.checkpoints).toEqual([
+      { checkpointId: '1-ok', seq: 1, label: 'ok', createdAt: (payload.checkpoints as Array<AnyRecord>)[0].createdAt },
+    ]);
+  });
+});
+
+describe('MCP state.rollback', () => {
+  it('restores the state after a bad patch (latest checkpoint by default)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/good' } });
+    const ck = toolJson((await toolCall(server, 'state.checkpoint', { label: 'good' })).result);
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/broken', cmd_summary: 'oops' } });
+    const payload = toolJson((await toolCall(server, 'state.rollback', {})).result);
+    expect(payload.checkpointId).toBe('1-good');
+    expect((payload.state as AnyRecord).working_dir).toBe('/good');
+    expect(persistedState(server).working_dir).toBe('/good');
+    expect(ck.seq).toBe(1);
+  });
+
+  it('rolls back to a specific checkpoint id', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', { label: 'first' });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/second' } });
+    await toolCall(server, 'state.checkpoint', { label: 'second' });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/third' } });
+    const payload = toolJson(
+      (await toolCall(server, 'state.rollback', { checkpointId: '1-first' })).result,
+    );
+    expect(payload.checkpointId).toBe('1-first');
+    expect((payload.state as AnyRecord).working_dir).toBe('/');
+  });
+
+  it('errors when no checkpoints exist', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.rollback', {});
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('No checkpoints found');
+  });
+
+  it('errors for an unknown checkpoint id', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', { label: 'real' });
+    const { result } = await toolCall(server, 'state.rollback', { checkpointId: '9-missing' });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Checkpoint not found or unreadable: 9-missing');
+  });
+
+  it('errors for a checkpoint id with path separators', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', {});
+    const { result } = await toolCall(server, 'state.rollback', { checkpointId: '../evil' });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('Checkpoint not found: ../evil');
+  });
+
+  it('errors for an unreadable or stateless sidecar', async () => {
+    const server = makeServer();
+    const dir = path.join(path.dirname(statePath(server)), 'checkpoints');
+    await toolCall(server, 'state.checkpoint', { label: 'junk' });
+    fs.writeFileSync(path.join(dir, '1-junk.json'), '{broken');
+    const broken = await toolCall(server, 'state.rollback', { checkpointId: '1-junk' });
+    expect(broken.result?.isError).toBe(true);
+    expect(toolText(broken.result)).toContain('Checkpoint not found or unreadable: 1-junk');
+    fs.writeFileSync(path.join(dir, '1-junk.json'), JSON.stringify({ checkpointId: '1-junk' }));
+    const stateless = await toolCall(server, 'state.rollback', { checkpointId: '1-junk' });
+    expect(stateless.result?.isError).toBe(true);
+    expect(toolText(stateless.result)).toContain('Checkpoint is corrupted');
+  });
+
+  it('establishes the diff baseline when rollback is the first observation', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', { label: 'fresh' });
+    const payload = toolJson((await toolCall(server, 'state.rollback', {})).result);
+    expect((payload.state as AnyRecord).working_dir).toBe('/');
+    const diff = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(diff.changes).toEqual({ added: [], updated: [], deleted: [] });
+  });
+
+  it('exposes rollback-induced changes through state.diff', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/before-ck' } });
+    await toolCall(server, 'state.checkpoint', { label: 'ck' });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/after-ck' } });
+    await toolCall(server, 'state.rollback', {});
+    const payload = toolJson((await toolCall(server, 'state.diff', {})).result);
+    expect(payload.changes).toEqual({
+      added: [],
+      updated: ['working_dir'],
+      deleted: [],
+    });
+  });
+});
+
+// ─── state.summary ───────────────────────────────────────────────────────────
+
+describe('MCP state.summary', () => {
+  it('projects the generic-procedure fields with session info', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    fs.writeFileSync(
+      statePath(server),
+      JSON.stringify({
+        goal: 'Ship the release',
+        progress: ['a', 'b'],
+        next_steps: ['s1', 's2', 's3', 's4', 's5'],
+        artifacts: ['dist/app.js'],
+        blockers: [],
+        notes: 'n'.repeat(250),
+        extra_key: 42,
+      }),
+    );
+    const payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    expect(payload.goal).toBe('Ship the release');
+    expect(payload.progress).toEqual({ count: 2 });
+    expect(payload.next_steps).toEqual({ count: 5, first: ['s1', 's2', 's3'] });
+    expect(payload.artifacts).toEqual({ count: 1 });
+    expect(payload.blockers).toEqual({ count: 0 });
+    expect(payload.notes).toBe(`${'n'.repeat(200)}…`);
+    expect(payload.other).toEqual({ extra_key: 'number' });
+    expect(payload.size_bytes).toBeGreaterThan(0);
+    const session = payload.session as AnyRecord;
+    expect(session.statePath).toBe(statePath(server));
+    expect(session.envelopeVersion).toBe(1);
+    expect(session.protocolVersion).toBe('2026-07-28');
+    expect(session.seq).toBe(0);
+  });
+
+  it('degrades to keys+types+size for a schema without generic fields', async () => {
+    const server = makeServer();
+    const payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    expect(payload.keys).toEqual({
+      working_dir: 'string',
+      cmd_summary: 'string',
+      discovered_flags: 'array',
+      tested_hypotheses: 'array',
+      active_files: 'array',
+    });
+    expect(payload.size_bytes).toBeGreaterThan(0);
+    expect(payload.goal).toBeUndefined();
+    expect(payload.session).toBeDefined();
+  });
+
+  it('keeps short notes intact and omits the other map when nothing is unknown', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    const payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    expect(payload.goal).toBe('');
+    expect(payload.notes).toBe('');
+    expect(payload.next_steps).toEqual({ count: 0, first: [] });
+    expect(payload.other).toBeUndefined();
+  });
+
+  it('seq advances with writes performed through the server', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    await toolCall(server, 'state.patch', { patch: { goal: 'one' } });
+    await toolCall(server, 'state.patch', { patch: { notes: 'two' } });
+    const payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    expect((payload.session as AnyRecord).seq).toBe(2);
+  });
+});
+
+// ─── state.metrics ───────────────────────────────────────────────────────────
+
+describe('MCP state.metrics', () => {
+  it('errors when no tracker is configured', async () => {
+    const server = makeServer();
+    const { result } = await toolCall(server, 'state.metrics', {});
     expect(result?.isError).toBe(true);
     expect(toolText(result)).toContain('No token tracker configured');
   });
 
-  it('state.metrics returns the §4.3 readout when a tracker is configured', () => {
+  it('errors honestly when the tracker has no recorded steps', async () => {
+    const server = makeServer({ tracker: new TokenTracker({ platform: 'generic', sessionName: 's' }) });
+    const { result } = await toolCall(server, 'state.metrics', {});
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toContain('No steps recorded yet');
+  });
+
+  it('returns the accuracy / averagePromptSize / totalTokens triad', async () => {
     const tracker = new TokenTracker({ platform: 'generic', sessionName: 'sess' });
     tracker.recordStep({
       step: 1,
@@ -391,48 +869,108 @@ describe('MCP tools/call', () => {
       success: true,
     });
     const server = makeServer({ tracker });
-    const metrics = JSON.parse(
-      toolText(toolCall(server, 'state.metrics', {}).result),
-    ) as AnyRecord;
-    expect(metrics.stepCount).toBe(1);
-    expect(metrics.averagePromptSize).toBe(100);
-    expect(metrics.totalTokens).toBe(150);
-  });
-
-  it('tools/call with params lacking name → -32602', () => {
-    const server = makeServer();
-    expect(parseResult(call(server, 'tools/call', { arguments: {} })).error?.code).toBe(
-      -32602,
-    );
-  });
-
-  it('tools/call with non-object params → -32602', () => {
-    const server = makeServer();
-    expect(parseResult(call(server, 'tools/call', 'nope')).error?.code).toBe(-32602);
-  });
-
-  it('tools/call with non-object arguments is treated as empty args', () => {
-    const server = makeServer();
-    const { result } = toolCall(server, 'state.get', 'not-an-object' as never);
-    expect(result).toBeDefined();
-    expect(JSON.parse(toolText(result)).working_dir).toBe('/');
-  });
-
-  it('unknown tool → isError', () => {
-    const server = makeServer();
-    const { result } = toolCall(server, 'state.nonexistent', {});
-    expect(result?.isError).toBe(true);
-    expect(toolText(result)).toContain('Unknown tool: state.nonexistent');
+    const metrics = toolJson((await toolCall(server, 'state.metrics', {})).result);
+    expect(metrics).toEqual({
+      accuracy: 1,
+      averagePromptSize: 100,
+      totalTokens: 150,
+    });
   });
 });
 
-// ─── stdio framing (Content-Length + newline-delimited) ─────────────────────
+// ─── spec.get / spec.next ────────────────────────────────────────────────────
+
+describe('MCP spec.get', () => {
+  it('returns the spec identity, schema, and a VALID example patch (CTF)', async () => {
+    const server = makeServer();
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    expect(spec.id).toBe('intercode-ctf');
+    expect(spec.version).toBe('1.0.0');
+    expect((spec.schema as AnyRecord).discovered_flags).toBeDefined();
+    const example = spec.example_state_patch as AnyRecord;
+    expect(example.working_dir).toBe('');
+    expect(example.discovered_flags).toEqual([]);
+    expect(validatePatchDeep(INTERCODE_CTF_SPEC.schema, example).valid).toBe(true);
+  });
+
+  it('covers every schema type in the example and stays valid', async () => {
+    const server = makeServer({ spec: KITCHEN_SINK_SPEC });
+    const example = toolJson((await toolCall(server, 'spec.get', {})).result)
+      .example_state_patch as AnyRecord;
+    expect(example).toEqual({
+      title: '',
+      attempts: 0,
+      done: false,
+      meta: {},
+      flags: [],
+    });
+    expect(validatePatchDeep(KITCHEN_SINK_SPEC.schema, example).valid).toBe(true);
+  });
+
+  it('substitutes generic-procedure placeholders into the example', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    const example = toolJson((await toolCall(server, 'spec.get', {})).result)
+      .example_state_patch as AnyRecord;
+    expect(example.goal).toBe('Describe what the procedure is trying to achieve');
+    expect(example.next_steps).toEqual(['Next action to take']);
+    expect(validatePatchDeep(GENERIC_PROCEDURE_SPEC.schema, example).valid).toBe(true);
+  });
+});
+
+describe('MCP spec.next', () => {
+  it('derives goal/completed/next/blockers/suggestion from a populated state', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    fs.writeFileSync(
+      statePath(server),
+      JSON.stringify({
+        goal: 'Finish the loop',
+        progress: ['p1', 'p2'],
+        next_steps: ['n1', 'n2', 'n3', 'n4'],
+        blockers: ['b1'],
+      }),
+    );
+    const payload = toolJson((await toolCall(server, 'spec.next', {})).result);
+    expect(payload).toEqual({
+      goal: 'Finish the loop',
+      completed: 2,
+      next: ['n1', 'n2', 'n3'],
+      blockers: ['b1'],
+      suggestion: 'n1',
+    });
+  });
+
+  it('falls back to a suggestion when next_steps is empty', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    const payload = toolJson((await toolCall(server, 'spec.next', {})).result);
+    expect(payload).toEqual({
+      goal: '',
+      completed: 0,
+      next: [],
+      blockers: [],
+      suggestion: 'set next_steps via state.patch',
+    });
+  });
+
+  it('reports null goal and empty guidance for schemas without generic fields', async () => {
+    const server = makeServer();
+    const payload = toolJson((await toolCall(server, 'spec.next', {})).result);
+    expect(payload).toEqual({
+      goal: null,
+      completed: 0,
+      next: [],
+      blockers: [],
+      suggestion: 'set next_steps via state.patch',
+    });
+  });
+});
+
+// ─── stdio framing (newline-delimited JSON only) ─────────────────────────────
 
 describe('MCP stdio framing', () => {
-  it('feed parses newline-delimited messages', () => {
+  it('feed parses newline-delimited messages and terminates responses with \\n', async () => {
     const server = makeServer();
-    const responses = server.feed(
-      JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) + '\n',
+    const responses = await server.feed(
+      `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' })}\n`,
     );
     expect(responses.length).toBe(1);
     const parsed = JSON.parse(responses[0].trim()) as JsonRpcResponse;
@@ -440,119 +978,71 @@ describe('MCP stdio framing', () => {
     expect(responses[0].endsWith('\n')).toBe(true);
   });
 
-  it('feed buffers a partial line until it completes', () => {
+  it('feed handles CRLF line endings', async () => {
     const server = makeServer();
-    expect(server.feed('{"jsonrpc":"2.0","id":').length).toBe(0);
-    const responses = server.feed('1,"method":"ping"}\n');
+    const responses = await server.feed(
+      `${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' })}\r\n`,
+    );
+    expect(responses.length).toBe(1);
+    expect((JSON.parse(responses[0].trim()) as JsonRpcResponse).id).toBe(3);
+  });
+
+  it('feed buffers a partial line until it completes', async () => {
+    const server = makeServer();
+    expect((await server.feed('{"jsonrpc":"2.0","id":')).length).toBe(0);
+    const responses = await server.feed('1,"method":"ping"}\n');
     expect(responses.length).toBe(1);
     expect(responses[0]).toContain('"id":1');
   });
 
-  it('feed parses a Content-Length (\\r\\n\\r\\n) frame and echoes framing', () => {
+  it('feed processes two messages in one chunk', async () => {
     const server = makeServer();
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'ping' });
-    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-    const responses = server.feed(frame);
-    expect(responses.length).toBe(1);
-    expect(responses[0].startsWith('Content-Length: ')).toBe(true);
-    const headerLen = Number(responses[0].match(/^Content-Length:\s*(\d+)/)?.[1]);
-    const bodyStart = responses[0].indexOf('\r\n\r\n') + 4;
-    const responseBody = responses[0].slice(bodyStart);
-    expect(Buffer.byteLength(responseBody)).toBe(headerLen);
-    expect((JSON.parse(responseBody) as JsonRpcResponse).id).toBe(7);
-  });
-
-  it('feed parses a Content-Length (\\n\\n) frame', () => {
-    const server = makeServer();
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'ping' });
-    const frame = `Content-Length: ${Buffer.byteLength(body)}\n\n${body}`;
-    const responses = server.feed(frame);
-    expect(responses.length).toBe(1);
-    expect(responses[0].startsWith('Content-Length: ')).toBe(true);
-    const bodyStart = responses[0].indexOf('\r\n\r\n') + 4;
-    expect((JSON.parse(responses[0].slice(bodyStart)) as JsonRpcResponse).id).toBe(8);
-  });
-
-  it('feed buffers an incomplete Content-Length frame', () => {
-    const server = makeServer();
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'ping' });
-    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body.slice(0, 10)}`;
-    expect(server.feed(frame).length).toBe(0);
-  });
-
-  it('feed skips blank separators before a frame', () => {
-    const server = makeServer();
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'ping' });
-    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-    const responses = server.feed(`\r\n${frame}`);
-    expect(responses.length).toBe(1);
-  });
-
-  it('feed processes content-length then line-delimited frames', () => {
-    const server = makeServer();
-    const clBody = JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'ping' });
-    const frame = `Content-Length: ${Buffer.byteLength(clBody)}\r\n\r\n${clBody}`;
-    const line = JSON.stringify({ jsonrpc: '2.0', id: 12, method: 'ping' });
-    const responses = server.feed(frame + '\n' + line + '\n');
+    const responses = await server.feed(
+      `${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' })}\n` +
+        `${JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'ping' })}\n`,
+    );
     expect(responses.length).toBe(2);
-    const clStart = responses[0].indexOf('\r\n\r\n') + 4;
-    expect((JSON.parse(responses[0].slice(clStart)) as JsonRpcResponse).id).toBe(11);
-    expect((JSON.parse(responses[1].trim()) as JsonRpcResponse).id).toBe(12);
   });
 
-  it('feed yields no response for a whitespace-only chunk', () => {
+  it('feed yields no response for whitespace-only chunks or blank lines', async () => {
     const server = makeServer();
-    expect(server.feed('\n\n  \n').length).toBe(0);
-  });
-
-  it('feed yields no response for leading newlines alone', () => {
-    const server = makeServer();
-    expect(server.feed('\n\n').length).toBe(0);
-  });
-
-  it('feed skips an empty line between newline-delimited frames', () => {
-    const server = makeServer();
-    const line = JSON.stringify({ jsonrpc: '2.0', id: 13, method: 'ping' });
-    const responses = server.feed(line + '\n \n');
+    expect((await server.feed('\n\n  \n')).length).toBe(0);
+    expect((await server.feed('\n\n')).length).toBe(0);
+    const line = JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'ping' });
+    const responses = await server.feed(`${line}\n \n`);
     expect(responses.length).toBe(1);
-    expect((JSON.parse(responses[0].trim()) as JsonRpcResponse).id).toBe(13);
+    expect((JSON.parse(responses[0].trim()) as JsonRpcResponse).id).toBe(6);
   });
 
-  it('feed emits nothing for a content-length framed notification', () => {
-    const server = makeServer();
-    const body = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' });
-    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-    expect(server.feed(frame).length).toBe(0);
-  });
-
-  it('feed emits nothing for a newline-delimited notification', () => {
+  it('feed emits nothing for a newline-delimited notification', async () => {
     const server = makeServer();
     expect(
-      server.feed('{"jsonrpc":"2.0","method":"notifications/initialized"}\n').length,
+      (await server.feed('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')).length,
     ).toBe(0);
   });
 
-  it('feed treats a single-newline header terminator as incomplete', () => {
+  it('Content-Length framing is no longer understood (parse error per line)', async () => {
     const server = makeServer();
-    expect(server.feed('Content-Length: 5\nhell').length).toBe(0);
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'ping' });
+    const responses = await server.feed(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    expect(responses.length).toBeGreaterThan(0);
+    const first = JSON.parse(responses[0].trim()) as JsonRpcResponse;
+    expect(first.error?.code).toBe(-32700);
   });
 });
 
-// ─── start / stop lifecycle ─────────────────────────────────────────────────
+// ─── start / stop lifecycle ──────────────────────────────────────────────────
 
 describe('MCP lifecycle', () => {
-  it('start reads input and writes framed responses; stop marks stopped', async () => {
+  it('start reads input and writes newline-framed responses; stop marks stopped', async () => {
     const server = makeServer();
     const input = new PassThrough();
     const output = new PassThrough();
-    let out = '';
-    output.on('data', (c: Buffer) => {
-      out += c.toString();
-    });
+    const dataPromise = once(output, 'data');
     await server.start(input, output);
-    input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) + '\n');
-    await Promise.resolve();
-    const parsed = JSON.parse(out.trim()) as JsonRpcResponse;
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' })}\n`);
+    const [chunk] = (await dataPromise) as [Buffer];
+    const parsed = JSON.parse(chunk.toString().trim()) as JsonRpcResponse;
     expect(parsed.id).toBe(1);
     expect(parsed.result).toEqual({});
     expect(server.isRunning).toBe(true);
@@ -564,16 +1054,13 @@ describe('MCP lifecycle', () => {
     const server = makeServer();
     const input = new PassThrough();
     const output = new PassThrough();
-    let out = '';
-    output.on('data', (c: Buffer) => {
-      out += c.toString();
-    });
+    const dataPromise = once(output, 'data');
     input.setEncoding('utf-8');
     await server.start(input, output);
-    input.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }) + '\n');
-    await Promise.resolve();
-    const parsed = JSON.parse(out.trim()) as JsonRpcResponse;
-    expect(parsed.id).toBe(2);
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })}\n`);
+    const [chunk] = (await dataPromise) as [Buffer | string];
+    const text = typeof chunk === 'string' ? chunk : chunk.toString();
+    expect((JSON.parse(text.trim()) as JsonRpcResponse).id).toBe(2);
   });
 
   it('start defaults to the process streams when none are supplied', async () => {
@@ -600,11 +1087,8 @@ describe('MCP launch', () => {
       input,
       output,
     });
-    const parsed = parseResult(
-      call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
-    );
-    const spec = JSON.parse(toolText(parsed.result)) as AnyRecord;
-    expect(spec.id).toBe('custom');
+    const parsed = await toolCall(server, 'spec.get', {});
+    expect(toolJson(parsed.result).id).toBe('custom');
   });
 
   it('launch loads a spec from specPath', async () => {
@@ -614,29 +1098,22 @@ describe('MCP launch', () => {
     fs.writeFileSync(specPath, JSON.stringify(spec));
     const { input, output } = streams();
     const server = await launch({ specPath, input, output });
-    const parsed = parseResult(
-      call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
-    );
-    expect(JSON.parse(toolText(parsed.result)).id).toBe('from-file');
+    const parsed = await toolCall(server, 'spec.get', {});
+    expect(toolJson(parsed.result).id).toBe('from-file');
   });
 
-  it('launch defaults to the InterCode CTF spec and .skillstate.json', async () => {
+  it('launch defaults to the InterCode CTF spec', async () => {
     const { input, output } = streams();
     const server = await launch({ input, output });
-    const parsed = parseResult(
-      call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
-    );
-    const spec = JSON.parse(toolText(parsed.result)) as AnyRecord;
-    expect(spec.id).toBe('intercode-ctf');
+    const parsed = await toolCall(server, 'spec.get', {});
+    expect(toolJson(parsed.result).id).toBe('intercode-ctf');
   });
 
-  it('launch falls back to default spec for an empty specPath string', async () => {
+  it('launch falls back to the default spec for an empty specPath string', async () => {
     const { input, output } = streams();
     const server = await launch({ specPath: '', input, output });
-    const parsed = parseResult(
-      call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
-    );
-    expect(JSON.parse(toolText(parsed.result)).id).toBe('intercode-ctf');
+    const parsed = await toolCall(server, 'spec.get', {});
+    expect(toolJson(parsed.result).id).toBe('intercode-ctf');
   });
 
   it('launch honours the SKILLSTATE_SPEC_PATH env', async () => {
@@ -648,10 +1125,8 @@ describe('MCP launch', () => {
       process.env['SKILLSTATE_SPEC_PATH'] = specPath;
       const { input, output } = streams();
       const server = await launch({ input, output });
-      const parsed = parseResult(
-        call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
-      );
-      expect(JSON.parse(toolText(parsed.result)).id).toBe('env-spec');
+      const parsed = await toolCall(server, 'spec.get', {});
+      expect(toolJson(parsed.result).id).toBe('env-spec');
     } finally {
       if (oldSpec === undefined) {
         delete process.env['SKILLSTATE_SPEC_PATH'];
@@ -675,11 +1150,11 @@ describe('MCP launch', () => {
     try {
       const { input, output } = streams();
       const server = await launch({ spec: makeSpec(), input, output });
-      toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
-      const persisted = JSON.parse(
+      await toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
+      const envelope = JSON.parse(
         fs.readFileSync(path.join(project, '.skillstate', 'skillstate.json'), 'utf-8'),
       ) as AnyRecord;
-      expect(persisted.working_dir).toBe('/per-project');
+      expect((envelope.state as AnyRecord).working_dir).toBe('/per-project');
     } finally {
       restore();
     }
@@ -693,11 +1168,11 @@ describe('MCP launch', () => {
     try {
       const { input, output } = streams();
       const server = await launch({ spec: makeSpec(), input, output });
-      toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
-      const persisted = JSON.parse(
+      await toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
+      const envelope = JSON.parse(
         fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
       ) as AnyRecord;
-      expect(persisted.working_dir).toBe('/global');
+      expect((envelope.state as AnyRecord).working_dir).toBe('/global');
     } finally {
       restore();
       if (oldHome === undefined) {
@@ -708,7 +1183,7 @@ describe('MCP launch', () => {
     }
   });
 
-  it('launch honours resolveStatePathForCwd parity with the opencode package', async () => {
+  it('launch honours resolveStatePathForCwd parity with the opencode package', () => {
     const project = makeTmp();
     const home = makeTmp();
     expect(resolveStatePathForCwd(project, home)).toBe(
@@ -718,5 +1193,4 @@ describe('MCP launch', () => {
       path.join(path.resolve(home), '.skillstate', 'global', 'skillstate.json'),
     );
   });
-
 });

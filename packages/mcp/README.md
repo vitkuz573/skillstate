@@ -14,10 +14,11 @@
 ---
 
 `@skillstate/mcp` exposes the skillstate runtime ([`@skillstate/core`](../core))
-as a **Model Context Protocol** server over stdio (JSON-RPC 2.0). It reuses the
-paper-exact core directly — `mergeState`, `createInitialState`,
-`validatePatchDeep`, `migrate`, `redactSecrets` — so any MCP client can read,
-patch, merge, and reset the execution state as tools.
+as a **Model Context Protocol** server (protocol revision `2026-07-28`) over
+stdio (JSON-RPC 2.0, newline-delimited). It reuses the paper-exact core
+directly — `mergeState`, `createInitialState`, `validatePatchDeep`, `migrate`,
+`redactSecrets` — so any MCP client can read, patch, checkpoint, and roll back
+the execution state as tools and resources.
 
 > **@non-paper** — the server is additive; no MCP exists in arXiv 2608.26263v3.
 > Unlike the prompting adapters, MCP is runtime **access**, not prompting, so
@@ -50,7 +51,7 @@ const server = new McpServer({
   root: '.',
   name: '.skillstate.json',
 });
-const response = server.handleLine(
+const response = await server.handleLine(
   JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'tools/call',
     params: { name: 'state.get', arguments: {} },
@@ -92,17 +93,17 @@ first (see the `@skillstate/opencode` README for a sample). Verify with:
 
 ```bash
 opencode debug config   # mcp.skillstate appears in the resolved config
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
-# -> serverInfo {"name":"skillstate","version":"1.0.0"} + 6 tools
+# -> protocolVersion "2026-07-28" + 10 tools
 ```
 
 ## API / Exports
 
-Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, and `launch`
-(plus the types `McpServerOptions`, `LaunchArgs`, `FrameMode`, `JsonRpcRequest`,
-`McpToolResult`, and `McpConfigOptions`).
+Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
+`PROTOCOL_VERSION` (plus the types `McpServerOptions`, `LaunchArgs`,
+`JsonRpcRequest`, `McpToolResult`, `ToolAnnotations`, and `McpConfigOptions`).
 
 - `new McpAdapter()` — `name = 'mcp'`.
   - `generateMcpConfig(target, options?): string` — a deterministic,
@@ -111,29 +112,50 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, and `launch`
     the state from its own cwd.
   - `saveMcpConfig(target, options?): Promise<string>` — atomic write.
 - `new McpServer(options: McpServerOptions)` — `{ spec, root, name, tracker? }`.
-  - `handleLine(line): string | null` — process one already-framed JSON-RPC
-    message.
-  - `feed(chunk): string[]` — consume streamed stdin, handling both
-    newline-delimited JSON-RPC and `Content-Length`-framed messages.
+  - `protocolVersion` is always `'2026-07-28'`; `initialize` answers exactly
+    that regardless of what the client requested (per the MCP spec the client
+    decides whether it can work with the server's revision).
+  - `handleLine(line): Promise<string | null>` — process one already-framed
+    JSON-RPC message.
+  - `feed(chunk): Promise<string[]>` — consume streamed stdin
+    (newline-delimited JSON-RPC; partial lines are buffered).
   - `start(input?, output?): Promise<McpServer>` / `stop()` / `get isRunning()`.
 - `launch(args?): Promise<McpServer>` — resolves the spec from args or env
   and starts a stdio server; the state always resolves from the server's cwd.
 
-**Tools:** `state.get`, `state.patch`, `state.merge` (schema-validated),
-`state.reset`, `spec.get`, `state.metrics`. **Resource:** `skillstate://state`.
-State is redacted on every read, and the server conserves its own buffering so
-transports may split frames mid-message.
+**Tools:** `state.get`, `state.patch` (the single write op — validates via
+`validatePatchDeep`, returns `{ state, changes, warnings }`), `state.validate`
+(dry-run), `state.diff` (changes since the last call, `{ full: true }` for
+before/after), `state.checkpoint` (named sidecar snapshot),
+`state.rollback` (restore from a checkpoint), `state.summary` (compact
+orientation + session info), `state.metrics`, `spec.get` (with a ready-made
+valid `example_state_patch`), and `spec.next` (goal/next/blockers guidance).
+`state.merge` and `state.reset` are gone — `state.patch` validates, and
+rollback replaces reset.
+
+**Resources (`resources/read`):** `skillstate://state` (the full
+`{ version, state }` envelope), `skillstate://spec`, and
+`skillstate://summary` (compact projection). State is redacted on every read,
+and the server conserves its own buffering so transports may split lines
+mid-message.
 
 ## Notes
 
 - **Zero dependencies.** `@skillstate/mcp` declares only
   [`@skillstate/core`](../core); it uses Node's `fs`/`path`/`stream` for the
   stdio transport and crash-safe state writes (temp sibling + fsync + rename).
-- Both newline-delimited JSON-RPC and `Content-Length`-framed (LSP-style)
-  messages are accepted; responses echo the framing that triggered them.
-- `state.merge` runs `validatePatchDeep` (defense-in-depth) before the ⊕ merge;
-  `state.patch` applies the raw ⊕ merge. `redactSecrets` fails closed so
-  secrets never leave the process through a tool result.
+- Transport is newline-delimited JSON only (the MCP stdio framing);
+  `Content-Length`-framed input is not understood and errors as `-32700`.
+- Every patch — including `state.patch` — runs `validatePatchDeep`
+  (defense-in-depth) before the ⊕ merge; an invalid patch is an `isError`
+  result carrying `error` and `field`, and nothing is written.
+  `redactSecrets` fails closed so secrets never leave the process through a
+  tool result or resource read.
+- Checkpoints live in `<stateDir>/checkpoints/<seq>-<label>.json` sidecars
+  (atomic writes) and also pin `<path>.snapshot` via `FileStore.snapshot()`;
+  the sequence numbers derive from the sidecar catalog, so they survive
+  restarts. The session `seq` reported by `state.summary` counts writes
+  applied through the server in this session.
 
 ## Related
 

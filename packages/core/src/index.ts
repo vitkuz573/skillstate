@@ -24,5 +24,13 @@ export * from './logger.js';
 export * from './provider.js';
 export * from './config.js';
 export * from './host-state.js';
+// @non-paper Wave-5 hook runtime (single source of truth for generated
+// hook scripts and the OpenCode plugin).
+export * from './hook-runtime.js';
+// @non-paper Wave-5 shared adapter plumbing (resolve/save/merge helpers
+// reused by the claude/codex adapters).
+export * from './adapter-shared.js';
+// @non-paper Wave-5 deduplicated prompt texts (shared adapter vocabulary).
+export * from './prompt-contract.js';
 export * from './shutdown.js';
 export * from './schemas/index.js';

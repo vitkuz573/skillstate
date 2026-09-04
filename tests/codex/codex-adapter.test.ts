@@ -12,7 +12,7 @@ import {
   CodexAdapter,
   resolveStateForCwd,
 } from '@skillstate/codex';
-import { resolveStatePath } from '@skillstate/core';
+import { resolveStatePath, HISTORY_UNRELIABLE_NOTE } from '@skillstate/core';
 import type { ProceduralSpec } from '@skillstate/core';
 
 const nodePath = process.execPath;
@@ -201,6 +201,13 @@ describe('CodexAdapter.generateHookScript — injection events', () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
     expect(parsed.hookSpecificOutput.additionalContext).toContain('"goal":"ship"');
     expect(parsed.hookSpecificOutput.additionalContext).toContain('History is not reliable');
+    // A1 canonical text: the injected hint ends with the SHARED note —
+    // byte-identical to what the claude inject scripts emit.
+    expect(parsed.hookSpecificOutput.additionalContext.endsWith(HISTORY_UNRELIABLE_NOTE)).toBe(
+      true,
+    );
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('state.summary / state.patch');
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('fenced ```json state_patch block');
   });
 
   it('session-start-compact emits SessionStart additionalContext (state survived compaction)', () => {

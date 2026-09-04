@@ -12,6 +12,7 @@ import {
   removeSkillstateHookGroups,
   resolveStateForCwd,
 } from '@skillstate/claude';
+import { HISTORY_UNRELIABLE_NOTE } from '@skillstate/core';
 import type {
   SkillState,
   ProceduralSpec,
@@ -179,6 +180,13 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
     expect(parsed.hookSpecificOutput.additionalContext).toContain('"goal":"ship"');
     expect(parsed.hookSpecificOutput.additionalContext).toContain('History is not reliable');
+    // A1 canonical text: the injected hint ends with the SHARED note —
+    // byte-identical to what the codex inject scripts emit.
+    expect(parsed.hookSpecificOutput.additionalContext.endsWith(HISTORY_UNRELIABLE_NOTE)).toBe(
+      true,
+    );
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('state.summary / state.patch');
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('fenced ```json state_patch block');
   });
 
   it('session-start-compact emits SessionStart additionalContext (state survived compaction)', () => {
@@ -248,7 +256,7 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
   it('documents the statePath argument in the header but never bakes it in', () => {
     const script = adapter.generateHookScript('user-prompt-submit', '/tmp/explicit-state.json');
     expect(script).toContain('/tmp/explicit-state.json');
-    expect(script).toContain('resolveStatePathForCwd(cwd)');
+    expect(script).toContain('resolveStatePathForCwd(path.resolve(cwd)');
   });
 
   it('rejects traversal statePath refs', () => {

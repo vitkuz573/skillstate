@@ -5,6 +5,7 @@ import type {
   SchemaField,
   ValidationResult,
 } from './types.js';
+import { mergePatch } from './hook-runtime.js';
 
 // ---------------------------------------------------------------------------
 // 1. createInitialState — Σ₀ from schema defaults + optional overrides
@@ -32,6 +33,10 @@ export function createInitialState(
 //    - null values DELETE the key entirely
 //    - Nested dicts are merged recursively
 //    - Original state is NOT mutated
+//
+//    Delegates to the hook-runtime {@link mergePatch} — the single ⊕
+//    implementation shared with the generated hook scripts and the
+//    OpenCode plugin (one merge semantics everywhere).
 // ---------------------------------------------------------------------------
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -39,46 +44,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function mergeState(state: SkillState, patch: StatePatch): SkillState {
-  const result: SkillState = { ...state };
-
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) {
-      delete result[key];
-    } else if (isPlainObject(value) && isPlainObject(result[key])) {
-      // Recursive merge for nested objects — apply null-deletion inside too
-      result[key] = mergeNestedObjects(
-        result[key] as Record<string, unknown>,
-        value as Record<string, unknown>,
-      );
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
-}
-
-/** Deep merge two plain objects with null-deletion semantics. */
-function mergeNestedObjects(
-  base: Record<string, unknown>,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...base };
-
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) {
-      delete result[key];
-    } else if (isPlainObject(value) && isPlainObject(result[key])) {
-      result[key] = mergeNestedObjects(
-        result[key] as Record<string, unknown>,
-        value as Record<string, unknown>,
-      );
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
+  return mergePatch(state, patch);
 }
 
 // ---------------------------------------------------------------------------

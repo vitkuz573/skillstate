@@ -22,7 +22,12 @@ import type {
 import { PromptTransformer } from '@skillstate/core';
 import {
   atomicWriteFile,
+  describeSchema,
+  REASONING_DISCARDED_NOTE,
   resolveStatePath,
+  STATE_PATCH_CONTRACT,
+  STATE_PATCH_EXAMPLE_JSON,
+  STATE_PATCH_RULES,
 } from '@skillstate/core';
 import type { StatePathRef } from '@skillstate/core';
 
@@ -47,7 +52,7 @@ export class OpenCodeAdapter implements PlatformAdapter {
    */
   injectState(state: SkillState, spec: ProceduralSpec): string {
     const stateJson = JSON.stringify(state);
-    const schemaDesc = this.describeSchema(spec.schema);
+    const schemaDesc = describeSchema(spec.schema);
 
     return `<skill name="${spec.id}">
 <instructions>${spec.instructions}</instructions>
@@ -57,16 +62,9 @@ ${stateJson}
 </state>
 </skill>
 
-Respond with step-by-step reasoning followed by a JSON block containing both your State Patch and your Action. The JSON block MUST have exactly these two keys:
+Respond with:
 
-\`\`\`json
-{
-  "state_patch": { "key": "new_value", "obsolete_key": null },
-  "action": "your_action_here"
-}
-\`\`\`
-
-In \`state_patch\`, set keys to null to delete them. Only include fields you want to change. Omit fields to leave them unchanged.`;
+${STATE_PATCH_CONTRACT}`;
   }
 
   /**
@@ -133,20 +131,12 @@ plugin; only the current state and the latest observation matter.
 1. Read the current state from the state file.
 2. Observe the result of your last action.
 3. Reason about what to do next, given the state and the observation.
-4. Respond with a JSON block containing both your State Patch and your Action. The JSON block MUST have exactly these two keys:
+4. Respond with:
 
-\`\`\`json
-{
-  "state_patch": { "key": "new_value", "obsolete_key": null },
-  "action": "next_action_name"
-}
-\`\`\`
+${STATE_PATCH_CONTRACT}
 
-- In \`state_patch\`, set keys to null to delete them. Only include fields you
-  want to change. Omit fields to leave them unchanged.
 - \`action\` names what you will do next (e.g. "continue", "done").
-- Reasoning is discarded after execution — put anything you need to persist
-  into \`state_patch\`.`;
+- ${REASONING_DISCARDED_NOTE}`;
   }
 
   /**
@@ -201,17 +191,4 @@ export default createSkillStatePlugin({
   /* ------------------------------------------------------------------ */
   /*  Internal helpers                                                   */
   /* ------------------------------------------------------------------ */
-
-  /**
-   * Describe the schema fields for inclusion in prompts.
-   */
-  private describeSchema(schema: ProceduralSpec['schema']): string {
-    const fields = Object.entries(schema)
-      .map(
-        ([name, field]) =>
-          `- ${name} (${field.type}): ${field.description ?? 'no description'}`,
-      )
-      .join('\n');
-    return `## Schema\n${fields}`;
-  }
 }
