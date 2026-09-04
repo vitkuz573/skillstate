@@ -17,6 +17,7 @@ import {
   resolveInitSpec,
   resolveMcpCommandWith,
   uninstall,
+  isInsideTemp,
   HelpRequestedInitError,
   STATE_DIR_NAME,
   MANIFEST_FILE_NAME,
@@ -24,9 +25,12 @@ import {
 import type { InitFlags, InstallManifest } from '@skillstate/cli';
 import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
+const REPO_ROOT_FOR_WARN = path.resolve(__dirname, '..', '..');
+
 let tmpDirs: string[] = [];
 let logSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
 
 function makeTmp(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-install-'));
@@ -38,6 +42,10 @@ function output(): string {
   return [...logSpy.mock.calls, ...errorSpy.mock.calls].map((c) => c.join(' ')).join('\n');
 }
 
+function warnOutput(): string {
+  return warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+}
+
 beforeAll(() => {
   // Nothing to prebuild — commands.test.ts builds the project via tsc -b.
 });
@@ -46,11 +54,13 @@ beforeEach(() => {
   tmpDirs = [];
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
 afterEach(() => {
   logSpy.mockRestore();
   errorSpy.mockRestore();
+  warnSpy.mockRestore();
   for (const dir of tmpDirs) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -114,6 +124,57 @@ describe('defaultHome', () => {
     } finally {
       process.env['HOME'] = prev;
     }
+  });
+});
+
+describe('isInsideTemp', () => {
+  it('true for a directory under os.tmpdir()', () => {
+    expect(isInsideTemp(makeTmp())).toBe(true);
+  });
+
+  it('true for the tmpdir itself and for relative paths resolving into it', () => {
+    expect(isInsideTemp(os.tmpdir())).toBe(true);
+    const dir = makeTmp();
+    const prev = process.cwd();
+    process.chdir(os.tmpdir());
+    try {
+      expect(isInsideTemp(path.basename(dir))).toBe(true);
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  it('false for paths outside os.tmpdir()', () => {
+    expect(isInsideTemp(os.homedir())).toBe(false);
+    expect(isInsideTemp('/')).toBe(false);
+    expect(isInsideTemp(path.resolve(os.tmpdir(), '../not-tmp-neighbor'))).toBe(false);
+  });
+});
+
+describe('autoInstall temp-cwd warning', () => {
+  function makeMarkerHome(): string {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
+    return home;
+  }
+
+  it('warns when cwd is inside the system temp dir', async () => {
+    const home = makeMarkerHome();
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    expect(code).toBe(0);
+    expect(warnOutput()).toContain('[skillstate] installing from a temp directory — is this intended?');
+  });
+
+  it('does not warn when cwd is outside the temp dir', async () => {
+    const home = makeMarkerHome();
+    const project = path.join(REPO_ROOT_FOR_WARN, 'node_modules', `skillstate-warn-${Date.now()}`);
+    fs.mkdirSync(project, { recursive: true });
+    tmpDirs.push(project);
+    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    expect(code).toBe(0);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -394,10 +455,14 @@ describe('autoInstall — opencode', () => {
     );
     expect(manifest.mcp).toEqual({ configPath, format: 'opencode-jsonc' });
 
-    // Plugin generated with the state path baked in.
+    // Plugin is a THIN loader: imports the static plugin (single source of
+    // truth) with the real state path baked in — no duplicated hook logic.
     const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
-    expect(plugin).toContain(`const STATE_PATH = ${JSON.stringify(manifest.statePath)}`);
-    expect(plugin).toContain('MAX_HISTORY = 3');
+    expect(plugin).toContain("import { createSkillStatePlugin } from '@skillstate/opencode';");
+    expect(plugin).toContain('export default createSkillStatePlugin(');
+    expect(plugin).toContain(`statePath: ${JSON.stringify(manifest.statePath)}`);
+    expect(plugin).toContain('maxHistoryMessages: 3');
+    expect(plugin).not.toContain('function readSkillState');
 
     // Skill installed with the correct frontmatter.
     const skill = fs.readFileSync(manifest.skillPath!, 'utf-8');
@@ -470,7 +535,7 @@ describe('autoInstall — opencode', () => {
     expect(manifest.statePath).toBe(path.join(project, 'custom', 'state.json'));
     expect(manifest.maxHistoryMessages).toBe(7);
     const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
-    expect(plugin).toContain('MAX_HISTORY = 7');
+    expect(plugin).toContain('maxHistoryMessages: 7');
     expect(JSON.parse(fs.readFileSync(manifest.statePath, 'utf-8'))).toEqual({
       version: 1,
       state: {},

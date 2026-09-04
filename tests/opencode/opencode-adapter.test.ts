@@ -205,7 +205,7 @@ describe('OpenCodeAdapter.generatePluginCode', () => {
   const adapter = new OpenCodeAdapter();
   const statePath = '/tmp/skillstate-test.json';
 
-  it('generates TypeScript plugin code', () => {
+  it('generates TypeScript plugin code (thin loader by default)', () => {
     const plugin = adapter.generatePluginCode(statePath);
     expect(typeof plugin).toBe('string');
     expect(plugin.length).toBeGreaterThan(0);
@@ -213,32 +213,51 @@ describe('OpenCodeAdapter.generatePluginCode', () => {
     expect(plugin).toMatch(/(function|const|export|import)/);
   });
 
-  it('hooks into experimental.chat.messages.transform', () => {
+  it('thin loader imports the static plugin from @skillstate/opencode with the baked statePath', () => {
     const plugin = adapter.generatePluginCode(statePath);
+    expect(plugin).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
+    expect(plugin).toContain('export default createSkillStatePlugin(');
+    expect(plugin).toContain(`statePath: ${JSON.stringify(statePath)}`);
+    expect(plugin).toContain('maxHistoryMessages: 3');
+  });
+
+  it('thin loader contains no duplicated plugin logic', () => {
+    const plugin = adapter.generatePluginCode(statePath);
+    expect(plugin).not.toContain('function readSkillState');
+    expect(plugin).not.toContain('experimental.chat.messages.transform');
+  });
+
+  it('standalone option emits the self-contained escape hatch with the baked statePath', () => {
+    const plugin = adapter.generatePluginCode(statePath, { standalone: true });
     expect(plugin).toContain('experimental.chat.messages.transform');
-  });
-
-  it('rewrites prompt with state', () => {
-    const plugin = adapter.generatePluginCode(statePath);
-    // Should inject state content into the prompt
-    expect(plugin.toLowerCase()).toMatch(/state|inject|prompt/);
-  });
-
-  it('includes state file path', () => {
-    const plugin = adapter.generatePluginCode(statePath);
     expect(plugin).toContain(statePath);
+    expect(plugin).toContain('function readSkillState');
   });
 
-  it('trims messages via experimental.chat.messages.transform', () => {
-    const plugin = adapter.generatePluginCode(statePath);
-    // The new O(1) plugin uses messages.transform for history trimming
-    expect(plugin).toContain('experimental.chat.messages.transform');
-    expect(plugin).toContain('slice(-MAX_HISTORY)');
+  it('standalone template carries the opencode 1.17 contract', () => {
+    const plugin = adapter.generatePluginCode(statePath, { standalone: true });
+    expect(plugin).toContain('experimental.session.compacting');
+    expect(plugin).toContain('tool.execute.after');
+    expect(plugin).toContain('m.info.role');
+    expect(plugin).toContain('output.output');
+  });
+
+  it('honors maxHistoryMessages in thin and standalone modes', () => {
+    expect(adapter.generatePluginCode(statePath, { maxHistoryMessages: 5 })).toContain(
+      'maxHistoryMessages: 5',
+    );
+    expect(
+      adapter.generatePluginCode(statePath, { standalone: true, maxHistoryMessages: 7 }),
+    ).toContain('const MAX_HISTORY = 7');
   });
 
   it('does NOT use tool.execute.before (replaced by messages.transform)', () => {
-    const plugin = adapter.generatePluginCode(statePath);
-    expect(plugin).not.toContain('tool.execute.before');
+    expect(adapter.generatePluginCode(statePath)).not.toContain('tool.execute.before');
+    expect(
+      adapter.generatePluginCode(statePath, { standalone: true }),
+    ).not.toContain('"tool.execute.before"');
   });
 });
 

@@ -5,12 +5,13 @@ function makePlugin(maxHistory?: number): string {
   const adapter = new OpenCodeAdapter();
   return adapter.generatePluginCode('/tmp/skillstate-test.json', {
     maxHistoryMessages: maxHistory,
+    standalone: true,
   });
 }
 
-// ─── generatePluginCode: messages.transform hook ────────────────────────────
+// ─── standalone template: messages.transform hook ───────────────────────────
 
-describe('OpenCode generatePluginCode: experimental.chat.messages.transform', () => {
+describe('OpenCode generatePluginCode (standalone): experimental.chat.messages.transform', () => {
   it('generates a plugin with messages.transform hook', () => {
     const plugin = makePlugin();
     expect(plugin).toContain('experimental.chat.messages.transform');
@@ -26,7 +27,7 @@ describe('OpenCode generatePluginCode: experimental.chat.messages.transform', ()
     expect(plugin).toContain('tool.execute.after');
   });
 
-  it('has DEFAULT_HISTORY constant from options', () => {
+  it('has MAX_HISTORY constant from options', () => {
     const plugin = makePlugin(5);
     expect(plugin).toContain('const MAX_HISTORY = 5');
   });
@@ -36,17 +37,18 @@ describe('OpenCode generatePluginCode: experimental.chat.messages.transform', ()
     expect(plugin).toContain('const MAX_HISTORY = 3');
   });
 
-  it('filters messages: keeps system + last N non-system + state message', () => {
+  it('filters messages: keeps system + last N non-system + state element', () => {
     const plugin = makePlugin();
-    // The plugin should filter system messages separately
-    expect(plugin).toContain('m.role === "system"');
+    // The plugin filters system messages separately (opencode 1.17: role on info.role)
+    expect(plugin).toContain('m.info.role === "system"');
     expect(plugin).toContain('.slice(-MAX_HISTORY)');
   });
 
-  it('injects a synthetic user message with state', () => {
+  it('injects a synthetic state element as { info, parts }', () => {
     const plugin = makePlugin();
     expect(plugin).toContain('role: "user"');
     expect(plugin).toContain('Current skill state (JSON):');
+    expect(plugin).toContain('type: "text"');
   });
 
   it('does NOT contain the old additive-only tool.execute.before', () => {
@@ -146,10 +148,11 @@ describe('OpenCode compacting hook', () => {
 // ─── tool.execute.after: state persistence ──────────────────────────────────
 
 describe('OpenCode tool.execute.after: state persistence', () => {
-  it('extracts state_patch from response', () => {
+  it('extracts state_patch from output.output', () => {
     const plugin = makePlugin();
     expect(plugin).toContain('extractPatch');
     expect(plugin).toContain('state_patch');
+    expect(plugin).toContain('output.output');
   });
 
   it('merges patch into current state', () => {
@@ -174,7 +177,7 @@ describe('OpenCode tool.execute.after: state persistence', () => {
 // ─── generatePluginCode: StatePathRef overload ──────────────────────────────
 
 describe('OpenCode generatePluginCode: StatePathRef overload', () => {
-  it('resolves StatePathRef to embedded path', () => {
+  it('resolves StatePathRef to embedded path (thin loader)', () => {
     const adapter = new OpenCodeAdapter();
     const plugin = adapter.generatePluginCode({
       root: '/tmp/project',

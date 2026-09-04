@@ -25,6 +25,9 @@ const BIN = path.join(REPO_ROOT, 'packages', 'cli', 'bin', 'skillstate.js');
 let tmpDirs: string[] = [];
 let logSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
+let fakeHome = '';
+let originalHome: string | undefined;
 
 function makeTmp(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-cli-'));
@@ -48,13 +51,21 @@ beforeAll(() => {
 
 beforeEach(() => {
   tmpDirs = [];
+  fakeHome = makeTmp();
+  originalHome = process.env['HOME'];
+  process.env['HOME'] = fakeHome;
+  fs.mkdirSync(path.join(fakeHome, '.config', 'opencode'), { recursive: true });
+  fs.writeFileSync(path.join(fakeHome, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
 afterEach(() => {
   logSpy.mockRestore();
   errorSpy.mockRestore();
+  warnSpy.mockRestore();
+  process.env['HOME'] = originalHome;
   for (const dir of tmpDirs) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -540,7 +551,7 @@ describe('bin/skillstate.js — init+run+report from a clean directory', () => {
       execFileSync(process.execPath, [BIN, ...args], {
         cwd: dir,
         encoding: 'utf-8',
-        env: { ...process.env, ...env },
+        env: { ...process.env, HOME: fakeHome, ...env },
       });
 
     run(['init']);

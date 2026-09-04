@@ -26,7 +26,9 @@ describe('OpenCodeAdapter.generatePluginCode — @non-paper StatePathRef overloa
   it('string overload output is unchanged (byte-identical codegen)', () => {
     const plugin = adapter.generatePluginCode('/tmp/skillstate-test.json');
     expect(plugin).toContain('/tmp/skillstate-test.json');
-    expect(plugin).toContain('experimental.chat.messages.transform');
+    expect(plugin).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
   });
 
   it('{ root, name } ref embeds the resolved path', () => {
@@ -38,7 +40,9 @@ describe('OpenCodeAdapter.generatePluginCode — @non-paper StatePathRef overloa
     expect(viaRef).toContain(
       JSON.stringify(resolveStatePath(dir, 'state.json')).slice(1, -1),
     );
-    expect(viaRef).toContain('experimental.chat.messages.transform');
+    expect(viaRef).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
   });
 
   it('ref resolving to the same path produces identical output to the string form', () => {
@@ -69,7 +73,9 @@ describe('OpenCodeAdapter.savePluginCode — atomic persistence', () => {
     );
     expect(returned).toBe(dest);
     const saved = fs.readFileSync(dest, 'utf-8');
-    expect(saved).toContain('experimental.chat.messages.transform');
+    expect(saved).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
     expect(saved).toContain('/tmp/skillstate-test.json');
   });
 
@@ -85,7 +91,9 @@ describe('OpenCodeAdapter.savePluginCode — atomic persistence', () => {
     );
     expect(returned).toBe(expectedDest);
     const saved = fs.readFileSync(expectedDest, 'utf-8');
-    expect(saved).toContain('experimental.chat.messages.transform');
+    expect(saved).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
     expect(saved).toContain(
       JSON.stringify(resolveStatePath(dir, 'state.json')).slice(1, -1),
     );

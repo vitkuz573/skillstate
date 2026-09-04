@@ -94,6 +94,13 @@ export function defaultHome(): string {
   return process.env['HOME'] ?? os.homedir();
 }
 
+/** True when `dir` resolves inside the system temp directory (`os.tmpdir()`). */
+export function isInsideTemp(dir: string): boolean {
+  const resolved = path.resolve(dir);
+  const tmp = path.resolve(os.tmpdir());
+  return resolved === tmp || resolved.startsWith(tmp + path.sep);
+}
+
 /**
  * Detect the host from marker files under `home` (opencode first):
  * - opencode: `~/.config/opencode/opencode.jsonc|opencode.json` or `~/.opencode/bin/opencode`;
@@ -393,6 +400,9 @@ export interface InstallOptions {
  */
 export async function autoInstall(options: InstallOptions): Promise<number> {
   const { cwd, home, flags } = options;
+  if (isInsideTemp(cwd)) {
+    console.warn('[skillstate] installing from a temp directory — is this intended?');
+  }
   const host = flags.host ?? detectHost(home);
   if (host === null) {
     console.error(
@@ -431,6 +441,9 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   if (host === 'opencode') {
     const pluginAbs = path.join(home, '.config', 'opencode', 'plugins', 'skillstate.ts');
     if (!dry) {
+      // Thin loader: imports createSkillStatePlugin from @skillstate/opencode
+      // (single source of truth) with the real state path baked in. Use
+      // generatePluginCode({ standalone: true }) for npm-less environments.
       await new OpenCodeAdapter().savePluginCode(pluginAbs, stateAbs, { maxHistoryMessages: maxHistory });
     }
     say(`plugin:   ${pluginAbs} (auto-loaded from plugins/)`);

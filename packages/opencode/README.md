@@ -121,16 +121,24 @@ synthetic `{ info, parts }` message.
 
 ## API / Exports
 
-Root path `@skillstate/opencode` exports one thing: `OpenCodeAdapter`.
+Root path `@skillstate/opencode` exports the adapter and the static plugin:
 
 - `new OpenCodeAdapter()` — implements `PlatformAdapter` (`name = 'opencode'`).
 - `generateSkillMd(spec, statePath?): string` — a `SKILL.md` body with
   frontmatter and a state-based process description.
-- `generatePluginCode(statePath, options?): string` — an OpenCode plugin
-  (`options.maxHistoryMessages`, default 3). Hooks:
+- `generatePluginCode(statePath, options?): string` — a thin plugin loader by
+  default (`import { createSkillStatePlugin } from '@skillstate/opencode'` with
+  the state path baked in; `options.maxHistoryMessages`, default 3).
+  `options.standalone: true` inlines the full self-contained plugin — escape
+  hatch for environments without npm resolution of this package. Hooks:
   `experimental.chat.messages.transform` (real history trimming),
   `experimental.session.compacting` (inject state into compaction context),
   `tool.execute.after` (persist `state_patch` to disk).
+- `createSkillStatePlugin({ statePath, maxHistoryMessages? })` — the static
+  plugin factory (single source of truth for the hook logic); re-exported from
+  `@skillstate/opencode/plugin` as well.
+- `readSkillState` / `saveSkillState` / `mergePatch` / `extractPatch` — the
+  plugin's state helpers, shared by the static plugin.
 - `savePluginCode(target, statePath, options?): Promise<string>` — writes the
   plugin atomically and returns the destination.
 - `injectState(state, spec): string` / `formatPrompt(state, observation, spec): string`.
@@ -145,8 +153,12 @@ Both `generatePluginCode`/`savePluginCode` accept a raw path (legacy) or a
   `experimental.chat.messages.transform`, so the plugin drops old messages
   instead of just hiding them — only the last N non-system messages plus an
   injected state message reach the LLM.
-- The generated plugin is a self-contained ESM/TS module; it reads and writes
-  the state file directly and applies the paper ⊕ null-deletion merge.
+- The default generated plugin is a **thin loader**: it imports
+  `createSkillStatePlugin` from `@skillstate/opencode` (one source of truth)
+  and bakes in the state path. The `{ standalone: true }` template is a
+  self-contained ESM/TS escape hatch for environments without npm resolution;
+  hook logic lives only in `src/plugin.ts` — regenerate rather than editing
+  generated files.
 - Depends on [`@skillstate/core`](../core) for `PromptTransformer`,
   `atomicWriteFile`, and `resolveStatePath`.
 
