@@ -203,61 +203,41 @@ describe('OpenCodeAdapter.generateSkillMd', () => {
 
 describe('OpenCodeAdapter.generatePluginCode', () => {
   const adapter = new OpenCodeAdapter();
-  const statePath = '/tmp/skillstate-test.json';
 
-  it('generates TypeScript plugin code (thin loader by default)', () => {
-    const plugin = adapter.generatePluginCode(statePath);
+  it('generates TypeScript plugin code (thin loader)', () => {
+    const plugin = adapter.generatePluginCode();
     expect(typeof plugin).toBe('string');
     expect(plugin.length).toBeGreaterThan(0);
     // Should be valid TypeScript
     expect(plugin).toMatch(/(function|const|export|import)/);
   });
 
-  it('thin loader imports the static plugin from @skillstate/opencode with the baked statePath', () => {
-    const plugin = adapter.generatePluginCode(statePath);
+  it('thin loader imports the static plugin from @skillstate/opencode (resolver inside)', () => {
+    const plugin = adapter.generatePluginCode();
     expect(plugin).toContain(
       "import { createSkillStatePlugin } from '@skillstate/opencode';",
     );
     expect(plugin).toContain('export default createSkillStatePlugin(');
-    expect(plugin).toContain(`statePath: ${JSON.stringify(statePath)}`);
     expect(plugin).toContain('maxHistoryMessages: 3');
+    expect(plugin).not.toContain('statePath');
+    expect(plugin).not.toContain('resolveStatePathForCwd');
+    expect(plugin).not.toContain('node:os');
   });
 
   it('thin loader contains no duplicated plugin logic', () => {
-    const plugin = adapter.generatePluginCode(statePath);
+    const plugin = adapter.generatePluginCode();
     expect(plugin).not.toContain('function readSkillState');
     expect(plugin).not.toContain('experimental.chat.messages.transform');
   });
 
-  it('standalone option emits the self-contained escape hatch with the baked statePath', () => {
-    const plugin = adapter.generatePluginCode(statePath, { standalone: true });
-    expect(plugin).toContain('experimental.chat.messages.transform');
-    expect(plugin).toContain(statePath);
-    expect(plugin).toContain('function readSkillState');
-  });
-
-  it('standalone template carries the opencode 1.17 contract', () => {
-    const plugin = adapter.generatePluginCode(statePath, { standalone: true });
-    expect(plugin).toContain('experimental.session.compacting');
-    expect(plugin).toContain('tool.execute.after');
-    expect(plugin).toContain('m.info.role');
-    expect(plugin).toContain('output.output');
-  });
-
-  it('honors maxHistoryMessages in thin and standalone modes', () => {
-    expect(adapter.generatePluginCode(statePath, { maxHistoryMessages: 5 })).toContain(
+  it('honors maxHistoryMessages', () => {
+    expect(adapter.generatePluginCode({ maxHistoryMessages: 5 })).toContain(
       'maxHistoryMessages: 5',
     );
-    expect(
-      adapter.generatePluginCode(statePath, { standalone: true, maxHistoryMessages: 7 }),
-    ).toContain('const MAX_HISTORY = 7');
   });
 
   it('does NOT use tool.execute.before (replaced by messages.transform)', () => {
-    expect(adapter.generatePluginCode(statePath)).not.toContain('tool.execute.before');
-    expect(
-      adapter.generatePluginCode(statePath, { standalone: true }),
-    ).not.toContain('"tool.execute.before"');
+    expect(adapter.generatePluginCode()).not.toContain('tool.execute.before');
   });
 });
 

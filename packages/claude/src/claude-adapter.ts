@@ -247,7 +247,7 @@ In \`state_patch\`, set keys to null to delete them. Only include fields you wan
   /**
    * @non-paper additive helper: generate a hook script and persist it via
    * `atomicWriteFile` (tmp + fsync + rename). Both the destination and the
-   * embedded state path accept raw strings (legacy behavior) or
+   * embedded state path accept raw strings or
    * `{ root, name }` refs confined by `resolveStatePath`. Returns the
    * absolute destination path.
    */

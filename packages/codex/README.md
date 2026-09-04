@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/codex)](https://www.npmjs.com/package/@skillstate/codex)
 [![node](https://img.shields.io/node/v/@skillstate/codex)](https://www.npmjs.com/package/@skillstate/codex)
-[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
+[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
 
 </div>
@@ -68,7 +68,7 @@ constants/types `CODEX_HOOK_SCRIPT_SUFFIX`, `CodexHookEvent`,
 - `new CodexAdapter()` — `name = 'codex'`.
 - `generateCodexAmendments(statePath, options?): string` — AGENTS.md amendment
   (`CodexAmendmentsOptions.spec` and `.includeHooksNote`).
-- `generateCodexStateRead(statePath): string` — standalone state-read block.
+- `generateCodexStateRead(statePath): string` — inline state-read block.
 - `generateCodexHookScript(eventType, statePath, schema?): string` —
   `CodexHookEvent` is `'UserPromptSubmit' | 'PostToolUse' | 'SessionStart'`.
   `PostToolUse` reads `tool_response` from stdin, extracts `state_patch`,
@@ -87,7 +87,7 @@ constants/types `CODEX_HOOK_SCRIPT_SUFFIX`, `CodexHookEvent`,
   history is never trimmed — true O(1) is not possible. The hooks keep state
   injected per prompt and persisted per tool call; the `AGENTS.md` amendment
   tells the model to trust the state file over the conversation.
-- `PostToolUse` accepts both fenced ```json blocks and a standalone (unfenced)
+- `PostToolUse` accepts both fenced ```json blocks and an unfenced
   JSON object, and tolerates wrappers such as `Here is: {...}`. Malformed
   outputs are rejected and never persisted.
 - Depends on [`@skillstate/core`](../core) for `atomicWriteFile`,

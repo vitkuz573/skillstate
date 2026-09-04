@@ -31,11 +31,11 @@ function llmText(reasoning: string, patch: StatePatch, action: string): string {
   return `${reasoning}\n\n\`\`\`json\n${JSON.stringify({ state_patch: patch, action })}\n\`\`\``;
 }
 
-describe('SkillStateRuntime — legacy LLMFn still compiles and runs (back-compat)', () => {
+describe('SkillStateRuntime — plain LLMFn still compiles and runs', () => {
   it('accepts a plain async function without any code changes', async () => {
     const fn: LLMFn = async (prompt: string) => {
       expect(typeof prompt).toBe('string');
-      return llmText('legacy', { mood: 'calm' }, 'go');
+      return llmText('fn', { mood: 'calm' }, 'go');
     };
     const runtime = new SkillStateRuntime({
       spec,

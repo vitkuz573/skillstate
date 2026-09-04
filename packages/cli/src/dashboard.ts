@@ -134,7 +134,7 @@ function renderTable(title: string, headers: string[], rows: string[][]): string
 
 export function formatMetricsTable(metrics: DashboardMetrics): string {
   // Task Accuracy (paper §4.3): '75.0%' when actionable steps exist, 'n/a'
-  // otherwise (null from TokenTracker, or absent on legacy metric shapes).
+  // otherwise (null from TokenTracker, or absent on older metric shapes).
   const accuracyText =
     metrics.accuracy == null
       ? 'n/a'

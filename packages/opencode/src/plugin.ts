@@ -1,9 +1,8 @@
 /**
  * Static OpenCode plugin — the SINGLE SOURCE OF TRUTH for the skillstate
- * host integration. `OpenCodeAdapter.generatePluginCode` (thin mode, the
- * default) emits a loader that imports `createSkillStatePlugin` from this
- * module; the standalone template is only an escape hatch for environments
- * without npm resolution of `@skillstate/opencode`.
+ * host integration. `OpenCodeAdapter.generatePluginCode` emits a thin loader
+ * that imports `createSkillStatePlugin` from this module; the per-project
+ * state resolution lives inside the plugin itself.
  *
  * Hooks (opencode 1.17 contract, verified on host):
  * - `experimental.chat.messages.transform` — entries are `{ info, parts }`
@@ -16,6 +15,8 @@
  *   ```json `state_patch` block is merged (paper ⊕: null deletes) and saved.
  */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   OpenCodeMessage,
   SkillStateHooks,
@@ -26,10 +27,34 @@ export * from './plugin-types.js';
 
 /** Options for {@link createSkillStatePlugin}. */
 export interface SkillStatePluginOptions {
-  /** Absolute path of the persisted state file. */
-  statePath: string;
   /** Non-system messages kept in the prompt (default 3). */
   maxHistoryMessages?: number;
+}
+
+/**
+ * Resolve the per-project state file for a session working directory
+ * (`cwd` of the current opencode session):
+ *
+ * - `cwd === home` — a session launched straight from `$HOME` has no single
+ *   project, so state goes to the global bucket
+ *   `<home>/.skillstate/global/skillstate.json`;
+ * - any other cwd (including subdirectories of `$HOME`) — the state lives in
+ *   the project: `<cwd>/.skillstate/skillstate.json`.
+ *
+ * Pure path arithmetic: both arguments are normalized via `path.resolve`
+ * before comparison, and there is NO filesystem access. The same project
+ * directory therefore always maps to the same state file no matter where
+ * the host was launched from, while different projects never share state.
+ * Zero-dep by design (node builtins only) so generated plugins and the MCP
+ * server can inline the same semantics. Keep any copy in sync.
+ */
+export function resolveStatePathForCwd(cwd: string, home: string): string {
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedHome = path.resolve(home);
+  if (resolvedCwd === resolvedHome) {
+    return path.join(resolvedHome, '.skillstate', 'global', 'skillstate.json');
+  }
+  return path.join(resolvedCwd, '.skillstate', 'skillstate.json');
 }
 
 /** True for plain (non-null, non-array) objects. */
@@ -67,11 +92,13 @@ export function readSkillState(statePath: string): Record<string, unknown> {
 
 /**
  * Persist the state file (best-effort: read-only environments are ignored).
- * Writes the `{ version: 1, state }` envelope so `migrate()`/runtime resume
- * read the same file.
+ * Creates the parent directory when missing (the per-project resolver may
+ * target a fresh `<cwd>/.skillstate/`). Writes the `{ version: 1, state }`
+ * envelope so `migrate()`/runtime resume read the same file.
  */
 export function saveSkillState(statePath: string, state: Record<string, unknown>): void {
   try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state }, null, 2)}\n`);
   } catch {
     // Best-effort: read-only environments or permission issues.
@@ -125,9 +152,15 @@ const STATE_MESSAGE_ID = 'skillstate-state-inject';
 /**
  * Build the OpenCode plugin function with the same behavior for every host
  * entry point (thin generated loaders, direct imports).
+ *
+ * State resolution is ALWAYS per-project: the state file path is computed
+ * from the session cwd on EVERY hook call via
+ * `resolveStatePathForCwd(process.cwd(), os.homedir())` — each project gets
+ * its own `<cwd>/.skillstate/skillstate.json`, and a session launched from
+ * `$HOME` uses the global bucket.
  */
-export function createSkillStatePlugin(options: SkillStatePluginOptions): SkillStatePlugin {
-  const statePath = options.statePath;
+export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): SkillStatePlugin {
+  const resolvePath = (): string => resolveStatePathForCwd(process.cwd(), os.homedir());
   const maxHistory = options.maxHistoryMessages ?? 3;
 
   return async () => {
@@ -141,7 +174,7 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions): SkillS
         _input,
         output,
       ): Promise<void> => {
-        const state = readSkillState(statePath);
+        const state = readSkillState(resolvePath());
         const messages = output.messages;
         const systemMessages = messages.filter((m) => m.info.role === 'system');
         const trimmed = messages
@@ -185,7 +218,7 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions): SkillS
         _input,
         output,
       ): Promise<void> => {
-        const state = readSkillState(statePath);
+        const state = readSkillState(resolvePath());
         if (!Array.isArray(output.context)) {
           output.context = [];
         }
@@ -198,6 +231,7 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions): SkillS
       'tool.execute.after': async (_input, output): Promise<void> => {
         const response = output.output ?? '';
         if (typeof response !== 'string') return;
+        const statePath = resolvePath();
         const patch = extractPatch(response);
         if (patch) {
           saveSkillState(statePath, mergePatch(readSkillState(statePath), patch));

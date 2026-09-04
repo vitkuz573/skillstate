@@ -297,7 +297,7 @@ export class SkillStateRuntime {
   /**
    * @non-paper LLM dispatch (Wave 4 DX, additive).
    *
-   * Paper path: `llm` is a legacy `LLMFn` — called verbatim with the
+   * Paper path: `llm` is a plain `LLMFn` function — called verbatim with the
    * prompt, exactly as before. Provider path: `llm.call(prompt, opts?)`
    * is used instead, forwarding the runtime `signal?` so aborts reach
    * the provider; both paths stay inside `invokeResilient`, so the

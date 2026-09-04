@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
 [![node](https://img.shields.io/node/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
-[![Tests](https://img.shields.io/badge/tests-755%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
+[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
@@ -43,19 +43,20 @@ const adapter = new OpenCodeAdapter();
 // execution_context block pointing at the persisted state file:
 const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate.json');
 
-// Plugin with real O(1) history trimming via experimental.chat.messages.transform:
-const plugin = adapter.generatePluginCode('./.skillstate.json');
+// Plugin with real O(1) history trimming via experimental.chat.messages.transform.
+// The state path is resolved per session from the host cwd inside the plugin —
+// no baked path:
+const plugin = adapter.generatePluginCode();
 
 // Default keeps the last 3 non-system messages + state injection.
 // Configure history depth:
-const plugin2 = adapter.generatePluginCode('./.skillstate.json', {
+const plugin2 = adapter.generatePluginCode({
   maxHistoryMessages: 5,   // keep last 5 non-system messages
 });
 
 // Persist the plugin to disk atomically:
 const saved = await adapter.savePluginCode(
   './skillstate.plugin.ts',
-  './.skillstate.json',
   { maxHistoryMessages: 5 },
 );
 ```
@@ -73,16 +74,17 @@ import { OpenCodeAdapter } from '@skillstate/opencode';
 import { writeFileSync } from 'node:fs';
 
 const adapter = new OpenCodeAdapter();
-const statePath = '/abs/path/to/.skillstate.json';
-const code = adapter.generatePluginCode(statePath, { maxHistoryMessages: 3 });
+const code = adapter.generatePluginCode({ maxHistoryMessages: 3 });
 writeFileSync('/abs/path/to/skillstate.plugin.ts', code);
 ```
 
 Put the generated `skillstate.plugin.ts` anywhere stable (absolute path is
-safest), e.g. `<project>/.opencode-runtime/skillstate.plugin.ts`.
+safest), e.g. `<project>/.opencode-runtime/skillstate.plugin.ts`. The plugin
+must be able to resolve `@skillstate/opencode` at load time (install it in
+the project or globally) — hook logic lives in that package.
 
-**2. Create the initial state file** (`statePath` from step 1), matching your
-spec schema, e.g. for `INTERCODE_CTF_SPEC`:
+**2. Create the initial state file** (`<project>/.skillstate/skillstate.json`),
+matching your spec schema, e.g. for `INTERCODE_CTF_SPEC`:
 
 ```json
 {
@@ -126,26 +128,29 @@ Root path `@skillstate/opencode` exports the adapter and the static plugin:
 - `new OpenCodeAdapter()` — implements `PlatformAdapter` (`name = 'opencode'`).
 - `generateSkillMd(spec, statePath?): string` — a `SKILL.md` body with
   frontmatter and a state-based process description.
-- `generatePluginCode(statePath, options?): string` — a thin plugin loader by
-  default (`import { createSkillStatePlugin } from '@skillstate/opencode'` with
-  the state path baked in; `options.maxHistoryMessages`, default 3).
-  `options.standalone: true` inlines the full self-contained plugin — escape
-  hatch for environments without npm resolution of this package. Hooks:
+- `generatePluginCode(options?): string` — a thin plugin loader
+  (`import { createSkillStatePlugin } from '@skillstate/opencode'`;
+  `options.maxHistoryMessages`, default 3). State resolution is always
+  per-project and lives inside the static plugin. Hooks:
   `experimental.chat.messages.transform` (real history trimming),
   `experimental.session.compacting` (inject state into compaction context),
   `tool.execute.after` (persist `state_patch` to disk).
-- `createSkillStatePlugin({ statePath, maxHistoryMessages? })` — the static
-  plugin factory (single source of truth for the hook logic); re-exported from
-  `@skillstate/opencode/plugin` as well.
+- `createSkillStatePlugin({ maxHistoryMessages? })` — the static plugin
+  factory (single source of truth for the hook logic); state is resolved from
+  the session cwd on every hook call via
+  `resolveStatePathForCwd(process.cwd(), os.homedir())` —
+  `<cwd>/.skillstate/skillstate.json`, or the global bucket
+  `<home>/.skillstate/global/skillstate.json` when the session runs from
+  `$HOME`. Re-exported from `@skillstate/opencode/plugin` as well.
+- `resolveStatePathForCwd(cwd, home): string` — the per-project state path
+  resolution (pure path arithmetic, no filesystem access).
 - `readSkillState` / `saveSkillState` / `mergePatch` / `extractPatch` — the
   plugin's state helpers, shared by the static plugin.
-- `savePluginCode(target, statePath, options?): Promise<string>` — writes the
-  plugin atomically and returns the destination.
+- `savePluginCode(target, options?): Promise<string>` — writes the plugin
+  atomically and returns the destination. `target` accepts a raw path or a
+  `{ root, name }` ref confined by `resolveStatePath` (`..` escapes throw).
 - `injectState(state, spec): string` / `formatPrompt(state, observation, spec): string`.
 - `extractPatch(response): StatePatch | null` / `extractAction(response): string | null`.
-
-Both `generatePluginCode`/`savePluginCode` accept a raw path (legacy) or a
-`{ root, name }` ref confined by `resolveStatePath` (`..` escapes throw).
 
 ## Notes
 
@@ -153,12 +158,12 @@ Both `generatePluginCode`/`savePluginCode` accept a raw path (legacy) or a
   `experimental.chat.messages.transform`, so the plugin drops old messages
   instead of just hiding them — only the last N non-system messages plus an
   injected state message reach the LLM.
-- The default generated plugin is a **thin loader**: it imports
-  `createSkillStatePlugin` from `@skillstate/opencode` (one source of truth)
-  and bakes in the state path. The `{ standalone: true }` template is a
-  self-contained ESM/TS escape hatch for environments without npm resolution;
-  hook logic lives only in `src/plugin.ts` — regenerate rather than editing
-  generated files.
+- The generated plugin is a **thin loader**: it imports
+  `createSkillStatePlugin` from `@skillstate/opencode` (one source of truth).
+  Hook logic lives only in `src/plugin.ts` — regenerate rather than editing
+  generated files. State resolves per session:
+  `<cwd>/.skillstate/skillstate.json` (global bucket from `~` when the
+  session cwd is `$HOME`).
 - Depends on [`@skillstate/core`](../core) for `PromptTransformer`,
   `atomicWriteFile`, and `resolveStatePath`.
 

@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { McpServer, launch } from '@skillstate/mcp';
+import { McpServer, launch, resolveStatePathForCwd } from '@skillstate/mcp';
 import { TokenTracker } from '@skillstate/core';
 import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec } from '@skillstate/core';
@@ -611,33 +611,13 @@ describe('MCP launch', () => {
     const dir = makeTmp();
     const spec = makeSpec({ id: 'from-file', instructions: 'loaded' });
     const specPath = path.join(dir, 'spec.json');
-    const statePath = path.join(dir, 'st.json');
     fs.writeFileSync(specPath, JSON.stringify(spec));
     const { input, output } = streams();
-    const server = await launch({ specPath, statePath, input, output });
+    const server = await launch({ specPath, input, output });
     const parsed = parseResult(
       call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
     );
     expect(JSON.parse(toolText(parsed.result)).id).toBe('from-file');
-  });
-
-  it('launch derives root/name from statePath and persists through it', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'deep', 'st.json');
-    fs.mkdirSync(path.join(dir, 'deep'), { recursive: true });
-    const { input, output } = streams();
-    const server = await launch({
-      spec: makeSpec(),
-      statePath,
-      input,
-      output,
-    });
-    toolCall(server, 'state.patch', { patch: { working_dir: '/via-launch' } });
-    expect(fs.existsSync(statePath)).toBe(true);
-    const persisted = JSON.parse(
-      fs.readFileSync(statePath, 'utf-8'),
-    ) as AnyRecord;
-    expect(persisted.working_dir).toBe('/via-launch');
   });
 
   it('launch defaults to the InterCode CTF spec and .skillstate.json', async () => {
@@ -659,35 +639,84 @@ describe('MCP launch', () => {
     expect(JSON.parse(toolText(parsed.result)).id).toBe('intercode-ctf');
   });
 
-  it('launch honours SKILLSTATE_SPEC_PATH and SKILLSTATE_STATE_PATH env', async () => {
+  it('launch honours the SKILLSTATE_SPEC_PATH env', async () => {
     const oldSpec = process.env['SKILLSTATE_SPEC_PATH'];
-    const oldState = process.env['SKILLSTATE_STATE_PATH'];
     const dir = makeTmp();
     const specPath = path.join(dir, 'spec.json');
-    const statePath = path.join(dir, 'env-state.json');
     fs.writeFileSync(specPath, JSON.stringify(makeSpec({ id: 'env-spec' })));
-    fs.writeFileSync(statePath, JSON.stringify({ working_dir: '/env' }));
     try {
       process.env['SKILLSTATE_SPEC_PATH'] = specPath;
-      process.env['SKILLSTATE_STATE_PATH'] = statePath;
       const { input, output } = streams();
       const server = await launch({ input, output });
       const parsed = parseResult(
         call(server, 'tools/call', { name: 'spec.get', arguments: {} }),
       );
       expect(JSON.parse(toolText(parsed.result)).id).toBe('env-spec');
-      expect(JSON.parse(toolText(toolCall(server, 'state.get', {}).result)).working_dir).toBe('/env');
     } finally {
       if (oldSpec === undefined) {
         delete process.env['SKILLSTATE_SPEC_PATH'];
       } else {
         process.env['SKILLSTATE_SPEC_PATH'] = oldSpec;
       }
-      if (oldState === undefined) {
-        delete process.env['SKILLSTATE_STATE_PATH'];
+    }
+  });
+
+  // ── per-project resolution (no statePath arg, no env) ────────────────────
+
+  function withCwd(dir: string): () => void {
+    const prev = process.cwd();
+    process.chdir(dir);
+    return () => process.chdir(prev);
+  }
+
+  it('launch resolves the state from process.cwd() when no arg and no env are given', async () => {
+    const project = makeTmp();
+    const restore = withCwd(project);
+    try {
+      const { input, output } = streams();
+      const server = await launch({ spec: makeSpec(), input, output });
+      toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
+      const persisted = JSON.parse(
+        fs.readFileSync(path.join(project, '.skillstate', 'skillstate.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(persisted.working_dir).toBe('/per-project');
+    } finally {
+      restore();
+    }
+  });
+
+  it('launch uses the global bucket when cwd === home', async () => {
+    const home = makeTmp();
+    const oldHome = process.env['HOME'];
+    process.env['HOME'] = home;
+    const restore = withCwd(home);
+    try {
+      const { input, output } = streams();
+      const server = await launch({ spec: makeSpec(), input, output });
+      toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
+      const persisted = JSON.parse(
+        fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(persisted.working_dir).toBe('/global');
+    } finally {
+      restore();
+      if (oldHome === undefined) {
+        delete process.env['HOME'];
       } else {
-        process.env['SKILLSTATE_STATE_PATH'] = oldState;
+        process.env['HOME'] = oldHome;
       }
     }
   });
+
+  it('launch honours resolveStatePathForCwd parity with the opencode package', async () => {
+    const project = makeTmp();
+    const home = makeTmp();
+    expect(resolveStatePathForCwd(project, home)).toBe(
+      path.join(path.resolve(project), '.skillstate', 'skillstate.json'),
+    );
+    expect(resolveStatePathForCwd(home, home)).toBe(
+      path.join(path.resolve(home), '.skillstate', 'global', 'skillstate.json'),
+    );
+  });
+
 });

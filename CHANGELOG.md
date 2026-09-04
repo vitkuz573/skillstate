@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Breaking:** the project was split from the single monolithic `skillstate`
 package into an npm **workspaces monorepo** of independently published scoped
 packages under the `@skillstate/*` scope. The root package is now `private`
-and ships no code. Every public import path moved — there is no legacy `skillstate`
-compat re-export, so all `skillstate/...` imports must be updated.
+and ships no code. Every public import path moved — there is no compat
+re-export under the old root, so all `skillstate/...` imports must be updated.
 
 ### Changed
 

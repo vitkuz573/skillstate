@@ -8,10 +8,10 @@
  * - `LLMProvider.call(prompt, opts?)` resolves `{ text, usage? }` where
  *   `usage.promptChars` / `usage.completionChars` are RAW STRING CHARS
  *   (§4.3) reported by the caller — never tokenizer output;
- * - `fromLLMFn(fn)` wraps a legacy `LLMFn` into an `LLMProvider`
+ * - `fromLLMFn(fn)` wraps a plain `LLMFn` function into an `LLMProvider`
  *   (backwards compatibility; `LLMFn` itself is NOT removed);
  * - `isLLMProvider(v)` distinguishes `LLMFn | LLMProvider` at runtime
- *   (function = legacy fn, object with a `call` function = provider).
+ *   (plain function = fn form, object with a `call` function = provider).
  *
  * The runtime accepts `llm: LLMFn | LLMProvider`: with a provider it
  * prefers `usage` over measuring strings, otherwise it measures exactly
@@ -30,7 +30,7 @@ export interface LLMCallOptions {
 /**
  * @non-paper usage reported by the provider, in raw string CHARS (§4.3).
  * Both fields are optional: missing values fall back to measuring the
- * corresponding string, exactly the legacy `LLMFn` behavior.
+ * corresponding string, exactly the plain `LLMFn` behavior.
  */
 export interface LLMUsage {
   /** Raw chars of the prompt as sent (overrides `prompt.length`). */
@@ -55,7 +55,7 @@ export interface LLMProvider {
 
 /**
  * @non-paper runtime guard: an object with a callable `call` is a
- * provider; anything else passed as `llm` is treated as a legacy `LLMFn`.
+ * provider; anything else passed as `llm` is treated as a plain `LLMFn`.
  */
 export function isLLMProvider(value: unknown): value is LLMProvider {
   if (typeof value !== 'object' || value === null) {
@@ -65,7 +65,7 @@ export function isLLMProvider(value: unknown): value is LLMProvider {
 }
 
 /**
- * @non-paper backwards-compatibility adapter: wrap a legacy `LLMFn`
+ * @non-paper adapter: wrap a plain `LLMFn` function
  * into an `LLMProvider`. The wrapper honors an already-aborted `signal`
  * (rejects with `signal.reason`) and otherwise delegates verbatim —
  * no usage is synthesized, so the runtime measures strings as before.

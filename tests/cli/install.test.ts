@@ -230,9 +230,8 @@ describe('parseInitArgs', () => {
       auto: true,
       uninstall: true,
     });
-    expect(parseInitArgs(['--host', 'claude', '--state-path', 's.json', '--max-history', '5'])).toEqual({
+    expect(parseInitArgs(['--host', 'claude', '--max-history', '5'])).toEqual({
       host: 'claude',
-      statePath: 's.json',
       maxHistory: 5,
       noMcp: false,
       noSkill: false,
@@ -240,9 +239,8 @@ describe('parseInitArgs', () => {
       auto: false,
       uninstall: false,
     });
-    expect(parseInitArgs(['--host=codex', '--state-path=/abs/s.json', '--max-history=2'])).toEqual({
+    expect(parseInitArgs(['--host=codex', '--max-history=2'])).toEqual({
       host: 'codex',
-      statePath: '/abs/s.json',
       maxHistory: 2,
       noMcp: false,
       noSkill: false,
@@ -271,8 +269,6 @@ describe('parseInitArgs', () => {
     expect(() => parseInitArgs(['--max-history', 'x'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--max-history=1.5'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--max-history'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--state-path'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--state-path='])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--spec'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--spec='])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--example', 'todo'])).toThrow(CLI_USAGE_INSTALL);
@@ -326,14 +322,14 @@ describe('buildSkillMd / buildMcpEntry', () => {
     expect(md).toContain('State-based Execution');
   });
 
-  it('builds an mcp entry shaped like opencode local servers', () => {
-    const entry = buildMcpEntry('/abs/state.json');
+  it('builds an mcp entry with no baked env (server resolves the state from its cwd)', () => {
+    const entry = buildMcpEntry();
     expect(entry).toEqual({
       type: 'local',
       command: ['node', expect.stringContaining('mcp.js')],
       enabled: true,
-      environment: { SKILLSTATE_STATE_PATH: '/abs/state.json' },
     });
+    expect(entry['environment']).toBeUndefined();
   });
 });
 
@@ -456,21 +452,28 @@ describe('autoInstall — opencode', () => {
     expect(manifest.mcp).toEqual({ configPath, format: 'opencode-jsonc' });
 
     // Plugin is a THIN loader: imports the static plugin (single source of
-    // truth) with the real state path baked in — no duplicated hook logic.
+    // truth) which resolves the state from the session cwd — no baked path.
     const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
-    expect(plugin).toContain("import { createSkillStatePlugin } from '@skillstate/opencode';");
-    expect(plugin).toContain('export default createSkillStatePlugin(');
-    expect(plugin).toContain(`statePath: ${JSON.stringify(manifest.statePath)}`);
+    expect(plugin).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
+    expect(plugin).toContain('export default createSkillStatePlugin({');
     expect(plugin).toContain('maxHistoryMessages: 3');
+    expect(plugin).not.toContain('statePath');
+    expect(plugin).not.toContain('resolveStatePathForCwd');
     expect(plugin).not.toContain('function readSkillState');
+
+    // The mcp entry carries NO baked state env (per-project resolution).
+    const after = fs.readFileSync(configPath, 'utf-8');
+    expect(after).not.toContain('SKILLSTATE_STATE_PATH');
 
     // Skill installed with the correct frontmatter.
     const skill = fs.readFileSync(manifest.skillPath!, 'utf-8');
     expect(skill).toContain('\nname: skillstate\n');
 
     // Config: skillstate mcp added, existing entries + comments intact, JSONC parses.
-    const after = fs.readFileSync(configPath, 'utf-8');
-    expect(parseJsoncSafe(after)).toEqual(
+    const afterConfig = fs.readFileSync(configPath, 'utf-8');
+    expect(parseJsoncSafe(afterConfig)).toEqual(
       expect.objectContaining({
         mcp: expect.objectContaining({
           existing: expect.objectContaining({ type: 'local' }),
@@ -478,8 +481,8 @@ describe('autoInstall — opencode', () => {
         }),
       }),
     );
-    expect(after).toContain('// OpenCode config (test fixture)');
-    expect(after).toContain('"some-npm-plugin"');
+    expect(afterConfig).toContain('// OpenCode config (test fixture)');
+    expect(afterConfig).toContain('"some-npm-plugin"');
 
     // A timestamped backup was written and holds the ORIGINAL text.
     const backup = fs
@@ -523,16 +526,12 @@ describe('autoInstall — opencode', () => {
     expect(readManifest(project).host).toBe('claude');
   });
 
-  it('honors --state-path and --max-history', async () => {
+  it('honors --max-history in the generated plugin', async () => {
     const { home, project } = makeOpencodeHome();
-    const flags: InitFlags = {
-      ...defaultFlags(),
-      statePath: 'custom/state.json',
-      maxHistory: 7,
-    };
+    const flags: InitFlags = { ...defaultFlags(), maxHistory: 7 };
     await autoInstall({ cwd: project, home, flags });
     const manifest = readManifest(project);
-    expect(manifest.statePath).toBe(path.join(project, 'custom', 'state.json'));
+    expect(manifest.statePath).toBe(path.join(project, STATE_DIR_NAME, 'skillstate.json'));
     expect(manifest.maxHistoryMessages).toBe(7);
     const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
     expect(plugin).toContain('maxHistoryMessages: 7');
@@ -703,17 +702,6 @@ describe('autoInstall — claude & codex', () => {
     fs.writeFileSync(mcpJson, JSON.stringify({ mcpServers: 'scalar' }));
     expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
     expect(JSON.parse(fs.readFileSync(mcpJson, 'utf-8'))).toEqual({ mcpServers: 'scalar' });
-  });
-
-  it('state path outside cwd is embedded absolutely in the skill', async () => {
-    const { home, project } = makeOpencodeHome();
-    const outside = makeTmp();
-    const flags: InitFlags = { ...defaultFlags(), statePath: path.join(outside, 's.json') };
-    await autoInstall({ cwd: project, home, flags });
-    const manifest = readManifest(project);
-    expect(manifest.statePath).toBe(path.join(outside, 's.json'));
-    const skill = fs.readFileSync(manifest.skillPath!, 'utf-8');
-    expect(skill).toContain(path.join(outside, 's.json'));
   });
 
   it('codex: installs the skill only and explains the MCP situation', async () => {

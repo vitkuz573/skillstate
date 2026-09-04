@@ -111,12 +111,12 @@ describe('FileStore', () => {
     await expect(store.load()).resolves.toBeNull();
   });
 
-  it('migrates a legacy bare-state file losslessly (v0 → v1)', async () => {
+  it('migrates a bare-state file losslessly (v0 → v1)', async () => {
     const root = makeTmp();
     const store = new FileStore(root, 'state.json');
-    const legacy = { mood: 'focused', stepsCompleted: 9 };
-    fs.writeFileSync(store.path, JSON.stringify(legacy));
-    await expect(store.load()).resolves.toEqual({ version: 1, state: legacy });
+    const bare = { mood: 'focused', stepsCompleted: 9 };
+    fs.writeFileSync(store.path, JSON.stringify(bare));
+    await expect(store.load()).resolves.toEqual({ version: 1, state: bare });
   });
 
   it('snapshot copies the commit next to itself; no-op without a commit', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -7,6 +7,7 @@ import {
   extractPatch,
   mergePatch,
   readSkillState,
+  resolveStatePathForCwd,
   saveSkillState,
 } from '@skillstate/opencode';
 import type { OpenCodeMessage, SkillStateHooks } from '@skillstate/opencode';
@@ -34,11 +35,22 @@ function envelope(role: string, text: string): OpenCodeMessage {
   };
 }
 
-async function hooksFor(
-  statePath: string,
-  maxHistoryMessages?: number,
-): Promise<SkillStateHooks> {
-  const plugin = createSkillStatePlugin({ statePath, maxHistoryMessages });
+/** Project tmp dir + chdir into it; returns the per-project state file path. */
+function makeProject(): { project: string; statePath: string } {
+  const project = makeTmp();
+  const statePath = path.join(project, '.skillstate', 'skillstate.json');
+  process.chdir(project);
+  return { project, statePath };
+}
+
+let lastCwd = process.cwd();
+
+afterEach(() => {
+  process.chdir(lastCwd);
+});
+
+async function hooksFor(maxHistoryMessages?: number): Promise<SkillStateHooks> {
+  const plugin = createSkillStatePlugin({ maxHistoryMessages });
   return plugin({});
 }
 
@@ -158,7 +170,7 @@ describe('extractPatch', () => {
 
 describe('createSkillStatePlugin — experimental.chat.messages.transform', () => {
   it('exposes all three hooks', async () => {
-    const hooks = await hooksFor(makeTmp());
+    const hooks = await hooksFor();
     expect(Object.keys(hooks).sort()).toEqual([
       'experimental.chat.messages.transform',
       'experimental.session.compacting',
@@ -167,7 +179,7 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
   });
 
   it('keeps system messages, trims non-system to maxHistory, appends state (role on info.role)', async () => {
-    const hooks = await hooksFor(makeTmp(), 2);
+    const hooks = await hooksFor(2);
     const messages = [
       envelope('system', 'be careful'),
       envelope('user', 'u1'),
@@ -185,7 +197,7 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
   });
 
   it('mutates the ORIGINAL array reference in place', async () => {
-    const hooks = await hooksFor(makeTmp(), 1);
+    const hooks = await hooksFor(1);
     const messages = [envelope('user', 'old'), envelope('user', 'new')];
     const sameRef = messages;
     await hooks['experimental.chat.messages.transform']!({}, { messages });
@@ -194,10 +206,10 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
   });
 
   it('injects state as a synthetic { info, parts } user element carrying the state JSON', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
+    const { statePath } = makeProject();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify({ progress: 42 }), 'utf-8');
-    const hooks = await hooksFor(statePath, 1);
+    const hooks = await hooksFor(1);
     const messages = [envelope('user', 'u1')];
     await hooks['experimental.chat.messages.transform']!({}, { messages });
 
@@ -211,10 +223,10 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
   });
 
   it('falls back to {} state text for a corrupt state file', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
+    const { statePath } = makeProject();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, '{oops', 'utf-8');
-    const hooks = await hooksFor(statePath, 1);
+    const hooks = await hooksFor(1);
     const messages = [envelope('user', 'u1')];
     await hooks['experimental.chat.messages.transform']!({}, { messages });
     expect(messages[messages.length - 1]!.parts[0]!.text).toBe(
@@ -223,7 +235,7 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
   });
 
   it('defaults maxHistoryMessages to 3', async () => {
-    const hooks = await hooksFor(makeTmp());
+    const hooks = await hooksFor();
     const messages = [
       envelope('user', 'u1'),
       envelope('user', 'u2'),
@@ -241,17 +253,18 @@ describe('createSkillStatePlugin — experimental.chat.messages.transform', () =
 
 describe('createSkillStatePlugin — experimental.session.compacting', () => {
   it('pushes the state into an existing context array', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
+    const { statePath } = makeProject();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify({ step: 3 }), 'utf-8');
-    const hooks = await hooksFor(statePath);
+    const hooks = await hooksFor();
     const output = { context: ['existing note'] };
     await hooks['experimental.session.compacting']!({ sessionID: 's' }, output);
     expect(output.context).toEqual(['existing note', 'Skillstate: {"step":3}']);
   });
 
   it('initializes a missing context array', async () => {
-    const hooks = await hooksFor(makeTmp());
+    makeProject();
+    const hooks = await hooksFor();
     const output = { context: undefined as unknown as string[] };
     await hooks['experimental.session.compacting']!({ sessionID: 's' }, output);
     expect(output.context).toEqual(['Skillstate: {}']);
@@ -262,14 +275,14 @@ describe('createSkillStatePlugin — experimental.session.compacting', () => {
 
 describe('createSkillStatePlugin — tool.execute.after', () => {
   it('merges the state_patch (null deletes) from output.output and saves', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
+    const { statePath } = makeProject();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(
       statePath,
       JSON.stringify({ obsolete: 'old', notes: 'kept' }),
       'utf-8',
     );
-    const hooks = await hooksFor(statePath);
+    const hooks = await hooksFor();
     const response = 'reasoning\n```json\n{"state_patch":{"obsolete":null,"progress":7},"action":"go"}\n```';
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
@@ -279,9 +292,8 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
   });
 
   it('ignores non-string output.output', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
-    const hooks = await hooksFor(statePath);
+    const { statePath } = makeProject();
+    const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { output: { state_patch: { a: 1 } }, metadata: {} },
@@ -290,9 +302,8 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
   });
 
   it('ignores a missing output.output', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
-    const hooks = await hooksFor(statePath);
+    const { statePath } = makeProject();
+    const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { metadata: {} },
@@ -301,9 +312,8 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
   });
 
   it('writes nothing when the response has no state_patch', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
-    const hooks = await hooksFor(statePath);
+    const { statePath } = makeProject();
+    const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       { output: 'no blocks at all', metadata: {} },
@@ -312,10 +322,10 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
   });
 
   it('starts from {} when the existing state file is corrupt', async () => {
-    const dir = makeTmp();
-    const statePath = path.join(dir, 'state.json');
+    const { statePath } = makeProject();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, '{oops', 'utf-8');
-    const hooks = await hooksFor(statePath);
+    const hooks = await hooksFor();
     await hooks['tool.execute.after']!(
       { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
       {
@@ -324,5 +334,177 @@ describe('createSkillStatePlugin — tool.execute.after', () => {
       },
     );
     expect(readSkillState(statePath)).toEqual({ progress: 1 });
+  });
+});
+
+// ─── resolveStatePathForCwd (per-project semantics) ─────────────────────────
+
+describe('resolveStatePathForCwd', () => {
+  it('maps an arbitrary cwd to <cwd>/.skillstate/skillstate.json', () => {
+    expect(resolveStatePathForCwd('/foo/bar', '/home/u')).toBe(
+      path.join(path.resolve('/foo/bar'), '.skillstate', 'skillstate.json'),
+    );
+  });
+
+  it('normalizes relative and non-canonical cwds via path.resolve', () => {
+    expect(resolveStatePathForCwd('proj', '/home/u')).toBe(
+      path.join(path.resolve('proj'), '.skillstate', 'skillstate.json'),
+    );
+    expect(resolveStatePathForCwd('/foo/bar/../bar', '/home/u')).toBe(
+      resolveStatePathForCwd('/foo/bar', '/home/u'),
+    );
+  });
+
+  it('uses the global bucket when cwd === home', () => {
+    expect(resolveStatePathForCwd('/home/u', '/home/u')).toBe(
+      path.join(path.resolve('/home/u'), '.skillstate', 'global', 'skillstate.json'),
+    );
+  });
+
+  it('does NOT use the global bucket for a subdirectory of home', () => {
+    const global = resolveStatePathForCwd('/home/u', '/home/u');
+    const sub = resolveStatePathForCwd('/home/u/proj', '/home/u');
+    expect(sub).not.toBe(global);
+    expect(sub).toBe(path.join(path.resolve('/home/u/proj'), '.skillstate', 'skillstate.json'));
+  });
+});
+
+// ─── resolver mode: per-project state ───────────────────────────────────────
+
+describe('createSkillStatePlugin — per-project state resolution', () => {
+  const realCwd = process.cwd();
+  const realHome = process.env['HOME'];
+
+  afterEach(() => {
+    process.chdir(realCwd);
+    if (realHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = realHome;
+    }
+    vi.restoreAllMocks();
+  });
+
+  function chdir(dir: string): void {
+    process.chdir(dir);
+  }
+
+  function fakeHome(): string {
+    const dir = makeTmp();
+    process.env['HOME'] = dir;
+    return dir;
+  }
+
+  it('defaults to the per-project resolver when no options are given', async () => {
+    const home = fakeHome();
+    const project = makeTmp();
+    chdir(project);
+    const hooks = await createSkillStatePlugin()({});
+    const messages = [envelope('user', 'u1')];
+    await hooks['experimental.chat.messages.transform']!({}, { messages });
+    // The injected state text is read from <project>/.skillstate/skillstate.json.
+    fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { where: 'project-a' } }),
+    );
+    await hooks['experimental.chat.messages.transform']!({}, { messages });
+    expect(messages[messages.length - 1]!.parts[0]!.text).toBe(
+      'Current skill state (JSON): {"where":"project-a"}',
+    );
+    expect(home).toBeDefined();
+  });
+
+  it('resolves the state from the cwd AT HOOK-CALL TIME (isolation between projects)', async () => {
+    fakeHome();
+    const projectA = makeTmp();
+    const projectB = makeTmp();
+    for (const project of [projectA, projectB]) {
+      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+      fs.writeFileSync(
+        path.join(project, '.skillstate', 'skillstate.json'),
+        JSON.stringify({ version: 1, state: { project: path.basename(project) } }),
+      );
+    }
+    const hooks = await createSkillStatePlugin({ maxHistoryMessages: 1 })({});
+
+    chdir(projectA);
+    const messagesA = [envelope('user', 'in-a')];
+    await hooks['experimental.chat.messages.transform']!({}, { messages: messagesA });
+    expect(messagesA[messagesA.length - 1]!.parts[0]!.text).toContain(`"project":"${path.basename(projectA)}"`);
+
+    chdir(projectB);
+    const messagesB = [envelope('user', 'in-b')];
+    await hooks['experimental.chat.messages.transform']!({}, { messages: messagesB });
+    expect(messagesB[messagesB.length - 1]!.parts[0]!.text).toContain(`"project":"${path.basename(projectB)}"`);
+    expect(messagesB[messagesB.length - 1]!.parts[0]!.text).not.toContain(path.basename(projectA));
+  });
+
+  it('tool.execute.after writes to the CURRENT cwd project (isolation confirmed on disk)', async () => {
+    fakeHome();
+    const projectA = makeTmp();
+    const projectB = makeTmp();
+    const hooks = await createSkillStatePlugin({})({});
+
+    chdir(projectA);
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
+      { output: '```json\n{"state_patch":{"who":"a"},"action":"go"}\n```', metadata: {} },
+    );
+
+    chdir(projectB);
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
+      { output: '```json\n{"state_patch":{"who":"b"},"action":"go"}\n```', metadata: {} },
+    );
+
+    const stateA = JSON.parse(
+      fs.readFileSync(path.join(projectA, '.skillstate', 'skillstate.json'), 'utf-8'),
+    ) as { state: Record<string, unknown> };
+    const stateB = JSON.parse(
+      fs.readFileSync(path.join(projectB, '.skillstate', 'skillstate.json'), 'utf-8'),
+    ) as { state: Record<string, unknown> };
+    expect(stateA.state).toEqual({ who: 'a' });
+    expect(stateB.state).toEqual({ who: 'b' });
+  });
+
+  it('compacting reads the state for the current cwd', async () => {
+    fakeHome();
+    const projectA = makeTmp();
+    const projectB = makeTmp();
+    for (const project of [projectA, projectB]) {
+      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
+      fs.writeFileSync(
+        path.join(project, '.skillstate', 'skillstate.json'),
+        JSON.stringify({ version: 1, state: { where: path.basename(project) } }),
+      );
+    }
+    const hooks = await createSkillStatePlugin({})({});
+
+    chdir(projectA);
+    const outA = { context: [] as string[] };
+    await hooks['experimental.session.compacting']!({ sessionID: 's' }, outA);
+
+    chdir(projectB);
+    const outB = { context: [] as string[] };
+    await hooks['experimental.session.compacting']!({ sessionID: 's' }, outB);
+
+    expect(outA.context[0]).toContain(path.basename(projectA));
+    expect(outB.context[0]).toContain(path.basename(projectB));
+  });
+
+  it('cwd === home resolves the global bucket (no <home>/.skillstate project file)', async () => {
+    const home = fakeHome();
+    chdir(home);
+    const hooks = await createSkillStatePlugin({})({});
+    await hooks['tool.execute.after']!(
+      { tool: 'bash', sessionID: 's', callID: 'c', args: {} },
+      { output: '```json\n{"state_patch":{"global":true},"action":"go"}\n```', metadata: {} },
+    );
+    const globalState = JSON.parse(
+      fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
+    ) as { state: Record<string, unknown> };
+    expect(globalState.state).toEqual({ global: true });
+    expect(fs.existsSync(path.join(home, '.skillstate', 'skillstate.json'))).toBe(false);
   });
 });

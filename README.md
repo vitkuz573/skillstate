@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-745%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -232,8 +232,9 @@ const adapter = new OpenCodeAdapter();
 const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate.json');
 
 // Plugin with real O(1) history trimming via experimental.chat.messages.transform,
-// compaction context injection, and state persistence via tool.execute.after:
-const plugin = adapter.generatePluginCode('./.skillstate.json');
+// compaction context injection, and state persistence via tool.execute.after.
+// The state path resolves per session from the host cwd inside the plugin:
+const plugin = adapter.generatePluginCode();
 
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
@@ -272,7 +273,7 @@ const scriptPath = await adapter.saveCodexHookScript(
 ```
 
 The `PostToolUse` hook parses `state_patch` from the `tool_response`: it accepts
-both fenced ```json blocks and a standalone (unfenced) JSON object, and is
+both fenced ```json blocks and an unfenced JSON object, and is
 tolerant of wrappers such as `Here is: {...}`. `UserPromptSubmit` and
 `SessionStart` inject the current state as `additionalContext`.
 
@@ -301,11 +302,13 @@ const response = server.handleLine(
 );
 ```
 
-`launch(args)` reads `SKILLSTATE_SPEC_PATH` / `SKILLSTATE_STATE_PATH` (or
-explicit args) and starts a stdio server; the `skillstate-mcp` bin launches
-it directly. Tools: `state.get`, `state.patch`, `state.merge`, `state.reset`,
-`spec.get`, `state.metrics`. State is redacted on every read, and both
-newline-delimited JSON-RPC and `Content-Length`-framed messages are accepted.
+`launch(args)` reads `SKILLSTATE_SPEC_PATH` (or explicit args) and starts a
+stdio server; state always resolves per session from the server's own cwd
+(`<cwd>/.skillstate/skillstate.json`; the global bucket when cwd === home).
+The `skillstate-mcp` bin launches it directly. Tools: `state.get`,
+`state.patch`, `state.merge`, `state.reset`, `spec.get`, `state.metrics`.
+State is redacted on every read, and both newline-delimited JSON-RPC and
+`Content-Length`-framed messages are accepted.
 
 ### Integrate into your OpenCode host
 
@@ -349,8 +352,8 @@ Manual step-by-step guides (tested on OpenCode 1.17):
   `opencode.jsonc` (`"file:///abs/path/skillstate.plugin.ts"`), install the
   `SKILL.md`.
 - [`packages/mcp` → "Register in opencode.jsonc"](./packages/mcp/README.md#register-in-opencodejsonc) —
-  add the `skillstate` stdio MCP server (`state.get` / `state.patch` / …)
-  with `SKILLSTATE_STATE_PATH`.
+  add the `skillstate` stdio MCP server (`state.get` / `state.patch` / …);
+  it resolves the state from the session cwd on its own.
 
 Verify with `opencode debug config`, `opencode debug skill`, and an
 `initialize` + `tools/list` round-trip against `packages/mcp/bin/mcp.js`.
@@ -359,16 +362,16 @@ Verify with `opencode debug config`, `opencode debug skill`, and an
 
 ### OpenCode — real O(1) via `experimental.chat.messages.transform`
 
-The generated plugin hooks OpenCode's `experimental.chat.messages.transform` to trim history **before** each LLM call. Old messages are dropped — only the last N non-system messages plus an injected state message are sent to the model. This is real O(1) prompt footprint.
+The generated plugin hooks OpenCode's `experimental.chat.messages.transform` to trim history **before** each LLM call. Old messages are dropped — only the last N non-system messages plus an injected state message are sent to the model. This is real O(1) prompt footprint. State resolves per session from the host cwd: `<cwd>/.skillstate/skillstate.json` (global bucket from `~`).
 
 ```ts
 const adapter = new OpenCodeAdapter();
 
 // Default: keeps last 3 non-system messages + state injection
-const plugin = adapter.generatePluginCode('./.skillstate.json');
+const plugin = adapter.generatePluginCode();
 
 // Or configure history depth:
-const plugin = adapter.generatePluginCode('./.skillstate.json', {
+const plugin = adapter.generatePluginCode({
   maxHistoryMessages: 5,  // keep last 5 non-system messages
 });
 ```
@@ -466,7 +469,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] §5.7 failure-mode taxonomy is paper log analysis (68% Premature Overwrite/Deletion, 20% Schema/Type Coercion, 12% JSON Syntax on Gemma-4-31B T=100 logs) — NOT parser codes. Our parse-failure reasons (`no_block`, `malformed_json`, `missing_state_patch`, `missing_action`) are implementation-internal (`@non-paper`) and only feed the §7 retry feedback
 - [x] O(1)/O(T) property test — prompt size stays constant modulo observation growth (`tests/core/runtime-footprint.test.ts`)
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
-- [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios pinned as fixtures (`tests/core/paper-fidelity.test.ts`)
+- [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios fixed as fixtures (`tests/core/paper-fidelity.test.ts`)
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
 - [x] Claude adapter: `PreCompact` hook injects state + diff into compaction summary; `SessionStart(compact)` re-injects after compaction
 - [x] Codex adapter (`@non-paper`): `AGENTS.md` amendment + `UserPromptSubmit`/`PostToolUse`/`SessionStart(compact)` hooks inject and persist state
@@ -478,7 +481,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 
 ```bash
 npm ci
-npm test                # 745 tests
+npm test                # 873 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc -b
 npm run build           # tsc -b — emits each packages/*/dist/

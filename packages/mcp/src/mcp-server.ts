@@ -19,6 +19,7 @@
  * produce a truncated state file.
  */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { resolveStatePath } from '@skillstate/core';
@@ -59,12 +60,13 @@ export interface McpServerOptions {
   tracker?: TokenTracker;
 }
 
-/** Options for {@link launch} (mirrors `McpServerOptions` + env fallbacks). */
+/** Options for {@link launch} (spec/env config + explicit store overrides). */
 export interface LaunchArgs {
   spec?: ProceduralSpec;
   specPath?: string;
-  statePath?: string;
+  /** State root override; defaults to the per-project state directory. */
   root?: string;
+  /** State file name override; defaults to the per-project state file name. */
   name?: string;
   tracker?: TokenTracker;
   input?: Readable;
@@ -573,17 +575,41 @@ function resolveSpec(
 }
 
 /**
+ * Per-project state resolution for an MCP server session. Semantics are a
+ * zero-dep mirror of `resolveStatePathForCwd` in `@skillstate/opencode`
+ * (kept local: `@skillstate/mcp` depends only on `@skillstate/core` —
+ * keep the two in sync):
+ *
+ * - `cwd === home` — no single project → the global bucket
+ *   `<home>/.skillstate/global/skillstate.json`;
+ * - any other cwd → `<cwd>/.skillstate/skillstate.json`.
+ *
+ * Pure path arithmetic (no filesystem access, `path.resolve` normalization).
+ */
+export function resolveStatePathForCwd(cwd: string, home: string): string {
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedHome = path.resolve(home);
+  if (resolvedCwd === resolvedHome) {
+    return path.join(resolvedHome, '.skillstate', 'global', 'skillstate.json');
+  }
+  return path.join(resolvedCwd, '.skillstate', 'skillstate.json');
+}
+
+/**
  * Launch an MCP server from an argument/env config (reads
- * `SKILLSTATE_SPEC_PATH` and `SKILLSTATE_STATE_PATH` when not passed
- * explicitly). Defaults to the canonical InterCode CTF spec and
- * `.skillstate.json`.
+ * `SKILLSTATE_SPEC_PATH` when not passed explicitly). State resolution is
+ * ALWAYS per-project from the server's `process.cwd()`:
+ * `<cwd>/.skillstate/skillstate.json` (the global bucket when cwd === home).
+ * Hosts that launch local MCP servers with the project as cwd therefore get
+ * per-project state without any baked path. Explicit `args.root`/`args.name`
+ * remain available for in-process embedding. Defaults to the canonical
+ * InterCode CTF spec.
  */
 export async function launch(args?: LaunchArgs): Promise<McpServer> {
   const spec = resolveSpec(args, process.env);
-  const statePath = args?.statePath ?? process.env['SKILLSTATE_STATE_PATH'];
-  const root = args?.root ?? (statePath ? path.dirname(statePath) : '.');
-  const name =
-    args?.name ?? (statePath ? path.basename(statePath) : '.skillstate.json');
+  const statePath = resolveStatePathForCwd(process.cwd(), os.homedir());
+  const root = args?.root ?? path.dirname(statePath);
+  const name = args?.name ?? path.basename(statePath);
   const server = new McpServer({
     spec,
     root,

@@ -75,7 +75,7 @@ export function benchResponse(): string {
   })}\n\`\`\``;
 }
 
-/** Fixed observation object (timestamp pinned for determinism). */
+/** Fixed observation object (timestamp fixed for determinism). */
 export function benchObservation(): Observation {
   return { content: BENCH_OBSERVATION, timestamp: 0, source: 'bench' };
 }

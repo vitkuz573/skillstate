@@ -4,8 +4,11 @@
 // everything in one shot:
 // - state dir `./.skillstate/` in the project (per-project state + manifest);
 // - OpenCode: plugin into `~/.config/opencode/plugins/` (auto-loaded at
-//   startup), `mcp.skillstate` entry spliced into `opencode.jsonc` (with a
-//   timestamped backup), `SKILL.md` into `~/.config/opencode/skills/`;
+//   startup, thin loader — the plugin resolves
+//   `<cwd>/.skillstate/skillstate.json` from the host session's cwd),
+//   `mcp.skillstate` entry spliced into `opencode.jsonc` (with a timestamped
+//   backup, no baked env — the server resolves the state from its own cwd),
+//   `SKILL.md` into `~/.config/opencode/skills/`;
 // - Claude: `SKILL.md` into `~/.claude/skills/` + `.mcp.json` in the project;
 // - Codex: `SKILL.md` into `~/.codex/skills/` (no MCP — TOML config untouched).
 //
@@ -43,8 +46,6 @@ const SKILL_DESCRIPTION =
 export interface InitFlags {
   /** Forced host (`--host`); auto-detected when omitted. */
   host?: HostId;
-  /** State file path (`--state-path`); default `<cwd>/.skillstate/skillstate.json`. */
-  statePath?: string;
   /** Non-system messages kept by the plugin (`--max-history`, default 3). */
   maxHistory?: number;
   /** User spec file (`--spec <path>`); overrides the default spec. */
@@ -127,15 +128,21 @@ export function detectHost(home: string): HostId | null {
 }
 
 /**
- * Parse `init` flags: `--host <h>`, `--state-path <path>`, `--max-history <n>`,
- * `--no-mcp`, `--no-skill`, `--dry-run`, `--auto`, `--uninstall` (`=`-forms
- * accepted). Throws an `Error` with the usage line on unknown/invalid flags.
+ * Parse `init` flags: `--host <h>`, `--max-history <n>`, `--no-mcp`,
+ * `--no-skill`, `--dry-run`, `--auto`, `--uninstall` (`=`-forms accepted).
+ * Throws an `Error` with the usage line on unknown/invalid flags.
  */
 export function parseInitArgs(args: string[]): InitFlags {
   if (wantsHelpInit(args)) {
     throw new HelpRequestedInitError();
   }
-  const flags: InitFlags = { noMcp: false, noSkill: false, dryRun: false, auto: false, uninstall: false };
+  const flags: InitFlags = {
+    noMcp: false,
+    noSkill: false,
+    dryRun: false,
+    auto: false,
+    uninstall: false,
+  };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === '--auto') {
@@ -157,12 +164,6 @@ export function parseInitArgs(args: string[]): InitFlags {
         throw new Error(`Invalid --host (want opencode|claude|codex)\n${CLI_USAGE_INSTALL}`);
       }
       flags.host = value;
-    } else if (arg === '--state-path' || arg.startsWith('--state-path=')) {
-      const value = arg === '--state-path' ? args[++i] : arg.slice('--state-path='.length);
-      if (value === undefined || value.length === 0) {
-        throw new Error(`Missing value for --state-path\n${CLI_USAGE_INSTALL}`);
-      }
-      flags.statePath = value;
     } else if (arg === '--max-history' || arg.startsWith('--max-history=')) {
       const value = arg === '--max-history' ? args[++i] : arg.slice('--max-history='.length);
       const parsed = typeof value === 'string' ? Number(value) : NaN;
@@ -232,7 +233,7 @@ export class HelpRequestedInitError extends Error {
 
 /** Usage line for init/uninstall (composed with the CLI usage in commands.ts). */
 export const CLI_USAGE_INSTALL =
-  'Usage: skillstate init [--host opencode|claude|codex] [--state-path <path>] [--max-history <n>] [--no-mcp] [--no-skill] [--dry-run] | init --uninstall | uninstall [--state-dir <path>] [--remove-state] [--dry-run]';
+  'Usage: skillstate init [--host opencode|claude|codex] [--max-history <n>] [--no-mcp] [--no-skill] [--dry-run] | init --uninstall | uninstall [--state-dir <path>] [--remove-state] [--dry-run]';
 
 /** Resolve the MCP server command: the `@skillstate/mcp` bin via `node`, or the global `skillstate-mcp` bin. */
 export function resolveMcpCommandWith(resolve: (id: string) => string): { command: string; args: string[] } {
@@ -326,14 +327,17 @@ description: ${JSON.stringify(SKILL_DESCRIPTION)}
 ${body}`;
 }
 
-/** Skillstate MCP entry shaped like the host's existing local-server entries. */
-export function buildMcpEntry(stateAbs: string): Record<string, unknown> {
+/**
+ * Skillstate MCP entry shaped like the host's existing local-server entries.
+ * No environment is written — the server resolves the state from its own
+ * cwd at startup (`<cwd>/.skillstate/skillstate.json`).
+ */
+export function buildMcpEntry(): Record<string, unknown> {
   const cmd = resolveMcpCommand();
   return {
     type: 'local',
     command: [cmd.command, ...cmd.args],
     enabled: true,
-    environment: { SKILLSTATE_STATE_PATH: stateAbs },
   };
 }
 
@@ -418,8 +422,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   const spec = options.spec ?? resolveInitSpec(cwd, flags);
 
   const stateDir = path.join(cwd, STATE_DIR_NAME);
-  const stateAbs =
-    flags.statePath !== undefined ? resolveInCwd(cwd, flags.statePath) : path.join(stateDir, 'skillstate.json');
+  const stateAbs = path.join(stateDir, 'skillstate.json');
   const stateCreated = !dry && !fs.existsSync(stateAbs);
   if (!dry) {
     fs.mkdirSync(path.dirname(stateAbs), { recursive: true });
@@ -441,10 +444,11 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   if (host === 'opencode') {
     const pluginAbs = path.join(home, '.config', 'opencode', 'plugins', 'skillstate.ts');
     if (!dry) {
-      // Thin loader: imports createSkillStatePlugin from @skillstate/opencode
-      // (single source of truth) with the real state path baked in. Use
-      // generatePluginCode({ standalone: true }) for npm-less environments.
-      await new OpenCodeAdapter().savePluginCode(pluginAbs, stateAbs, { maxHistoryMessages: maxHistory });
+      // Thin loader: imports the static plugin from @skillstate/opencode
+      // (single source of truth); the plugin itself resolves the state from
+      // the host session's cwd on every hook call.
+      const adapter = new OpenCodeAdapter();
+      await adapter.savePluginCode(pluginAbs, { maxHistoryMessages: maxHistory });
     }
     say(`plugin:   ${pluginAbs} (auto-loaded from plugins/)`);
     manifest.pluginPath = pluginAbs;
@@ -453,7 +457,9 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   if (!flags.noSkill) {
     const skillAbs = path.join(skillDirFor(host, home), 'SKILL.md');
     if (!dry) {
-      await atomicWriteFile(skillAbs, buildSkillMd(relativeStatePath(cwd, stateAbs), spec));
+      // The state file always lives inside cwd, so the SKILL.md reference is
+      // always relative.
+      await atomicWriteFile(skillAbs, buildSkillMd('./.skillstate/skillstate.json', spec));
     }
     say(`skill:    ${skillAbs}`);
     manifest.skillPath = skillAbs;
@@ -471,7 +477,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     } catch {
       text = '{\n}\n';
     }
-    const result = addSkillstateMcp(text, buildMcpEntry(stateAbs));
+    const result = addSkillstateMcp(text, buildMcpEntry());
     if (result.changed) {
       const backup = backupPathFor(configPath);
       if (!dry) {
@@ -503,7 +509,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
         }
         await atomicWriteFile(
           mcpJson,
-          `${JSON.stringify({ mcpServers: { ...servers, skillstate: buildMcpEntry(stateAbs) } }, null, 2)}\n`,
+          `${JSON.stringify({ mcpServers: { ...servers, skillstate: buildMcpEntry() } }, null, 2)}\n`,
         );
       }
       say(`mcp:      ${mcpJson} (skillstate server added)`);
@@ -522,12 +528,6 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
   say(`manifest: ${manifestAbs}`);
   say(dry ? 'dry run complete — nothing was written.' : 'Done. Next: `skillstate run` in this project, then open your host.');
   return 0;
-}
-
-/** State path as the SKILL.md should reference it: relative when inside cwd, absolute otherwise. */
-function relativeStatePath(cwd: string, stateAbs: string): string {
-  const rel = path.relative(cwd, stateAbs);
-  return rel.startsWith('..') ? stateAbs : `./${rel}`;
 }
 
 /** Options for {@link uninstall}. */

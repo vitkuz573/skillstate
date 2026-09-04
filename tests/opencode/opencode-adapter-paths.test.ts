@@ -20,98 +20,48 @@ afterEach(() => {
   tmpDirs = [];
 });
 
-describe('OpenCodeAdapter.generatePluginCode — @non-paper StatePathRef overload', () => {
-  const adapter = new OpenCodeAdapter();
-
-  it('string overload output is unchanged (byte-identical codegen)', () => {
-    const plugin = adapter.generatePluginCode('/tmp/skillstate-test.json');
-    expect(plugin).toContain('/tmp/skillstate-test.json');
-    expect(plugin).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-  });
-
-  it('{ root, name } ref embeds the resolved path', () => {
-    const dir = makeTmp();
-    const viaRef = adapter.generatePluginCode({
-      root: dir,
-      name: 'state.json',
-    });
-    expect(viaRef).toContain(
-      JSON.stringify(resolveStatePath(dir, 'state.json')).slice(1, -1),
-    );
-    expect(viaRef).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-  });
-
-  it('ref resolving to the same path produces identical output to the string form', () => {
-    const dir = makeTmp();
-    const expected = resolveStatePath(dir, 'state.json');
-    expect(adapter.generatePluginCode({ root: dir, name: 'state.json' })).toBe(
-      adapter.generatePluginCode(expected),
-    );
-  });
-
-  it('traversal refs throw instead of embedding an unsafe path', () => {
-    const dir = makeTmp();
-    expect(() =>
-      adapter.generatePluginCode({ root: dir, name: '../../evil.json' }),
-    ).toThrow('Path traversal blocked');
-  });
-});
-
 describe('OpenCodeAdapter.savePluginCode — atomic persistence', () => {
   const adapter = new OpenCodeAdapter();
 
   it('writes the generated plugin to a string destination and returns it', async () => {
     const dir = makeTmp();
     const dest = path.join(dir, 'plugin', 'skillstate.ts');
-    const returned = await adapter.savePluginCode(
-      dest,
-      '/tmp/skillstate-test.json',
-    );
+    const returned = await adapter.savePluginCode(dest);
     expect(returned).toBe(dest);
     const saved = fs.readFileSync(dest, 'utf-8');
     expect(saved).toContain(
       "import { createSkillStatePlugin } from '@skillstate/opencode';",
     );
-    expect(saved).toContain('/tmp/skillstate-test.json');
+    expect(saved).toContain('export default createSkillStatePlugin({');
+    expect(saved).not.toContain('statePath');
   });
 
-  it('resolves { root, name } refs for both destination and state path', async () => {
+  it('honors maxHistoryMessages in the written file', async () => {
     const dir = makeTmp();
-    const returned = await adapter.savePluginCode(
-      { root: dir, name: path.join('plugin', 'skillstate.ts') },
-      { root: dir, name: 'state.json' },
-    );
+    const dest = path.join(dir, 'plugin.ts');
+    await adapter.savePluginCode(dest, { maxHistoryMessages: 5 });
+    const saved = fs.readFileSync(dest, 'utf-8');
+    expect(saved).toContain('maxHistoryMessages: 5');
+  });
+
+  it('resolves { root, name } destination refs confined by resolveStatePath', async () => {
+    const dir = makeTmp();
+    const returned = await adapter.savePluginCode({
+      root: dir,
+      name: path.join('plugin', 'skillstate.ts'),
+    });
     const expectedDest = resolveStatePath(
       dir,
       path.join('plugin', 'skillstate.ts'),
     );
     expect(returned).toBe(expectedDest);
-    const saved = fs.readFileSync(expectedDest, 'utf-8');
-    expect(saved).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-    expect(saved).toContain(
-      JSON.stringify(resolveStatePath(dir, 'state.json')).slice(1, -1),
-    );
+    expect(fs.existsSync(expectedDest)).toBe(true);
   });
 
-  it('rejects traversal in either the target or the state ref', async () => {
+  it('rejects traversal in the target ref', async () => {
     const dir = makeTmp();
     await expect(
-      adapter.savePluginCode(
-        { root: dir, name: '../evil.ts' },
-        path.join(dir, 'state.json'),
-      ),
-    ).rejects.toThrow('Path traversal blocked');
-    await expect(
-      adapter.savePluginCode(path.join(dir, 'plugin.ts'), {
-        root: dir,
-        name: '../evil.json',
-      }),
+      adapter.savePluginCode({ root: dir, name: '../evil.ts' }),
     ).rejects.toThrow('Path traversal blocked');
   });
 });

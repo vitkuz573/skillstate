@@ -9,7 +9,7 @@ describe('isLLMProvider', () => {
     expect(isLLMProvider({ call: async () => ({ text: 'hi' }) })).toBe(true);
   });
 
-  it('returns false for a plain function (legacy LLMFn)', () => {
+  it('returns false for a plain function (fn-form LLMFn)', () => {
     expect(isLLMProvider(async () => 'hi')).toBe(false);
   });
 

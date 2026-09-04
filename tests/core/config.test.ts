@@ -113,7 +113,7 @@ describe('loadConfig — file layer', () => {
     expect(loadConfig(dir)).toEqual(defaultConfig());
   });
 
-  it('supports the legacy tokenBudgetChars alias', () => {
+  it('supports the tokenBudgetChars alias', () => {
     const dir = makeTmp();
     writeConfig(dir, { tokenBudgetChars: 1234 });
     expect(loadConfig(dir).maxChars).toBe(1234);

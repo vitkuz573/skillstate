@@ -37,7 +37,7 @@ function loadFixture(): BenchResult[] {
 }
 
 describe('bench fixtures (fixed synthetic data, no RNG)', () => {
-  it('observation is fixed-length and timestamp-pinned', () => {
+  it('observation is fixed-length and timestamp-fixed', () => {
     expect(BENCH_OBSERVATION).toHaveLength(64);
     expect(benchObservation()).toEqual({
       content: BENCH_OBSERVATION,

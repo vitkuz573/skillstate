@@ -78,7 +78,7 @@ export interface CodexHooksConfigOptions {
  * OpenAI Codex platform adapter (@non-paper; see module doc).
  *
  * Codegen mirrors the Claude adapter's shape: every generator accepts a
- * raw path (legacy) or a `{ root, name }` ref confined by
+ * raw path or a `{ root, name }` ref confined by
  * `resolveStatePath` — `..` escapes throw instead of embedding an unsafe
  * path into the generated artifact.
  */
@@ -148,7 +148,7 @@ export class CodexAdapter {
 
   /**
    * Generate a markdown "read the state file" instruction block — the
-   * standalone form of the state-read contract (the core line the model
+   * inline form of the state-read contract (the core line the model
    * must follow), suitable for embedding in an AGENTS.md, a skill body, or
    * a system prompt.
    */
@@ -307,7 +307,7 @@ export class CodexAdapter {
   /**
    * @non-paper additive helper: generate the AGENTS.md amendment and persist
    * it via `atomicWriteFile` (tmp + fsync + rename). Both the destination and
-   * the embedded state path accept raw strings (legacy behavior) or
+   * the embedded state path accept raw strings or
    * `{ root, name }` refs confined by `resolveStatePath`. Returns the
    * absolute destination path.
    */

@@ -305,7 +305,7 @@ describe('CodexAdapter.codexHookScriptPath', () => {
 describe('CodexAdapter PostToolUse state_patch parsing', () => {
   const adapter = new CodexAdapter();
 
-  it('embeds the standalone-JSON fallback helpers', () => {
+  it('embeds the unfenced-JSON fallback helpers', () => {
     const script = adapter.generateCodexHookScript(
       'PostToolUse',
       '/tmp/.skillstate.json',
@@ -324,7 +324,7 @@ describe('CodexAdapter PostToolUse state_patch parsing', () => {
     expect(script).toMatch(/```json\\s\*/);
   });
 
-  it('parses fenced, raw standalone, wrapped text and object tool_response at runtime', async () => {
+  it('parses fenced, raw unfenced, wrapped text and object tool_response at runtime', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-codex-'));
     try {
       const statePath = path.join(dir, 'state.json');

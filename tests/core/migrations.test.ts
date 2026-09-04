@@ -23,20 +23,20 @@ describe('migrate', () => {
     expect(out).toEqual({ version: 1, state: { stepsCompleted: 3 } });
   });
 
-  it('wraps a legacy bare state without losses', () => {
-    const legacy = {
+  it('wraps a bare state (v0) without losses', () => {
+    const bare = {
       mood: 'focused',
       stepsCompleted: 7,
       inventory: ['rope'],
       config: { verbose: true, retries: 3 },
     };
-    const out = migrate(structuredClone(legacy));
+    const out = migrate(structuredClone(bare));
     expect(out.version).toBe(1);
-    expect(out.state).toEqual(legacy);
+    expect(out.state).toEqual(bare);
     // Lossless: every key survives, and mutating the result is isolated.
-    expect(Object.keys(out.state).sort()).toEqual(Object.keys(legacy).sort());
+    expect(Object.keys(out.state).sort()).toEqual(Object.keys(bare).sort());
     out.state.mood = 'mutated';
-    expect(legacy.mood).toBe('focused');
+    expect(bare.mood).toBe('focused');
   });
 
   it('throws closed on non-states', () => {

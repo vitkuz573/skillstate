@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
 [![node](https://img.shields.io/node/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
-[![Tests](https://img.shields.io/badge/tests-831%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
+[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitalykuzyaev/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
 
 </div>
@@ -69,9 +69,8 @@ skillstate uninstall         # roll the host install back (manifest-driven)
 5. For Codex: installs `~/.codex/skills/skillstate/SKILL.md` (no JSON MCP
    config to edit).
 
-Flags: `--host <name>`, `--state-path <path>`, `--max-history <n>`,
-`--spec <path>`, `--example ctf`, `--no-mcp`, `--no-skill`, `--dry-run`,
-`--uninstall`. Init is **idempotent** —
+Flags: `--host <name>`, `--max-history <n>`, `--spec <path>`, `--example ctf`,
+`--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
 re-running never duplicates config entries and never overwrites an existing
 spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
 `--dry-run`) removes exactly what the manifest records.
@@ -135,7 +134,7 @@ Root path `@skillstate/cli` exports the command layer and the dashboard.
 - `uninstall({ cwd, flags }): Promise<number>` — manifest-driven rollback.
 - `detectHost(home): HostId | null` — `opencode | claude | codex` detection.
 - `parseInitArgs(args): InitFlags`, `parseUninstallArgs(args): UninstallFlags`.
-- `buildSkillMd(statePathRel): string`, `buildMcpEntry(stateAbs)`.
+- `buildSkillMd(statePathRel, spec): string`, `buildMcpEntry(): Record<string, unknown>` — the MCP entry never embeds an environment; the server resolves the state from its own cwd.
 - `addSkillstateMcp(configText, entry)` / `removeSkillstateMcp(configText)` — JSONC surgery.
 - `resolveMcpCommand()`, `defaultHome()`, `HelpRequestedInitError`, `InstallManifest`.
 

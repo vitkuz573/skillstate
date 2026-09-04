@@ -1,61 +1,46 @@
 import { describe, it, expect } from 'vitest';
 import { OpenCodeAdapter } from '@skillstate/opencode';
 
-function makePlugin(maxHistory?: number): string {
+function makeLoader(maxHistory?: number): string {
   const adapter = new OpenCodeAdapter();
-  return adapter.generatePluginCode('/tmp/skillstate-test.json', {
-    maxHistoryMessages: maxHistory,
-    standalone: true,
-  });
+  return maxHistory === undefined
+    ? adapter.generatePluginCode()
+    : adapter.generatePluginCode({ maxHistoryMessages: maxHistory });
 }
 
-// ─── standalone template: messages.transform hook ───────────────────────────
+// ─── thin loader: hook delegation to the static plugin ──────────────────────
 
-describe('OpenCode generatePluginCode (standalone): experimental.chat.messages.transform', () => {
-  it('generates a plugin with messages.transform hook', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('experimental.chat.messages.transform');
+describe('OpenCode generatePluginCode (thin loader): hook contract', () => {
+  it('imports the static plugin from @skillstate/opencode', () => {
+    const loader = makeLoader();
+    expect(loader).toContain(
+      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+    );
+    expect(loader).toContain('export default createSkillStatePlugin({');
   });
 
-  it('generates a plugin with compacting hook', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('experimental.session.compacting');
+  it('has maxHistoryMessages from options', () => {
+    const loader = makeLoader(5);
+    expect(loader).toContain('maxHistoryMessages: 5');
   });
 
-  it('generates a plugin with tool.execute.after for state persistence', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('tool.execute.after');
+  it('defaults maxHistoryMessages to 3', () => {
+    const loader = makeLoader();
+    expect(loader).toContain('maxHistoryMessages: 3');
   });
 
-  it('has MAX_HISTORY constant from options', () => {
-    const plugin = makePlugin(5);
-    expect(plugin).toContain('const MAX_HISTORY = 5');
-  });
-
-  it('defaults MAX_HISTORY to 3', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('const MAX_HISTORY = 3');
-  });
-
-  it('filters messages: keeps system + last N non-system + state element', () => {
-    const plugin = makePlugin();
-    // The plugin filters system messages separately (opencode 1.17: role on info.role)
-    expect(plugin).toContain('m.info.role === "system"');
-    expect(plugin).toContain('.slice(-MAX_HISTORY)');
-  });
-
-  it('injects a synthetic state element as { info, parts }', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('role: "user"');
-    expect(plugin).toContain('Current skill state (JSON):');
-    expect(plugin).toContain('type: "text"');
+  it('contains no duplicated plugin logic', () => {
+    const loader = makeLoader();
+    expect(loader).not.toContain('readSkillState');
+    expect(loader).not.toContain('experimental.chat.messages.transform');
+    expect(loader).not.toContain('writeFileSync');
   });
 
   it('does NOT contain the old additive-only tool.execute.before', () => {
-    const plugin = makePlugin();
+    const loader = makeLoader();
     // The old approach used tool.execute.before; the new uses messages.transform
-    // There should be no tool.execute.before in the generated plugin
-    expect(plugin).not.toContain('"tool.execute.before"');
+    // There should be no tool.execute.before in the generated loader
+    expect(loader).not.toContain('"tool.execute.before"');
   });
 });
 
@@ -127,63 +112,6 @@ describe('OpenCode messages.transform: O(1) message count', () => {
     ];
     const out = simulateTransform(messages, 3);
     expect(out).toBe(2 + 1); // 2 system + 0 non-system + 1 state
-  });
-});
-
-// ─── compacting hook ────────────────────────────────────────────────────────
-
-describe('OpenCode compacting hook', () => {
-  it('injects state into output.context as array', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('output.context');
-    expect(plugin).toContain('output.context.push');
-  });
-
-  it('reads state file for compaction context', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('readSkillState');
-  });
-});
-
-// ─── tool.execute.after: state persistence ──────────────────────────────────
-
-describe('OpenCode tool.execute.after: state persistence', () => {
-  it('extracts state_patch from output.output', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('extractPatch');
-    expect(plugin).toContain('state_patch');
-    expect(plugin).toContain('output.output');
-  });
-
-  it('merges patch into current state', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('mergePatch');
-  });
-
-  it('saves merged state to disk', () => {
-    const plugin = makePlugin();
-    expect(plugin).toContain('saveSkillState');
-    expect(plugin).toContain('writeFileSync');
-  });
-
-  it('includes null-deletion merge (paper ⊕)', () => {
-    const plugin = makePlugin();
-    // null deletes keys in the merge
-    expect(plugin).toContain('=== null');
-    expect(plugin).toContain('delete result');
-  });
-});
-
-// ─── generatePluginCode: StatePathRef overload ──────────────────────────────
-
-describe('OpenCode generatePluginCode: StatePathRef overload', () => {
-  it('resolves StatePathRef to embedded path (thin loader)', () => {
-    const adapter = new OpenCodeAdapter();
-    const plugin = adapter.generatePluginCode({
-      root: '/tmp/project',
-      name: '.skillstate.json',
-    });
-    expect(plugin).toContain('/tmp/project/.skillstate.json');
   });
 });
 

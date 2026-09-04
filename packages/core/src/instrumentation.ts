@@ -16,7 +16,7 @@ export interface TokenCounter {
 }
 
 /**
- * @non-paper legacy heuristic: 1 token ≈ 4 chars, rounded up.
+ * @non-paper rough heuristic: 1 token ≈ 4 chars, rounded up.
  *
  * Kept for backward compatibility of ad-hoc estimates only. Do NOT use it
  * for paper §4.3 metrics — those are measured in chars (see `TokenTracker`).
