@@ -164,83 +164,6 @@ describe('OpenCodeAdapter.formatPrompt', () => {
   });
 });
 
-// ─── generateSkillMd ────────────────────────────────────────────────────────
-
-describe('OpenCodeAdapter.generateSkillMd', () => {
-  const adapter = new OpenCodeAdapter();
-
-  it('generates valid SKILL.md with YAML frontmatter', () => {
-    const skillMd = adapter.generateSkillMd(makeSpec());
-    expect(typeof skillMd).toBe('string');
-    expect(skillMd).toContain('---');
-    // Should contain YAML between two sets of ---
-    const match = skillMd.match(/^---\n[\s\S]*?\n---/);
-    expect(match).not.toBeNull();
-  });
-
-  it('includes name and description', () => {
-    const skillMd = adapter.generateSkillMd(makeSpec());
-    expect(skillMd).toContain('Test Skill');
-    expect(skillMd).toContain('Do test things carefully.');
-  });
-
-  it('includes execution context reference', () => {
-    const skillMd = adapter.generateSkillMd(makeSpec());
-    // Should reference how opencode picks up the skill context
-    expect(skillMd).toMatch(/execution|context|state/i);
-  });
-
-  it('includes process instructions', () => {
-    const skillMd = adapter.generateSkillMd(makeSpec());
-    // Should describe the reasoning + JSON output process
-    expect(skillMd).toMatch(/reason/i);
-    expect(skillMd).toContain('state_patch');
-    expect(skillMd).toContain('```json');
-  });
-});
-
-// ─── generatePluginCode ─────────────────────────────────────────────────────
-
-describe('OpenCodeAdapter.generatePluginCode', () => {
-  const adapter = new OpenCodeAdapter();
-
-  it('generates TypeScript plugin code (thin loader)', () => {
-    const plugin = adapter.generatePluginCode();
-    expect(typeof plugin).toBe('string');
-    expect(plugin.length).toBeGreaterThan(0);
-    // Should be valid TypeScript
-    expect(plugin).toMatch(/(function|const|export|import)/);
-  });
-
-  it('thin loader imports the static plugin from @skillstate/opencode (resolver inside)', () => {
-    const plugin = adapter.generatePluginCode();
-    expect(plugin).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-    expect(plugin).toContain('export default createSkillStatePlugin(');
-    expect(plugin).toContain('maxHistoryMessages: 3');
-    expect(plugin).not.toContain('statePath');
-    expect(plugin).not.toContain('resolveStatePathForCwd');
-    expect(plugin).not.toContain('node:os');
-  });
-
-  it('thin loader contains no duplicated plugin logic', () => {
-    const plugin = adapter.generatePluginCode();
-    expect(plugin).not.toContain('function readSkillState');
-    expect(plugin).not.toContain('experimental.chat.messages.transform');
-  });
-
-  it('honors maxHistoryMessages', () => {
-    expect(adapter.generatePluginCode({ maxHistoryMessages: 5 })).toContain(
-      'maxHistoryMessages: 5',
-    );
-  });
-
-  it('does NOT use tool.execute.before (replaced by messages.transform)', () => {
-    expect(adapter.generatePluginCode()).not.toContain('tool.execute.before');
-  });
-});
-
 // ─── describeSchema (via injectState) ───────────────────────────────────────
 
 describe('OpenCodeAdapter schema rendering', () => {
@@ -265,14 +188,6 @@ describe('OpenCodeAdapter paper conformance (two-key JSON example)', () => {
 
   it('injectState: example has exactly two keys, no three-key format, null-deletion phrase', () => {
     const result = adapter.injectState(makeState(), makeSpec());
-    expect(result).not.toContain('"reasoning"');
-    expect(result).toContain('set keys to null to delete');
-    const example = extractLastJsonBlock(result);
-    expect(Object.keys(example).sort()).toEqual(['action', 'state_patch']);
-  });
-
-  it('generateSkillMd: example has exactly two keys, no three-key format, null-deletion phrase', () => {
-    const result = adapter.generateSkillMd(makeSpec());
     expect(result).not.toContain('"reasoning"');
     expect(result).toContain('set keys to null to delete');
     const example = extractLastJsonBlock(result);

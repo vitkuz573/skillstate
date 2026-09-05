@@ -71,28 +71,58 @@ Command-line:
 skillstate-mcp                # reads SKILLSTATE_SPEC_PATH; state resolves from the cwd
 ```
 
-## Register in opencode.jsonc
+## Registering the server
 
-For an OpenCode host, add the stdio server to the `mcp` block of
-`~/.config/opencode/opencode.jsonc` (or the project `opencode.jsonc`). No
-environment is needed — the server resolves the state from its own cwd
-(`<cwd>/.skillstate/skillstate.json`):
+`skillstate init` (per project) and `skillstate install` (machine-level,
+Codex only) register the server for you — always as
+`npx -y @skillstate/mcp@^3`, pinned to the v3 major, with no embedded
+environment (the server resolves the state from its own cwd). The three
+shapes:
+
+**Project `opencode.json(c)` → `mcp` object (OpenCode):**
 
 ```jsonc
 {
   "mcp": {
     "skillstate": {
       "type": "local",
-      "command": ["node", "/abs/path/to/skillstate/packages/mcp/bin/mcp.js"],
+      "command": ["npx", "-y", "@skillstate/mcp@^3"],
       "enabled": true
     }
   }
 }
 ```
 
-If you installed from npm instead of a checkout, replace the command with
-`["npx", "-y", "skillstate-mcp"]` (the packaged bin). Create the state file
-first (see the `@skillstate/opencode` README for a sample). Verify with:
+**Project `.mcp.json` → `mcpServers` (Claude Code, stdio wire format):**
+
+```json
+{
+  "mcpServers": {
+    "skillstate": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@skillstate/mcp@^3"]
+    }
+  }
+}
+```
+
+**`~/.codex/config.toml` → `[mcp_servers.skillstate]` (machine-level, via
+`skillstate install`):**
+
+```toml
+[mcp_servers.skillstate]
+command = "npx"
+args = ["-y", "@skillstate/mcp@^3"]
+enabled = true
+```
+
+All entries are committed per project (the Codex TOML is the one
+machine-level exception) and the server is inert until the project has been
+initialized with `skillstate init` — until then every state/agent tool and
+the `skillstate://state`/`skillstate://summary`
+resources return `no skillstate state in this directory — run \`skillstate
+init\`` and nothing is created. Verify with:
 
 ```bash
 opencode debug config   # mcp.skillstate appears in the resolved config
@@ -196,6 +226,17 @@ every state file — `<stateDir>/.session-meta.json` (agent scopes:
 `skillstate://summary` (compact projection). State is redacted on every read,
 and the server conserves its own buffering so transports may split lines
 mid-message.
+
+**Inert until init.** The server may be registered machine-level (e.g. codex
+`~/.codex/config.toml`) and launched per-project, so it never materializes
+state in a project that was never initialized: every tool call except
+`spec.get` (pure config) and every resource read except `skillstate://spec`
+checks that the launch-time state directory (`root`) exists on disk first —
+when it is missing the call returns an `isError` result with the fixed text
+`no skillstate state in this directory — run \`skillstate init\``, the
+launch-time session stamp is skipped, and nothing (not even the directory)
+is ever created. Once `skillstate init` has run, the same calls proceed
+normally.
 
 ## Notes
 

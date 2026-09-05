@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-09-05
+
+**Breaking:** the host integration is now **project-local**. The global
+machine install (`npm i -g @skillstate/cli`) is the only global thing —
+`skillstate init` writes NOTHING into `~` anymore. All glue lives inside the
+project and is committed, so a fresh clone works for the whole team without
+any teammate installing skillstate globally. Existing `~`-based installs must
+be re-initialized (and rolled back with the old tooling removed by this
+release — there is no migration path).
+
+### Changed
+
+- **Project-local glue for every detected host.** `skillstate init` (no
+  `--host` flag) wires OpenCode, Claude Code, and Codex markers ALL AT ONCE:
+  state + spec + skill + MCP + hooks land inside the project; switching
+  harnesses needs no re-init. Host detection reads `~/.config/opencode`,
+  `~/.claude`, and `~/.codex` markers only.
+- **One shared project skill.** A single host-neutral
+  `.claude/skills/skillstate/SKILL.md` serves both OpenCode and Claude Code
+  (OpenCode reads project `.claude/skills/` too). No skill files are ever
+  written to `~/.config/opencode`, `~/.claude`, or `~/.codex`.
+- **OpenCode wiring is an npm plugin.** The project `opencode.json(c)` gets
+  `"plugin": ["@skillstate/opencode"]` (auto-installed by OpenCode via Bun)
+  plus an `mcp.skillstate` local server `{ npx, -y, @skillstate/mcp@^3 }` —
+  no generated plugin file, nothing under `~/.config/opencode`, timestamped
+  backup when the config changes.
+- **Claude Code wiring is project-level.** Hook groups
+  (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`)
+  merge into the project `.claude/settings.json` with
+  `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/<event>.cjs"` commands;
+  self-contained `.cjs` scripts are written to `<project>/.claude/hooks/
+  skillstate/`; the project `.mcp.json` gets the `skillstate` stdio server
+  (`npx -y @skillstate/mcp@^3`).
+- **New `skillstate install` command (machine-level, Codex only).** Writes
+  `~/.codex/hooks/skillstate/*.cjs`, merges `~/.codex/hooks.json`, and appends
+  the `[mcp_servers.skillstate]` TOML table (`npx -y @skillstate/mcp@^3`) to
+  `~/.codex/config.toml`. Idempotent; machine manifest at
+  `~/.skillstate/install-manifest.json`. For opencode/claude it prints that
+  nothing machine-wide is needed — their glue belongs to `skillstate init`.
+- **Multi-host manifest v2.** `.skillstate/install-manifest.json` is now
+  `{ version: 2, installedAt, statePath, skillPath?, hosts: { opencode?,
+  claude? } }` and re-init MERGES host records (adding a harness later =
+  re-run `init`). v1 manifests are NOT migrated — they are reported as
+  corrupt.
+- **Inert until init.** The OpenCode plugin, the Claude/Codex hook scripts,
+  and the MCP server are all no-ops when the project has no `.skillstate/`
+  state — the plugin does not trim/inject, hooks inject nothing and never
+  create state files, and MCP tools return `no skillstate state in this
+  directory — run \`skillstate init\`` (only `spec.get` works). Fresh clones
+  behave like vanilla hosts.
+- **`init` no longer creates a root `skillstate.json` config file** — `run`
+  and `report` use the built-in config defaults. The spec lands at
+  `skill-spec.json` (`--spec <path>` or the domain-neutral generic spec).
+- **MCP entries reference `npx -y @skillstate/mcp@^3`** everywhere; the
+  `skillstate-mcp` bin is no longer referenced by any installer.
+- All packages are released together at `3.0.0`.
+
+### Added
+
+- `skillstate install [--dry-run]` — machine-level Codex glue (see above).
+- `--machine` flag on `skillstate uninstall` — rolls the Codex machine glue
+  back exactly as the machine manifest records (hooks removed surgically so
+  foreign hooks survive).
+
+### Removed
+
+- `--host`, `--max-history`, `--no-mcp`, `--no-skill`, `--example ctf`,
+  `--auto`, and `init --uninstall` — `init` has exactly
+  `[--spec <path>] [--dry-run]` left.
+- `resolveMcpCommand*` helpers — MCP registration now writes the fixed
+  `npx -y @skillstate/mcp@^3` entry directly.
+- All `~`-based wiring from `init` (plugins/skills/hooks under
+  `~/.config/opencode`, `~/.claude`, `~/.codex`) and the generated
+  `skillstate.plugin.ts` / SKILL.md-per-host installs.
+
 ## [2.0.0] - 2026-09-03
 
 **Breaking:** the project was split from the single monolithic `skillstate`
@@ -101,3 +176,4 @@ Initial release — the SKILL.state runtime from
 
 [1.0.0]: https://github.com/vitkuz573/skillstate/releases/tag/v1.0.0
 [2.0.0]: https://github.com/vitkuz573/skillstate/releases/tag/v2.0.0
+[3.0.0]: https://github.com/vitkuz573/skillstate/releases/tag/v3.0.0

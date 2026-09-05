@@ -1,67 +1,73 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { describe, it, expect } from 'vitest';
 import { OpenCodeAdapter } from '@skillstate/opencode';
-import { resolveStatePath } from '@skillstate/core';
+import type {
+  SkillState,
+  ProceduralSpec,
+  Observation,
+} from '@skillstate/core';
 
-let tmpDirs: string[] = [];
-
-function makeTmp(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-opencode-'));
-  tmpDirs.push(dir);
-  return dir;
+function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
+  return {
+    id: 'test-skill',
+    name: 'Test Skill',
+    instructions: 'Do test things carefully.',
+    schema: {
+      progress: { type: 'number', default: 0, description: 'Current progress' },
+    },
+    version: '1.0.0',
+    ...overrides,
+  };
 }
 
-afterEach(() => {
-  for (const dir of tmpDirs) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-  tmpDirs = [];
-});
+function makeState(overrides?: Record<string, unknown>): SkillState {
+  return { progress: 42, ...overrides };
+}
 
-describe('OpenCodeAdapter.savePluginCode — atomic persistence', () => {
+function makeObservation(overrides?: Partial<Observation>): Observation {
+  return { content: 'Step output here', timestamp: Date.now(), ...overrides };
+}
+
+/**
+ * The adapter no longer persists anything (no `savePluginCode`): host glue
+ * is the npm plugin loaded directly by opencode, so the adapter surface is
+ * the pure prompt/parse methods only.
+ */
+describe('OpenCodeAdapter — surface without generated host glue', () => {
   const adapter = new OpenCodeAdapter();
 
-  it('writes the generated plugin to a string destination and returns it', async () => {
-    const dir = makeTmp();
-    const dest = path.join(dir, 'plugin', 'skillstate.ts');
-    const returned = await adapter.savePluginCode(dest);
-    expect(returned).toBe(dest);
-    const saved = fs.readFileSync(dest, 'utf-8');
-    expect(saved).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
+  it('exposes exactly the prompt/parse surface (no codegen, no save helpers)', () => {
+    const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(adapter)).sort();
+    expect(proto).toEqual([
+      'constructor',
+      'extractAction',
+      'extractPatch',
+      'formatPrompt',
+      'injectState',
+    ]);
+    expect(adapter.name).toBe('opencode');
+    const exported = adapter as unknown as Record<string, unknown>;
+    for (const gone of ['generateSkillMd', 'generatePluginCode', 'savePluginCode']) {
+      expect(exported[gone]).toBeUndefined();
+      expect(proto).not.toContain(gone);
+    }
+  });
+
+  it('injectState/formatPrompt remain deterministic (repeat calls agree)', () => {
+    expect(adapter.injectState(makeState(), makeSpec())).toBe(
+      adapter.injectState(makeState(), makeSpec()),
     );
-    expect(saved).toContain('export default createSkillStatePlugin({');
-    expect(saved).not.toContain('statePath');
-  });
-
-  it('honors maxHistoryMessages in the written file', async () => {
-    const dir = makeTmp();
-    const dest = path.join(dir, 'plugin.ts');
-    await adapter.savePluginCode(dest, { maxHistoryMessages: 5 });
-    const saved = fs.readFileSync(dest, 'utf-8');
-    expect(saved).toContain('maxHistoryMessages: 5');
-  });
-
-  it('resolves { root, name } destination refs confined by resolveStatePath', async () => {
-    const dir = makeTmp();
-    const returned = await adapter.savePluginCode({
-      root: dir,
-      name: path.join('plugin', 'skillstate.ts'),
-    });
-    const expectedDest = resolveStatePath(
-      dir,
-      path.join('plugin', 'skillstate.ts'),
+    expect(adapter.formatPrompt(makeState(), makeObservation(), makeSpec())).toBe(
+      adapter.formatPrompt(makeState(), makeObservation(), makeSpec()),
     );
-    expect(returned).toBe(expectedDest);
-    expect(fs.existsSync(expectedDest)).toBe(true);
   });
 
-  it('rejects traversal in the target ref', async () => {
-    const dir = makeTmp();
-    await expect(
-      adapter.savePluginCode({ root: dir, name: '../evil.ts' }),
-    ).rejects.toThrow('Path traversal blocked');
+  it('extractPatch/extractAction keep parsing the canonical two-key contract', () => {
+    const prompt = adapter.injectState(makeState({ notes: 'n' }), makeSpec());
+    expect(prompt).toContain('set keys to null to delete');
+    const response = '```json\n{"state_patch":{"progress":50},"action":"go"}\n```';
+    expect(adapter.extractPatch(response)).toEqual({ progress: 50 });
+    expect(adapter.extractAction(response)).toBe('go');
+    const noAction = '```json\n{"state_patch":{}}\n```';
+    expect(adapter.extractAction(noAction)).toBeNull();
   });
 });

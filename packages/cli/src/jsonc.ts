@@ -28,6 +28,23 @@ export interface JsoncObjectSpan {
   entries: JsoncEntry[];
 }
 
+/** One element inside a scanned `[ ... ]` array. */
+export interface JsoncArrayElement {
+  /** Index of the first char of the element value. */
+  valueStart: number;
+  /** Index just past the element's last char. */
+  valueEnd: number;
+  /** Index just past the element's trailing comma (when present). */
+  elementEnd: number;
+}
+
+/** Span of a `[ ... ]` array in JSONC text. */
+export interface JsoncArraySpan {
+  bracketStart: number;
+  bracketEnd: number;
+  elements: JsoncArrayElement[];
+}
+
 /** Result of an in-place entry insertion/removal. */
 export interface JsoncEditResult {
   text: string;
@@ -156,6 +173,44 @@ export function findTopLevelObject(text: string): JsoncObjectSpan | null {
   return scanObject(text, i);
 }
 
+/**
+ * Scan the `[ ... ]` array whose `[` sits at `bracketStart` into a span with
+ * element positions (same string/comment-aware scanning as
+ * {@link scanObject}; trailing commas are absorbed into `elementEnd`).
+ */
+export function scanArray(text: string, bracketStart: number): JsoncArraySpan {
+  let i = skipWsAndComments(text, bracketStart + 1);
+  const elements: JsoncArrayElement[] = [];
+  while (i < text.length) {
+    if (text[i] === ']') {
+      return { bracketStart, bracketEnd: i, elements };
+    }
+    const valueStart = i;
+    const valueEnd = scanValueEnd(text, i);
+    i = skipWsAndComments(text, valueEnd);
+    let elementEnd = valueEnd;
+    if (text[i] === ',') {
+      elementEnd = i + 1;
+      i = skipWsAndComments(text, i + 1);
+    }
+    elements.push({ valueStart, valueEnd, elementEnd });
+  }
+  throw new Error('Unterminated array in JSONC');
+}
+
+/** Decoded string value of an array element, or null when it is not a (parseable) string. */
+function arrayElementString(text: string, el: JsoncArrayElement): string | null {
+  if (text[el.valueStart] !== '"') {
+    return null;
+  }
+  const raw = text.slice(el.valueStart, el.valueEnd);
+  try {
+    return JSON.parse(raw) as string;
+  } catch {
+    return null;
+  }
+}
+
 /** Strip line/block comments and trailing commas so `JSON.parse` can read the rest. */
 export function stripJsonc(text: string): string {
   let out = '';
@@ -274,6 +329,93 @@ export function removeObjectEntry(
   let start = entry.entryStart;
   let end = entry.entryEnd;
   if (end === entry.valueEnd) {
+    let j = start - 1;
+    while (j >= 0 && isWs(text[j] as string)) {
+      j -= 1;
+    }
+    if (j >= 0 && text[j] === ',') {
+      start = j;
+    }
+  }
+  return {
+    text: text.slice(0, start) + text.slice(end),
+    changed: true,
+  };
+}
+
+/** Indent for elements inside `span`: the first element's indent, or the closing bracket's indent + two spaces. */
+function arrayElementIndent(text: string, span: JsoncArraySpan): string {
+  if (span.elements.length > 0) {
+    return lineIndentAt(text, span.elements[0]!.valueStart);
+  }
+  return `${lineIndentAt(text, span.bracketEnd)}  `;
+}
+
+/**
+ * True when the array whose `[` sits at `arrayStart` holds a plain-string
+ * element equal to `value` (string-aware: comments and nesting inside other
+ * elements are skipped, escapes are decoded before comparing).
+ */
+export function hasArrayStringEntry(text: string, arrayStart: number, value: string): boolean {
+  return scanArray(text, arrayStart).elements.some(
+    (el) => arrayElementString(text, el) === value,
+  );
+}
+
+/**
+ * Splice one `"value"` string element into the array at `arrayStart`,
+ * preserving all surrounding text (comments included). Appends after the
+ * last element (comma-managed, trailing commas respected); an empty array
+ * gets its first element at the surrounding indentation. Idempotent: when
+ * the value is already present the text is returned unchanged.
+ */
+export function insertArrayStringEntry(
+  text: string,
+  arrayStart: number,
+  value: string,
+): JsoncEditResult {
+  if (hasArrayStringEntry(text, arrayStart, value)) {
+    return { text, changed: false };
+  }
+  const span = scanArray(text, arrayStart);
+  const literal = JSON.stringify(value);
+  const indent = arrayElementIndent(text, span);
+  if (span.elements.length === 0) {
+    const closeIndent = lineIndentAt(text, span.bracketEnd);
+    return {
+      text:
+        text.slice(0, span.bracketStart + 1) +
+        `\n${indent}${literal}\n${closeIndent}` +
+        text.slice(span.bracketEnd),
+      changed: true,
+    };
+  }
+  const last = span.elements[span.elements.length - 1]!;
+  const at = last.elementEnd;
+  // A trailing comma before `]` already separates; otherwise add one.
+  const chunk = text[at - 1] === ',' ? `\n${indent}${literal}` : `,\n${indent}${literal}`;
+  return { text: text.slice(0, at) + chunk + text.slice(at), changed: true };
+}
+
+/**
+ * Splice the `"value"` string element out of the array at `arrayStart`,
+ * keeping the rest valid (the element's trailing comma, or the previous
+ * element's comma for a last element, goes with it). Idempotent: a missing
+ * value returns the text unchanged.
+ */
+export function removeArrayStringEntry(
+  text: string,
+  arrayStart: number,
+  value: string,
+): JsoncEditResult {
+  const span = scanArray(text, arrayStart);
+  const el = span.elements.find((e) => arrayElementString(text, e) === value);
+  if (el === undefined) {
+    return { text, changed: false };
+  }
+  let start = el.valueStart;
+  let end = el.elementEnd;
+  if (end === el.valueEnd) {
     let j = start - 1;
     while (j >= 0 && isWs(text[j] as string)) {
       j -= 1;

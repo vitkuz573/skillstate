@@ -1,29 +1,33 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   main,
   buildMcpEntry,
+  buildClaudeMcpEntry,
+  buildCodexMcpToml,
   buildSkillMd,
   CLI_USAGE_INSTALL,
   defaultHome,
-  detectHost,
+  detectHosts,
   autoInstall,
   addSkillstateMcp,
   removeSkillstateMcp,
   parseInitArgs,
+  parseInstallArgs,
   parseUninstallArgs,
   resolveInitSpec,
-  resolveMcpCommandWith,
   uninstall,
+  installMachine,
   isInsideTemp,
   HelpRequestedInitError,
   STATE_DIR_NAME,
   MANIFEST_FILE_NAME,
 } from '@skillstate/cli';
-import type { InitFlags, InstallManifest } from '@skillstate/cli';
-import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import type { InstallManifest, MachineInstallManifest } from '@skillstate/cli';
+import { parseJsonc } from '@skillstate/cli';
+import { GENERIC_PROCEDURE_SPEC } from '@skillstate/core/schemas';
 
 const REPO_ROOT_FOR_WARN = path.resolve(__dirname, '..', '..');
 
@@ -46,10 +50,6 @@ function warnOutput(): string {
   return warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
 }
 
-beforeAll(() => {
-  // Nothing to prebuild — commands.test.ts builds the project via tsc -b.
-});
-
 beforeEach(() => {
   tmpDirs = [];
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -66,18 +66,23 @@ afterEach(() => {
   }
 });
 
-interface TestHome {
+function initFlags(overrides: Partial<{ specPath: string; dryRun: boolean }> = {}): {
+  specPath?: string;
+  dryRun: boolean;
+} {
+  return { dryRun: false, ...overrides };
+}
+
+/** Host home + project with a realistic project opencode.jsonc (comments, existing mcp + plugin). */
+function makeOpencodeHome(): {
   home: string;
   project: string;
   configPath: string;
   baseConfig: string;
-}
-
-/** Host home + project with a realistic opencode.jsonc (comments, existing mcp + plugin). */
-function makeOpencodeHome(): TestHome {
+} {
   const home = makeTmp();
   const project = makeTmp();
-  const configPath = path.join(home, '.config', 'opencode', 'opencode.jsonc');
+  const configPath = path.join(project, 'opencode.jsonc');
   const baseConfig = `{
   // OpenCode config (test fixture)
   "$schema": "https://opencode.ai/config.json",
@@ -92,8 +97,9 @@ function makeOpencodeHome(): TestHome {
   ],
 }
 `;
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, baseConfig, 'utf-8');
+  fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
   return { home, project, configPath, baseConfig };
 }
 
@@ -103,14 +109,20 @@ function makeBareHome(marker: 'claude' | 'codex'): string {
   return home;
 }
 
-function defaultFlags(): InitFlags {
-  return { noMcp: false, noSkill: false, dryRun: false, auto: true, uninstall: false };
-}
-
 function readManifest(project: string): InstallManifest {
   return JSON.parse(
     fs.readFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), 'utf-8'),
   ) as InstallManifest;
+}
+
+function readMachineManifest(home: string): MachineInstallManifest {
+  return JSON.parse(
+    fs.readFileSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME), 'utf-8'),
+  ) as MachineInstallManifest;
+}
+
+function parseJsoncSafe(text: string): unknown {
+  return parseJsonc(text);
 }
 
 describe('defaultHome', () => {
@@ -151,146 +163,98 @@ describe('isInsideTemp', () => {
   });
 });
 
-describe('autoInstall temp-cwd warning', () => {
-  function makeMarkerHome(): string {
-    const home = makeTmp();
-    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
-    return home;
-  }
-
-  it('warns when cwd is inside the system temp dir', async () => {
-    const home = makeMarkerHome();
-    const project = makeTmp();
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    expect(warnOutput()).toContain('[skillstate] installing from a temp directory — is this intended?');
+describe('detectHosts', () => {
+  it('returns [] for an empty home', () => {
+    expect(detectHosts(makeTmp())).toEqual([]);
   });
 
-  it('does not warn when cwd is outside the temp dir', async () => {
-    const home = makeMarkerHome();
-    const project = path.join(REPO_ROOT_FOR_WARN, 'node_modules', `skillstate-warn-${Date.now()}`);
-    fs.mkdirSync(project, { recursive: true });
-    tmpDirs.push(project);
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
-});
-
-describe('detectHost', () => {
   it('detects opencode via config jsonc/json or the bin dir', () => {
     const home = makeTmp();
-    expect(detectHost(home)).toBeNull();
     const configDir = path.join(home, '.config', 'opencode');
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, 'opencode.jsonc'), '{}');
-    expect(detectHost(home)).toBe('opencode');
+    expect(detectHosts(home)).toEqual(['opencode']);
     fs.rmSync(path.join(configDir, 'opencode.jsonc'));
     fs.writeFileSync(path.join(configDir, 'opencode.json'), '{}');
-    expect(detectHost(home)).toBe('opencode');
+    expect(detectHosts(home)).toEqual(['opencode']);
     fs.rmSync(path.join(configDir, 'opencode.json'));
     fs.mkdirSync(path.join(home, '.opencode', 'bin'), { recursive: true });
     fs.writeFileSync(path.join(home, '.opencode', 'bin', 'opencode'), '');
-    expect(detectHost(home)).toBe('opencode');
+    expect(detectHosts(home)).toEqual(['opencode']);
   });
 
   it('detects claude and codex by their home markers', () => {
-    expect(detectHost(makeBareHome('claude'))).toBe('claude');
-    expect(detectHost(makeBareHome('codex'))).toBe('codex');
+    expect(detectHosts(makeBareHome('claude'))).toEqual(['claude']);
+    expect(detectHosts(makeBareHome('codex'))).toEqual(['codex']);
   });
 
-  it('ranks opencode above claude/codex and returns null when nothing matches', () => {
+  it('returns ALL detected hosts in the fixed order [opencode, claude, codex]', () => {
     const home = makeTmp();
-    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
     fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.jsonc'), '{}');
-    expect(detectHost(home)).toBe('opencode');
-    expect(detectHost(makeTmp())).toBeNull();
+    expect(detectHosts(home)).toEqual(['opencode', 'claude', 'codex']);
+
+    const partial = makeTmp();
+    fs.mkdirSync(path.join(partial, '.codex'), { recursive: true });
+    fs.mkdirSync(path.join(partial, '.claude'), { recursive: true });
+    expect(detectHosts(partial)).toEqual(['claude', 'codex']);
   });
 });
 
 describe('parseInitArgs', () => {
   it('parses defaults', () => {
-    expect(parseInitArgs([])).toEqual({
-      noMcp: false,
-      noSkill: false,
-      dryRun: false,
-      auto: false,
-      uninstall: false,
-    });
+    expect(parseInitArgs([])).toEqual({ dryRun: false });
   });
 
-  it('parses boolean and value flags (space and = forms)', () => {
-    expect(parseInitArgs(['--auto', '--dry-run', '--no-mcp', '--no-skill', '--uninstall'])).toEqual({
-      noMcp: true,
-      noSkill: true,
+  it('parses --dry-run and --spec (space and = forms)', () => {
+    expect(parseInitArgs(['--dry-run'])).toEqual({ dryRun: true });
+    expect(parseInitArgs(['--spec', 'my.json'])).toEqual({ dryRun: false, specPath: 'my.json' });
+    expect(parseInitArgs(['--spec=my.json', '--dry-run'])).toEqual({
       dryRun: true,
-      auto: true,
-      uninstall: true,
-    });
-    expect(parseInitArgs(['--host', 'claude', '--max-history', '5'])).toEqual({
-      host: 'claude',
-      maxHistory: 5,
-      noMcp: false,
-      noSkill: false,
-      dryRun: false,
-      auto: false,
-      uninstall: false,
-    });
-    expect(parseInitArgs(['--host=codex', '--max-history=2'])).toEqual({
-      host: 'codex',
-      maxHistory: 2,
-      noMcp: false,
-      noSkill: false,
-      dryRun: false,
-      auto: false,
-      uninstall: false,
-    });
-    expect(parseInitArgs(['--spec', 'my.json', '--example', 'ctf'])).toEqual({
       specPath: 'my.json',
-      example: 'ctf',
-      noMcp: false,
-      noSkill: false,
-      dryRun: false,
-      auto: false,
-      uninstall: false,
     });
-    expect(parseInitArgs(['--spec=my.json', '--example=ctf']).specPath).toBe('my.json');
-    expect(parseInitArgs(['--spec=my.json', '--example=ctf']).example).toBe('ctf');
   });
 
-  it('throws usage on invalid host, bad max-history, and missing values', () => {
-    expect(() => parseInitArgs(['--host', 'vscode'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--host'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--host='])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--max-history', '0'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--max-history', 'x'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--max-history=1.5'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--max-history'])).toThrow(CLI_USAGE_INSTALL);
+  it('throws usage on missing/empty --spec values and unknown flags', () => {
     expect(() => parseInitArgs(['--spec'])).toThrow(CLI_USAGE_INSTALL);
     expect(() => parseInitArgs(['--spec='])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--example', 'todo'])).toThrow(CLI_USAGE_INSTALL);
-    expect(() => parseInitArgs(['--example='])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInitArgs(['--bogus'])).toThrow('Unknown flag for init: --bogus');
+    expect(() => parseInitArgs(['--bogus'])).toThrow(CLI_USAGE_INSTALL);
   });
 
-  it('throws usage on unknown flags and throws help errors', () => {
-    expect(() => parseInitArgs(['--bogus'])).toThrow(/Unknown flag for init/);
+  it('throws help errors for --help/-h', () => {
     expect(() => parseInitArgs(['--help'])).toThrow(HelpRequestedInitError);
     expect(() => parseInitArgs(['-h'])).toThrow(HelpRequestedInitError);
   });
 });
 
+describe('parseInstallArgs', () => {
+  it('parses defaults and --dry-run', () => {
+    expect(parseInstallArgs([])).toEqual({ dryRun: false });
+    expect(parseInstallArgs(['--dry-run'])).toEqual({ dryRun: true });
+  });
+
+  it('throws usage on unknown flags and throws help errors', () => {
+    expect(() => parseInstallArgs(['--bogus'])).toThrow('Unknown flag for install: --bogus');
+    expect(() => parseInstallArgs(['--bogus'])).toThrow(CLI_USAGE_INSTALL);
+    expect(() => parseInstallArgs(['--help'])).toThrow(HelpRequestedInitError);
+    expect(() => parseInstallArgs(['-h'])).toThrow(HelpRequestedInitError);
+  });
+});
+
 describe('parseUninstallArgs', () => {
-  it('parses defaults and flags', () => {
-    expect(parseUninstallArgs([])).toEqual({ removeState: false, dryRun: false });
-    expect(parseUninstallArgs(['--remove-state', '--dry-run'])).toEqual({
+  it('parses defaults and flags including --machine', () => {
+    expect(parseUninstallArgs([])).toEqual({ removeState: false, machine: false, dryRun: false });
+    expect(parseUninstallArgs(['--remove-state', '--dry-run', '--machine'])).toEqual({
       removeState: true,
+      machine: true,
       dryRun: true,
     });
     expect(parseUninstallArgs(['--state-dir', '/x'])).toEqual({
       removeState: false,
+      machine: false,
       dryRun: false,
       stateDir: '/x',
     });
@@ -306,42 +270,89 @@ describe('parseUninstallArgs', () => {
   });
 });
 
-describe('buildSkillMd / buildMcpEntry', () => {
+describe('CLI_USAGE_INSTALL', () => {
+  it('documents the three commands with the new flags', () => {
+    expect(CLI_USAGE_INSTALL).toBe(
+      'Usage: skillstate init [--spec <path>] [--dry-run] | install [--dry-run] | uninstall [--state-dir <path>] [--remove-state] [--machine] [--dry-run]',
+    );
+  });
+});
+
+describe('buildSkillMd', () => {
   it('builds a SKILL.md with the required frontmatter', () => {
-    const md = buildSkillMd('./.skillstate/skillstate.json', GENERIC_PROCEDURE_SPEC);
+    const md = buildSkillMd(GENERIC_PROCEDURE_SPEC);
     expect(md.startsWith('---\n')).toBe(true);
     expect(md).toContain('\nname: skillstate\n');
     expect(md).toContain('description: "');
     expect(md).toContain('## Process');
   });
 
-  it('builds a domain-neutral skill by default (no CTF)', () => {
-    const md = buildSkillMd('./s.json', GENERIC_PROCEDURE_SPEC);
-    expect(md).not.toContain('CTF');
-    expect(md).not.toContain('flag{');
-    expect(md).toContain('State-based Execution');
+  it('carries the spec name and instructions in the body', () => {
+    const md = buildSkillMd(GENERIC_PROCEDURE_SPEC);
+    expect(md).toContain(`# ${GENERIC_PROCEDURE_SPEC.name}`);
+    expect(md).toContain(GENERIC_PROCEDURE_SPEC.instructions);
   });
 
-  it('builds an mcp entry with no baked env (server resolves the state from its cwd)', () => {
-    const entry = buildMcpEntry();
-    expect(entry).toEqual({
+  it('is host-neutral: no host-specific hook or plugin event names', () => {
+    const md = buildSkillMd(GENERIC_PROCEDURE_SPEC);
+    expect(md).not.toContain('UserPromptSubmit');
+    expect(md).not.toContain('SessionStart');
+    expect(md).not.toContain('PostToolUse');
+    expect(md).not.toContain('messages.transform');
+    expect(md).not.toContain('session.compacting');
+    expect(md).not.toContain('tool.execute.after');
+  });
+
+  it('documents the host-neutral state workflow', () => {
+    const md = buildSkillMd(GENERIC_PROCEDURE_SPEC);
+    expect(md).toContain('./.skillstate/skillstate.json');
+    expect(md).toContain('./skill-spec.json');
+    expect(md).toContain('state.summary');
+    expect(md).toContain('state.get');
+    expect(md).toContain('state.patch');
+    expect(md).toContain('state_patch');
+    expect(md).toContain('state.checkpoint');
+    expect(md).toContain('state.rollback');
+    expect(md).toContain('state.finalize');
+    expect(md).toContain('agent.list');
+    expect(md).toContain('agent.read');
+    expect(md).toContain('agent.merge');
+    expect(md).toContain('```json');
+  });
+});
+
+describe('MCP entry builders', () => {
+  it('buildMcpEntry returns the npx opencode-local entry', () => {
+    expect(buildMcpEntry()).toEqual({
       type: 'local',
-      command: ['node', expect.stringContaining('mcp.js')],
+      command: ['npx', '-y', '@skillstate/mcp@^3'],
       enabled: true,
     });
-    expect(entry['environment']).toBeUndefined();
+  });
+
+  it('buildClaudeMcpEntry returns the npx stdio entry', () => {
+    expect(buildClaudeMcpEntry()).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@skillstate/mcp@^3'],
+    });
+  });
+
+  it('buildCodexMcpToml returns the npx TOML block with a trailing empty line', () => {
+    const toml = buildCodexMcpToml();
+    const lines = toml.split('\n');
+    expect(lines[0]).toBe('[mcp_servers.skillstate]');
+    expect(lines).toContain('command = "npx"');
+    expect(lines).toContain('args = ["-y", "@skillstate/mcp@^3"]');
+    expect(lines).toContain('enabled = true');
+    expect(lines[lines.length - 1]).toBe('');
+    expect(lines).toHaveLength(5);
   });
 });
 
 describe('resolveInitSpec', () => {
-  it('defaults to the neutral generic spec (never CTF)', () => {
-    expect(resolveInitSpec(makeTmp(), defaultFlags())).toBe(GENERIC_PROCEDURE_SPEC);
-  });
-
-  it('uses the CTF demo only when explicitly requested', () => {
-    expect(resolveInitSpec(makeTmp(), { ...defaultFlags(), example: 'ctf' })).toBe(
-      INTERCODE_CTF_SPEC,
-    );
+  it('defaults to the neutral generic spec', () => {
+    expect(resolveInitSpec(makeTmp(), initFlags())).toBe(GENERIC_PROCEDURE_SPEC);
   });
 
   it('loads a valid user spec via --spec', () => {
@@ -354,11 +365,11 @@ describe('resolveInitSpec', () => {
       schema: { step: { type: 'string', default: '', description: 'x' } },
     };
     fs.writeFileSync(path.join(dir, 'my.json'), JSON.stringify(custom));
-    expect(resolveInitSpec(dir, { ...defaultFlags(), specPath: 'my.json' })).toEqual(custom);
+    expect(resolveInitSpec(dir, initFlags({ specPath: 'my.json' }))).toEqual(custom);
   });
 
   it('throws a clear error for a missing --spec file', () => {
-    expect(() => resolveInitSpec(makeTmp(), { ...defaultFlags(), specPath: 'nope.json' })).toThrow(
+    expect(() => resolveInitSpec(makeTmp(), initFlags({ specPath: 'nope.json' }))).toThrow(
       /Spec file not found/,
     );
   });
@@ -366,7 +377,7 @@ describe('resolveInitSpec', () => {
   it('throws a clear error for invalid JSON in --spec', () => {
     const dir = makeTmp();
     fs.writeFileSync(path.join(dir, 'bad.json'), '{nope');
-    expect(() => resolveInitSpec(dir, { ...defaultFlags(), specPath: 'bad.json' })).toThrow(
+    expect(() => resolveInitSpec(dir, initFlags({ specPath: 'bad.json' }))).toThrow(
       /not valid JSON/,
     );
   });
@@ -374,26 +385,614 @@ describe('resolveInitSpec', () => {
   it('throws a clear error for a structurally invalid --spec', () => {
     const dir = makeTmp();
     fs.writeFileSync(path.join(dir, 'bad.json'), JSON.stringify({ id: 'x' }));
-    expect(() => resolveInitSpec(dir, { ...defaultFlags(), specPath: 'bad.json' })).toThrow(
+    expect(() => resolveInitSpec(dir, initFlags({ specPath: 'bad.json' }))).toThrow(
       /Invalid spec/,
     );
   });
 });
 
-describe('resolveMcpCommandWith', () => {
-  it('resolves via @skillstate/mcp/package.json when available', () => {
-    const cmd = resolveMcpCommandWith((id) => `/fake/node_modules/${id}`);
-    expect(cmd).toEqual({
-      command: 'node',
-      args: ['/fake/node_modules/@skillstate/mcp/bin/mcp.js'],
-    });
+describe('autoInstall temp-cwd warning', () => {
+  it('warns when cwd is inside the system temp dir', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+    expect(warnOutput()).toContain('[skillstate] installing from a temp directory — is this intended?');
   });
 
-  it('falls back to the global bin when resolution throws', () => {
-    const cmd = resolveMcpCommandWith(() => {
-      throw new Error('not installed');
+  it('does not warn when cwd is outside the temp dir', async () => {
+    const home = makeBareHome('claude');
+    const project = path.join(REPO_ROOT_FOR_WARN, 'node_modules', `skillstate-warn-${Date.now()}`);
+    fs.mkdirSync(project, { recursive: true });
+    tmpDirs.push(project);
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('autoInstall — opencode only', () => {
+  it('wires project opencode.json (plugin + mcp), shared skill, state, manifest v2', async () => {
+    const { home, project, configPath, baseConfig } = makeOpencodeHome();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+
+    const manifest = readManifest(project);
+    expect(manifest.version).toBe(2);
+    expect(manifest.statePath).toBe(path.join(project, STATE_DIR_NAME, 'skillstate.json'));
+    expect(manifest.hosts['opencode']).toEqual({
+      mcp: { configPath, format: 'opencode-json' },
     });
-    expect(cmd).toEqual({ command: 'skillstate-mcp', args: [] });
+    expect(manifest.hosts['claude']).toBeUndefined();
+    expect(manifest.skillPath).toBe(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'));
+
+    // Project config: skillstate mcp added, plugin string appended, comments
+    // and existing entries intact, JSONC parses.
+    const afterConfig = fs.readFileSync(configPath, 'utf-8');
+    expect(parseJsoncSafe(afterConfig)).toEqual(
+      expect.objectContaining({
+        mcp: expect.objectContaining({
+          existing: expect.objectContaining({ type: 'local' }),
+          skillstate: { type: 'local', command: ['npx', '-y', '@skillstate/mcp@^3'], enabled: true },
+        }),
+        plugin: ['some-npm-plugin', '@skillstate/opencode'],
+      }),
+    );
+    expect(afterConfig).toContain('// OpenCode config (test fixture)');
+
+    // One timestamped backup holding the ORIGINAL text.
+    const backup = fs
+      .readdirSync(path.dirname(configPath))
+      .find((f) => f.startsWith('opencode.jsonc.bak.'));
+    expect(backup).toBeDefined();
+    expect(fs.readFileSync(path.join(path.dirname(configPath), backup!), 'utf-8')).toBe(baseConfig);
+
+    // Shared skill file.
+    const skill = fs.readFileSync(manifest.skillPath!, 'utf-8');
+    expect(skill).toContain('\nname: skillstate\n');
+
+    // State envelope created; spec file created.
+    expect(JSON.parse(fs.readFileSync(manifest.statePath, 'utf-8'))).toEqual({
+      version: 1,
+      state: {},
+    });
+    expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(true);
+  });
+
+  it('creates project opencode.json when no project config exists (config detection independent of home marker)', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.opencode', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.opencode', 'bin', 'opencode'), '');
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+    const configPath = path.join(project, 'opencode.json');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
+      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
+      plugin: ['@skillstate/opencode'],
+    });
+    expect(readManifest(project).hosts['opencode']?.mcp.configPath).toBe(configPath);
+  });
+
+  it('edits opencode.json when only the .json variant exists in the project', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    fs.writeFileSync(path.join(project, 'opencode.json'), '{"mcp": {}}');
+    const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    expect(code).toBe(0);
+    const jsonPath = path.join(project, 'opencode.json');
+    expect(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(readManifest(project).hosts['opencode']?.mcp.configPath).toBe(jsonPath);
+  });
+
+  it('leaves a non-array plugin key untouched but still registers mcp', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.jsonc');
+    fs.writeFileSync(configPath, '{"plugin": "not-an-array"}');
+    const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    expect(code).toBe(0);
+    const after = fs.readFileSync(configPath, 'utf-8');
+    expect(parseJsoncSafe(after)).toEqual({
+      plugin: 'not-an-array',
+      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
+    });
+    expect(output()).toContain('not an array');
+    expect(readManifest(project).hosts['opencode']).toBeDefined();
+  });
+
+  it('is idempotent: a second run adds no duplicate entries and keeps one backup', async () => {
+    const { home, project, configPath } = makeOpencodeHome();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    const first = fs.readFileSync(configPath, 'utf-8');
+    const backupsAfterFirst = fs
+      .readdirSync(path.dirname(configPath))
+      .filter((f) => f.startsWith('opencode.jsonc.bak.'));
+    logSpy.mockClear();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    const second = fs.readFileSync(configPath, 'utf-8');
+    const backupsAfterSecond = fs
+      .readdirSync(path.dirname(configPath))
+      .filter((f) => f.startsWith('opencode.jsonc.bak.'));
+    expect(second).toBe(first);
+    expect((second.match(/"skillstate"/g) ?? []).length).toBe(1);
+    expect(backupsAfterSecond).toHaveLength(backupsAfterFirst.length);
+    expect(output()).toContain('already registered');
+  });
+
+  it('prints the detected host list', async () => {
+    const { home, project } = makeOpencodeHome();
+    await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(output()).toContain('host(s):  opencode');
+  });
+});
+
+describe('autoInstall — claude only', () => {
+  it('writes project hook scripts + settings.json ($CLAUDE_PROJECT_DIR commands) + .mcp.json; nothing in home', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    const mcpJson = path.join(project, '.mcp.json');
+    fs.writeFileSync(
+      mcpJson,
+      JSON.stringify({ mcpServers: { existing: { command: 'x' } } }, null, 2),
+    );
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        model: 'claude-opus-5',
+        permissions: { allow: ['Bash(ls)'] },
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }] },
+      }),
+    );
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+
+    // Nothing in the (claude-only-marker) home was touched.
+    expect(fs.readdirSync(home)).toEqual(['.claude']);
+    expect(fs.readdirSync(path.join(home, '.claude'))).toEqual([]);
+
+    // MCP: npx stdio server entry in the project .mcp.json.
+    const doc = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as { mcpServers: Record<string, any> };
+    expect(Object.keys(doc.mcpServers).sort()).toEqual(['existing', 'skillstate']);
+    expect(doc.mcpServers.skillstate).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@skillstate/mcp@^3'],
+    });
+
+    // Hooks: settings.json merged with $CLAUDE_PROJECT_DIR-anchored commands;
+    // live keys + foreign hooks preserved.
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      model?: string;
+      permissions?: unknown;
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    };
+    expect(settings.model).toBe('claude-opus-5');
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls)'] });
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toBe(
+      'node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/user-prompt-submit.cjs" user-prompt-submit',
+    );
+    expect(settings.hooks.SessionStart[0].matcher).toBe('^compact$');
+    expect(settings.hooks.PostToolUse[0].matcher).toBe('^Bash$');
+
+    // Scripts on disk in the PROJECT for all three events.
+    for (const event of ['user-prompt-submit', 'session-start-compact', 'post-tool-use']) {
+      expect(
+        fs.existsSync(path.join(project, '.claude', 'hooks', 'skillstate', `${event}.cjs`)),
+      ).toBe(true);
+    }
+
+    // Shared skill file (one, in the project).
+    expect(fs.existsSync(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
+
+    // Manifest records hooks + mcp.
+    const manifest = readManifest(project);
+    expect(manifest.hosts['claude']).toEqual({
+      hooks: { configPath: settingsPath, scriptDir: path.join(project, '.claude', 'hooks', 'skillstate') },
+      mcp: { configPath: mcpJson, format: 'claude-mcp-json' },
+    });
+
+    // A timestamped settings backup holds the ORIGINAL text.
+    const backup = fs
+      .readdirSync(path.dirname(settingsPath))
+      .find((f) => f.startsWith('settings.json.bak.'));
+    expect(backup).toBeDefined();
+    expect(JSON.parse(fs.readFileSync(path.join(path.dirname(settingsPath), backup!), 'utf-8')).model).toBe(
+      'claude-opus-5',
+    );
+  });
+
+  it('creates .mcp.json when none exists (no backup) and skips an existing skillstate entry', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    const mcpJson = path.join(project, '.mcp.json');
+    expect(JSON.parse(fs.readFileSync(mcpJson, 'utf-8')).mcpServers.skillstate).toBeDefined();
+    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(false);
+    logSpy.mockClear();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    expect(output()).toContain('already registered');
+  });
+
+  it('is idempotent for settings.json and treats a corrupt .mcp.json as empty', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    fs.writeFileSync(path.join(project, '.mcp.json'), '{oops', 'utf-8');
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    const first = fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8');
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    const settingsFirst = fs.readFileSync(settingsPath, 'utf-8');
+    const backupsFirst = fs
+      .readdirSync(path.dirname(settingsPath))
+      .filter((f) => f.startsWith('settings.json.bak.'));
+    expect(JSON.parse(first).mcpServers.skillstate).toBeDefined();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    expect(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).toBe(first);
+    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(settingsFirst);
+    expect(
+      fs
+        .readdirSync(path.dirname(settingsPath))
+        .filter((f) => f.startsWith('settings.json.bak.')),
+    ).toHaveLength(backupsFirst.length);
+  });
+});
+
+describe('autoInstall — both opencode and claude detected', () => {
+  it('wires BOTH hosts with ONE shared skill file and both manifest records', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+
+    expect(output()).toContain('host(s):  opencode, claude');
+
+    // One shared skill file only.
+    expect(fs.existsSync(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
+
+    // Both glue sets exist; the fresh project config is opencode.json.
+    const configPath = path.join(project, 'opencode.json');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(fs.existsSync(path.join(project, '.claude', 'settings.json'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).mcpServers.skillstate).toBeDefined();
+
+    const manifest = readManifest(project);
+    expect(manifest.hosts['opencode']).toBeDefined();
+    expect(manifest.hosts['claude']).toBeDefined();
+    expect(output()).toContain('Done. Wired for: opencode, claude.');
+  });
+});
+
+describe('autoInstall — codex only', () => {
+  it('prints the machine-glue hint and wires nothing host-side anywhere', async () => {
+    const home = makeBareHome('codex');
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+    expect(output()).toContain('codex:    machine-level glue — run `skillstate install` once');
+    expect(output()).toContain('host(s):  codex');
+    // No skill step for codex-only.
+    expect(output()).not.toContain('skill:');
+    // Zero HOST-glue writes: no project configs, nothing in ~/.codex, no
+    // machine manifest. Only the project runtime (state/spec/manifest).
+    expect(fs.existsSync(path.join(project, 'opencode.json'))).toBe(false);
+    expect(fs.existsSync(path.join(project, 'opencode.jsonc'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.claude'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.mcp.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.codex', 'config.toml'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.skillstate'))).toBe(false);
+    // Project runtime files still exist (steps 3/4/10 of the contract).
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, 'skillstate.json'))).toBe(true);
+    expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(true);
+    expect(readManifest(project).hosts).toEqual({});
+    expect(readManifest(project).skillPath).toBeUndefined();
+  });
+});
+
+describe('autoInstall — no host detected', () => {
+  it('returns 1 with the guidance message and writes nothing', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(1);
+    expect(output()).toContain(
+      'No supported host detected (~/.config/opencode, ~/.claude, ~/.codex). Install one, then re-run `skillstate init`.',
+    );
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+  });
+});
+
+describe('autoInstall — dry runs', () => {
+  it('opencode --dry-run writes nothing (no config, no state, no spec, no skill)', async () => {
+    const { home, project, configPath, baseConfig } = makeOpencodeHome();
+    const code = await autoInstall({ cwd: project, home, flags: initFlags({ dryRun: true }) });
+    expect(code).toBe(0);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(baseConfig);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+    expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.claude', 'skills'))).toBe(false);
+    expect(output()).toContain('[dry-run]');
+    expect(output()).toContain('dry run complete — nothing was written.');
+  });
+
+  it('claude --dry-run writes nothing even with an existing .mcp.json', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    const mcpJson = path.join(project, '.mcp.json');
+    fs.writeFileSync(mcpJson, '{"mcpServers": {}}');
+    const code = await autoInstall({ cwd: project, home, flags: initFlags({ dryRun: true }) });
+    expect(code).toBe(0);
+    expect(fs.readFileSync(mcpJson, 'utf-8')).toBe('{"mcpServers": {}}');
+    expect(fs.existsSync(path.join(project, '.claude', 'settings.json'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.claude', 'hooks', 'skillstate'))).toBe(false);
+    expect(output()).toContain('[dry-run]');
+  });
+});
+
+describe('autoInstall — spec file', () => {
+  it('writes skill-spec.json on first init and keeps it on re-init', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    const specPath = path.join(project, 'skill-spec.json');
+    const first = fs.readFileSync(specPath, 'utf-8');
+    logSpy.mockClear();
+    expect(await autoInstall({ cwd: project, home, flags: initFlags() })).toBe(0);
+    expect(fs.readFileSync(specPath, 'utf-8')).toBe(first);
+    expect(output()).toContain('skill-spec.json already exists');
+  });
+
+  it('honors options.spec for the skill body and the written spec file', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    const custom = {
+      id: 'custom-id',
+      name: 'Custom Procedure',
+      version: '9.9.9',
+      instructions: 'Custom instructions body.',
+      schema: { step: { type: 'string', default: '', description: 'x' } },
+    };
+    const code = await autoInstall({ cwd: project, home, flags: initFlags(), spec: custom });
+    expect(code).toBe(0);
+    const written = JSON.parse(fs.readFileSync(path.join(project, 'skill-spec.json'), 'utf-8'));
+    expect(written.id).toBe('custom-id');
+    const skill = fs.readFileSync(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'), 'utf-8');
+    expect(skill).toContain('# Custom Procedure');
+    expect(skill).toContain('Custom instructions body.');
+  });
+});
+
+describe('autoInstall — re-init idempotency + manifest merge', () => {
+  it('init under an opencode home, then under a claude home → BOTH host records survive', async () => {
+    const homeOc = makeTmp();
+    fs.mkdirSync(path.join(homeOc, '.config', 'opencode'), { recursive: true });
+    fs.writeFileSync(path.join(homeOc, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
+    const project = makeTmp();
+    expect(await autoInstall({ cwd: project, home: homeOc, flags: initFlags() })).toBe(0);
+    expect(fs.existsSync(path.join(project, 'opencode.json'))).toBe(true);
+
+    // Second run happens under a DIFFERENT home (claude-only marker).
+    const homeCl = makeTmp();
+    fs.mkdirSync(path.join(homeCl, '.claude'), { recursive: true });
+    logSpy.mockClear();
+    expect(await autoInstall({ cwd: project, home: homeCl, flags: initFlags() })).toBe(0);
+
+    const manifest = readManifest(project);
+    expect(manifest.hosts['opencode']).toBeDefined();
+    expect(manifest.hosts['claude']).toBeDefined();
+
+    // Both glue sets still present after the second run.
+    expect(JSON.parse(fs.readFileSync(path.join(project, 'opencode.json'), 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(fs.existsSync(path.join(project, '.claude', 'settings.json'))).toBe(true);
+
+    // Uninstall rolls BOTH back (settings.json stays — it is a live file —
+    // but the skillstate hook groups are gone; created configs are deleted).
+    expect(await uninstall({ cwd: project, home: homeCl, flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(path.join(project, 'opencode.json'))).toBe(false);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(project, '.claude', 'settings.json'), 'utf-8'),
+    ) as { hooks?: Record<string, unknown> };
+    expect(settings.hooks).toEqual({});
+    expect(fs.existsSync(path.join(project, '.claude', 'hooks', 'skillstate'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.mcp.json'))).toBe(false);
+    expect(fs.existsSync(path.join(project, '.claude', 'skills', 'skillstate'))).toBe(false);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+  });
+
+  it('tolerates a corrupt previous manifest on re-init', async () => {
+    const home = makeBareHome('claude');
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), '{corrupt');
+    const code = await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(code).toBe(0);
+    expect(readManifest(project).version).toBe(2);
+    expect(readManifest(project).hosts['claude']).toBeDefined();
+  });
+});
+
+describe('uninstall — opencode rollback', () => {
+  it('splices mcp + plugin out; keeps comments and foreign entries', async () => {
+    const { home, project, configPath } = makeOpencodeHome();
+    await autoInstall({ cwd: project, home, flags: initFlags() });
+    expect(await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    const after = fs.readFileSync(configPath, 'utf-8');
+    expect(parseJsoncSafe(after)).toEqual(
+      expect.objectContaining({
+        mcp: { existing: expect.objectContaining({ type: 'local' }) },
+        plugin: ['some-npm-plugin'],
+      }),
+    );
+    expect(after).toContain('// OpenCode config (test fixture)');
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(false);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, 'skillstate.json'))).toBe(true);
+    expect(output()).toContain('kept state');
+    expect(output()).toContain('Uninstalled.');
+  });
+
+  it('deletes the config file when it reduces to {} (init-created)', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.json');
+    expect(await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] })).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it('is a no-op for the config when the file is already gone; survives removals', async () => {
+    const { home, project, configPath } = makeOpencodeHome();
+    await autoInstall({ cwd: project, home, flags: initFlags() });
+    const manifest = readManifest(project);
+    fs.rmSync(configPath);
+    fs.rmSync(manifest.skillPath!, { recursive: true });
+    const code = await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: false } });
+    expect(code).toBe(0);
+  });
+});
+
+describe('uninstall — claude rollback', () => {
+  it('removes hook groups surgically, scripts dir, and .mcp.json entry (file deleted when empty)', async () => {
+    const home = makeTmp(); // home marker irrelevant for a programmatic claude host
+    const project = makeTmp();
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+        permissions: { allow: ['Bash(npm run *)'] },
+        hooks: {
+          PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
+        },
+      }),
+    );
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['claude'] });
+    const mcpJson = path.join(project, '.mcp.json');
+    expect(await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
+
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      env?: unknown;
+      permissions?: unknown;
+      hooks?: Record<string, unknown>;
+    };
+    expect(after.env).toEqual({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' });
+    expect(after.permissions).toEqual({ allow: ['Bash(npm run *)'] });
+    expect(after.hooks).toEqual({
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
+    });
+    expect(fs.existsSync(path.join(project, '.claude', 'hooks', 'skillstate'))).toBe(false);
+    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(true);
+    expect(fs.existsSync(mcpJson)).toBe(false); // only carried skillstate → deleted
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+  });
+
+  it('keeps a .mcp.json with foreign servers and keeps state without --remove-state', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, '.mcp.json'),
+      JSON.stringify({ mcpServers: { existing: { command: 'x' } } }),
+    );
+    // Programmatic claude host (home marker not required).
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['claude'] });
+    expect(await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    const doc = JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(Object.keys(doc.mcpServers)).toEqual(['existing']);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, 'skillstate.json'))).toBe(true);
+  });
+
+  it('keeps foreign handlers in mixed groups and skips unreadable mcp json', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['claude'] });
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    const doc = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    doc.hooks.UserPromptSubmit[0].hooks.unshift({ type: 'command', command: 'keep-me' });
+    fs.writeFileSync(settingsPath, JSON.stringify(doc));
+    fs.writeFileSync(path.join(project, '.mcp.json'), '{oops', 'utf-8');
+    expect(await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as typeof doc;
+    const mixed = after.hooks.UserPromptSubmit.find(
+      (g) => g.hooks.some((h) => h.command === 'keep-me'),
+    );
+    expect(mixed.hooks).toHaveLength(1);
+    expect(mixed.hooks[0].command).toBe('keep-me');
+    expect(JSON.stringify(after)).not.toContain('user-prompt-submit.cjs');
+    expect(output()).toContain('Skipping mcp:');
+  });
+
+  it('uninstall --dry-run removes nothing', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['claude'] });
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    const before = fs.readFileSync(settingsPath, 'utf-8');
+    const mcpBefore = fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8');
+    expect(await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: true } })).toBe(0);
+    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(before);
+    expect(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).toBe(mcpBefore);
+    expect(fs.existsSync(path.join(project, '.claude', 'hooks', 'skillstate', 'user-prompt-submit.cjs'))).toBe(true);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(true);
+    expect(output()).toContain('[dry-run]');
+    expect(output()).toContain('dry run complete — nothing was written.');
+  });
+});
+
+describe('uninstall — manifest validation', () => {
+  it('reports a missing manifest (exit 1)', async () => {
+    const project = makeTmp();
+    const code = await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } });
+    expect(code).toBe(1);
+    expect(output()).toContain('No install manifest');
+  });
+
+  it('reports a corrupt manifest (exit 1)', async () => {
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), '{oops', 'utf-8');
+    const code = await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } });
+    expect(code).toBe(1);
+    expect(output()).toContain('Corrupt install manifest');
+  });
+
+  it('rejects old v1 manifests and wrong-shape v2 manifests (exit 1)', async () => {
+    const project = makeTmp();
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    const manifestPath = path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME);
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 1, host: 'opencode', statePath: '/x' }),
+      'utf-8',
+    );
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(1);
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, statePath: '/x', hosts: { claude: { hooks: {} } } }),
+      'utf-8',
+    );
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(1);
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, statePath: 42, hosts: {} }),
+      'utf-8',
+    );
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(1);
+    expect(output()).toContain('Corrupt install manifest');
   });
 });
 
@@ -435,457 +1034,14 @@ describe('addSkillstateMcp / removeSkillstateMcp', () => {
   });
 });
 
-describe('autoInstall — opencode', () => {
-  it('installs plugin, skill, mcp entry, state, manifest; config stays valid JSONC', async () => {
-    const { home, project, configPath, baseConfig } = makeOpencodeHome();
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-
-    const manifest = readManifest(project);
-    expect(manifest.host).toBe('opencode');
-    expect(manifest.statePath).toBe(path.join(project, STATE_DIR_NAME, 'skillstate.json'));
-    expect(manifest.maxHistoryMessages).toBe(3);
-    expect(manifest.pluginPath).toBe(path.join(home, '.config', 'opencode', 'plugins', 'skillstate.ts'));
-    expect(manifest.skillPath).toBe(
-      path.join(home, '.config', 'opencode', 'skills', 'skillstate', 'SKILL.md'),
-    );
-    expect(manifest.mcp).toEqual({ configPath, format: 'opencode-jsonc' });
-
-    // Plugin is a THIN loader: imports the static plugin (single source of
-    // truth) which resolves the state from the session cwd — no baked path.
-    const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
-    expect(plugin).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-    expect(plugin).toContain('export default createSkillStatePlugin({');
-    expect(plugin).toContain('maxHistoryMessages: 3');
-    expect(plugin).not.toContain('statePath');
-    expect(plugin).not.toContain('resolveStatePathForCwd');
-    expect(plugin).not.toContain('function readSkillState');
-
-    // The mcp entry carries NO baked state env (per-project resolution).
-    const after = fs.readFileSync(configPath, 'utf-8');
-    expect(after).not.toContain('SKILLSTATE_STATE_PATH');
-
-    // Skill installed with the correct frontmatter.
-    const skill = fs.readFileSync(manifest.skillPath!, 'utf-8');
-    expect(skill).toContain('\nname: skillstate\n');
-
-    // Config: skillstate mcp added, existing entries + comments intact, JSONC parses.
-    const afterConfig = fs.readFileSync(configPath, 'utf-8');
-    expect(parseJsoncSafe(afterConfig)).toEqual(
-      expect.objectContaining({
-        mcp: expect.objectContaining({
-          existing: expect.objectContaining({ type: 'local' }),
-          skillstate: expect.objectContaining({ type: 'local', enabled: true }),
-        }),
-      }),
-    );
-    expect(afterConfig).toContain('// OpenCode config (test fixture)');
-    expect(afterConfig).toContain('"some-npm-plugin"');
-
-    // A timestamped backup was written and holds the ORIGINAL text.
-    const backup = fs
-      .readdirSync(path.dirname(configPath))
-      .find((f) => f.startsWith('opencode.jsonc.bak.'));
-    expect(backup).toBeDefined();
-    expect(fs.readFileSync(path.join(path.dirname(configPath), backup!), 'utf-8')).toBe(baseConfig);
-
-    // State file created.
-    expect(JSON.parse(fs.readFileSync(manifest.statePath, 'utf-8'))).toEqual({
-      version: 1,
-      state: {},
-    });
-  });
-
-  it('is idempotent: a second run adds no duplicate mcp entries and keeps one backup', async () => {
-    const { home, project, configPath } = makeOpencodeHome();
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    const first = fs.readFileSync(configPath, 'utf-8');
-    const backupsAfterFirst = fs
-      .readdirSync(path.dirname(configPath))
-      .filter((f) => f.startsWith('opencode.jsonc.bak.'));
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    const second = fs.readFileSync(configPath, 'utf-8');
-    const backupsAfterSecond = fs
-      .readdirSync(path.dirname(configPath))
-      .filter((f) => f.startsWith('opencode.jsonc.bak.'));
-    expect(second).toBe(first);
-    expect((second.match(/"skillstate"/g) ?? []).length).toBe(1);
-    expect(backupsAfterSecond).toHaveLength(backupsAfterFirst.length);
-    expect(output()).toContain('already registered');
-  });
-
-  it('honors --host even when no host is detectable in home', async () => {
+describe('installMachine (codex machine-level glue)', () => {
+  it('writes hooks.json + scripts + TOML + machine manifest; nothing else in home', async () => {
     const home = makeTmp();
-    const project = makeTmp();
-    const flags = { ...defaultFlags(), host: 'claude' as const };
-    const code = await autoInstall({ cwd: project, home, flags });
-    expect(code).toBe(0);
-    expect(fs.existsSync(path.join(home, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
-    expect(readManifest(project).host).toBe('claude');
-  });
-
-  it('honors --max-history in the generated plugin', async () => {
-    const { home, project } = makeOpencodeHome();
-    const flags: InitFlags = { ...defaultFlags(), maxHistory: 7 };
-    await autoInstall({ cwd: project, home, flags });
-    const manifest = readManifest(project);
-    expect(manifest.statePath).toBe(path.join(project, STATE_DIR_NAME, 'skillstate.json'));
-    expect(manifest.maxHistoryMessages).toBe(7);
-    const plugin = fs.readFileSync(manifest.pluginPath!, 'utf-8');
-    expect(plugin).toContain('maxHistoryMessages: 7');
-    expect(JSON.parse(fs.readFileSync(manifest.statePath, 'utf-8'))).toEqual({
-      version: 1,
-      state: {},
-    });
-  });
-
-  it('--dry-run prints the plan and writes nothing', async () => {
-    const { home, project, configPath, baseConfig } = makeOpencodeHome();
-    const flags = { ...defaultFlags(), dryRun: true };
-    const code = await autoInstall({ cwd: project, home, flags });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(configPath, 'utf-8')).toBe(baseConfig);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
-    expect(fs.existsSync(path.join(home, '.config', 'opencode', 'plugins', 'skillstate.ts'))).toBe(false);
-    expect(fs.existsSync(path.join(home, '.config', 'opencode', 'skills', 'skillstate'))).toBe(false);
-    expect(output()).toContain('[dry-run]');
-    expect(output()).toContain('dry run complete');
-  });
-
-  it('--no-mcp and --no-skill skip the respective steps', async () => {
-    const { home, project, configPath, baseConfig } = makeOpencodeHome();
-    const flags = { ...defaultFlags(), noMcp: true, noSkill: true };
-    const code = await autoInstall({ cwd: project, home, flags });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(configPath, 'utf-8')).toBe(baseConfig);
-    const manifest = readManifest(project);
-    expect(manifest.mcp).toBeUndefined();
-    expect(manifest.skillPath).toBeUndefined();
-    expect(manifest.pluginPath).toBeDefined();
-    expect(output()).toContain('skipped (--no-mcp)');
-    expect(output()).toContain('skipped (--no-skill)');
-  });
-
-  it('returns 1 when no host is detected and none is forced', async () => {
-    const home = makeTmp();
-    const project = makeTmp();
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(1);
-    expect(output()).toContain('No supported host detected');
-  });
-
-  it('recovers when the opencode config is missing entirely', async () => {
-    const home = makeTmp();
-    const project = makeTmp();
-    fs.mkdirSync(path.join(home, '.opencode', 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.opencode', 'bin', 'opencode'), '');
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    const configPath = path.join(home, '.config', 'opencode', 'opencode.jsonc');
-    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
-      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
-    });
-  });
-
-  it('edits opencode.json when only the .json variant exists', async () => {
-    const home = makeTmp();
-    const project = makeTmp();
-    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.config', 'opencode', 'opencode.json'), '{"mcp": {}}');
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    const jsonPath = path.join(home, '.config', 'opencode', 'opencode.json');
-    expect(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')).mcp.skillstate).toBeDefined();
-    expect(readManifest(project).mcp?.configPath).toBe(jsonPath);
-  });
-
-  it('claude --dry-run writes nothing even with an existing .mcp.json', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    const mcpJson = path.join(project, '.mcp.json');
-    fs.writeFileSync(mcpJson, '{"mcpServers": {}}');
-    const code = await autoInstall({ cwd: project, home, flags: { ...defaultFlags(), dryRun: true } });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(mcpJson, 'utf-8')).toBe('{"mcpServers": {}}');
-    expect(fs.existsSync(path.join(home, '.claude', 'skills'))).toBe(false);
-    expect(fs.existsSync(path.join(home, '.claude', 'settings.json'))).toBe(false);
-    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate'))).toBe(false);
-  });
-
-  it('claude: uninstall --dry-run writes nothing', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    const before = fs.readFileSync(settingsPath, 'utf-8');
-    const mcpJson = path.join(project, '.mcp.json');
-    const mcpBefore = fs.readFileSync(mcpJson, 'utf-8');
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } })).toBe(0);
-    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(before);
-    expect(fs.readFileSync(mcpJson, 'utf-8')).toBe(mcpBefore);
-    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate', 'user-prompt-submit.cjs'))).toBe(true);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(true);
-    expect(output()).toContain('[dry-run]');
-  });
-
-  it('claude: uninstall removes hook groups, scripts, mcp entry; live settings survive', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    fs.writeFileSync(
-      settingsPath,
-      JSON.stringify(
-        {
-          env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
-          permissions: { allow: ['Bash(npm run *)'] },
-          hooks: {
-            PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
-          },
-        },
-        null,
-        2,
-      ),
-    );
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } })).toBe(0);
-
-    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      env?: unknown;
-      permissions?: unknown;
-      hooks?: Record<string, unknown>;
-    };
-    expect(after.env).toEqual({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' });
-    expect(after.permissions).toEqual({ allow: ['Bash(npm run *)'] });
-    expect(after.hooks).toEqual({
-      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }],
-    });
-    expect(fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate'))).toBe(false);
-    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(true);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
-  });
-
-  it('claude: uninstall with mixed skillstate groups keeps foreign handlers and is a no-op when hooks config is missing', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    // Make the skillstate group mixed with a foreign handler.
-    const doc = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    };
-    doc.hooks.UserPromptSubmit[0].hooks.unshift({ type: 'command', command: 'keep-me' });
-    fs.writeFileSync(settingsPath, JSON.stringify(doc));
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
-    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-    };
-    const mixed = after.hooks.UserPromptSubmit.find(
-      (g) => g.hooks.some((h) => h.command === 'keep-me'),
-    );
-    expect(mixed.hooks).toHaveLength(1);
-    expect(mixed.hooks[0].command).toBe('keep-me');
-    expect(JSON.stringify(after)).not.toContain('user-prompt-submit.cjs');
-  });
-
-  it('claude: uninstall keeps foreign groups when the script dir was already deleted', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    fs.rmSync(path.join(home, '.claude', 'hooks', 'skillstate'), { recursive: true, force: true });
-    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
-    expect(code).toBe(0);
-    const after = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf-8')) as {
-      hooks?: Record<string, unknown>;
-    };
-    expect(after.hooks?.UserPromptSubmit).toBeUndefined();
-    expect(after.hooks?.SessionStart).toBeUndefined();
-    expect(after.hooks?.PostToolUse).toBeUndefined();
-  });
-
-  it('claude: uninstall survives an unreadable hooks config without failing', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    // Point the hooks record at a DIRECTORY so readFileSync throws (EISDIR).
-    const manifestPath = path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME);
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as InstallManifest;
-    manifest.hooks = {
-      configPath: path.join(home, '.claude', 'some-dir'),
-      scriptDir: path.join(home, '.claude', 'hooks', 'skillstate'),
-    };
-    fs.mkdirSync(manifest.hooks.configPath);
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(0);
-    expect(fs.existsSync(manifest.hooks.scriptDir)).toBe(false);
-  });
-
-  it('claude: uninstall skips both hook steps when the settings file is already gone', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    fs.rmSync(path.join(home, '.claude', 'settings.json'));
-    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
-    expect(code).toBe(0);
-    expect(output()).not.toContain('removed hooks:');
-  });
-
-  it('uninstall skips the opencode mcp rollback when the entry is absent', async () => {
-    const { home, project } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: { ...defaultFlags(), noMcp: true } });
-    // Craft a manifest that points at a config with no skillstate entry.
-    const manifestPath = path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME);
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as InstallManifest;
-    manifest.mcp = {
-      configPath: path.join(home, '.config', 'opencode', 'opencode.jsonc'),
-      format: 'opencode-jsonc',
-    };
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
-    expect(output()).not.toContain('removed mcp entry');
-  });
-});
-
-describe('autoInstall — claude & codex', () => {
-  it('claude: installs hooks+scripts, skill, stdio .mcp.json; keeps existing servers and hooks', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    const mcpJson = path.join(project, '.mcp.json');
-    fs.writeFileSync(
-      mcpJson,
-      JSON.stringify({ mcpServers: { existing: { command: 'x' } } }, null, 2),
-    );
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(
-      settingsPath,
-      JSON.stringify({
-        model: 'claude-opus-5',
-        permissions: { allow: ['Bash(ls)'] },
-        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-tool' }] }] },
-      }),
-    );
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '# user config\n');
+    const code = await installMachine({ home, flags: { dryRun: false } });
     expect(code).toBe(0);
 
-    // MCP: stdio server entry in the project .mcp.json.
-    const doc = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as { mcpServers: Record<string, any> };
-    expect(Object.keys(doc.mcpServers).sort()).toEqual(['existing', 'skillstate']);
-    expect(doc.mcpServers.skillstate).toEqual({
-      type: 'stdio',
-      command: 'node',
-      args: [expect.stringContaining('mcp.js')],
-    });
-    expect(readManifest(project).mcp).toEqual({ configPath: mcpJson, format: 'claude-mcp-json' });
-
-    // Hooks: settings.json merged, live keys + foreign hooks preserved.
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      model?: string;
-      permissions?: unknown;
-      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
-    };
-    expect(settings.model).toBe('claude-opus-5');
-    expect(settings.permissions).toEqual({ allow: ['Bash(ls)'] });
-    expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
-    expect(settings.hooks.SessionStart[0].matcher).toBe('^compact$');
-    expect(settings.hooks.PostToolUse[0].matcher).toBe('^Bash$');
-    expect(readManifest(project).hooks).toEqual({
-      configPath: settingsPath,
-      scriptDir: path.join(home, '.claude', 'hooks', 'skillstate'),
-    });
-
-    // Scripts on disk for all three events.
-    for (const event of ['user-prompt-submit', 'session-start-compact', 'post-tool-use']) {
-      expect(
-        fs.existsSync(path.join(home, '.claude', 'hooks', 'skillstate', `${event}.cjs`)),
-      ).toBe(true);
-    }
-    // Skill installed via the Claude adapter body.
-    const skill = fs.readFileSync(
-      path.join(home, '.claude', 'skills', 'skillstate', 'SKILL.md'),
-      'utf-8',
-    );
-    expect(skill).toContain('UserPromptSubmit');
-    expect(skill).toContain('state.patch');
-
-    // A timestamped settings backup holds the ORIGINAL text.
-    const backup = fs
-      .readdirSync(path.dirname(settingsPath))
-      .find((f) => f.startsWith('settings.json.bak.'));
-    expect(backup).toBeDefined();
-    expect(JSON.parse(fs.readFileSync(path.join(path.dirname(settingsPath), backup!), 'utf-8')).model).toBe(
-      'claude-opus-5',
-    );
-  });
-
-  it('claude: is idempotent and corrupt .mcp.json is treated as empty', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    fs.writeFileSync(path.join(project, '.mcp.json'), '{oops', 'utf-8');
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    const first = fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8');
-    const settingsPath = path.join(home, '.claude', 'settings.json');
-    const settingsFirst = fs.readFileSync(settingsPath, 'utf-8');
-    const backupsFirst = fs
-      .readdirSync(path.dirname(settingsPath))
-      .filter((f) => f.startsWith('settings.json.bak.'));
-    expect(JSON.parse(first).mcpServers.skillstate).toBeDefined();
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    expect(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).toBe(first);
-    expect(fs.readFileSync(settingsPath, 'utf-8')).toBe(settingsFirst);
-    expect(
-      fs
-        .readdirSync(path.dirname(settingsPath))
-        .filter((f) => f.startsWith('settings.json.bak.')),
-    ).toHaveLength(backupsFirst.length);
-  });
-
-  it('claude: creates .mcp.json when none exists and skips existing skillstate entry', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    const mcpJson = path.join(project, '.mcp.json');
-    expect(JSON.parse(fs.readFileSync(mcpJson, 'utf-8')).mcpServers.skillstate).toBeDefined();
-    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(false);
-    // Idempotent: no second entry, message mentions already registered.
-    logSpy.mockClear();
-    expect(await autoInstall({ cwd: project, home, flags: defaultFlags() })).toBe(0);
-    expect(output()).toContain('already registered');
-  });
-
-  it('claude: uninstall with no skillstate entry is a no-op for mcp', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: { ...defaultFlags(), noMcp: true } });
-    fs.writeFileSync(
-      path.join(project, '.mcp.json'),
-      JSON.stringify({ mcpServers: { existing: { command: 'x' } } }),
-    );
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
-    const doc = JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8'));
-    expect(Object.keys(doc.mcpServers)).toEqual(['existing']);
-  });
-
-  it('claude: uninstall leaves non-object mcpServers untouched', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const mcpJson = path.join(project, '.mcp.json');
-    fs.writeFileSync(mcpJson, JSON.stringify({ mcpServers: 'scalar' }));
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
-    expect(JSON.parse(fs.readFileSync(mcpJson, 'utf-8'))).toEqual({ mcpServers: 'scalar' });
-  });
-
-  it('codex: installs hooks, skill and MCP (TOML) end-to-end', async () => {
-    const home = makeBareHome('codex');
-    const project = makeTmp();
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    expect(fs.existsSync(path.join(home, '.codex', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
-    // Hooks: hooks.json with the three skillstate groups + on-disk scripts.
     const hooksJson = path.join(home, '.codex', 'hooks.json');
     expect(fs.existsSync(hooksJson)).toBe(true);
     const doc = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as {
@@ -897,159 +1053,143 @@ describe('autoInstall — claude & codex', () => {
         fs.existsSync(path.join(home, '.codex', 'hooks', 'skillstate', `${event}.cjs`)),
       ).toBe(true);
     }
-    // Re-install is idempotent (no duplicate groups).
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const doc2 = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as typeof doc;
-    expect(doc2.hooks['UserPromptSubmit']).toHaveLength(1);
-    // MCP: [mcp_servers.skillstate] spliced into config.toml with a backup.
+
     const configToml = path.join(home, '.codex', 'config.toml');
     const toml = fs.readFileSync(configToml, 'utf-8');
     expect(toml).toContain('[mcp_servers.skillstate]');
-    expect(toml).not.toMatch(/\[mcp_servers\.skillstate\][\s\S]*\[mcp_servers\.skillstate\]/);
-    expect(readManifest(project).mcp).toEqual({
-      configPath: configToml,
-      format: 'codex-toml',
+    expect(toml).toContain('command = "npx"');
+    expect(toml.startsWith('# user config')).toBe(true);
+
+    const machineManifest = readMachineManifest(home);
+    expect(machineManifest.version).toBe(1);
+    expect(machineManifest.codex).toEqual({
+      hooksConfigPath: hooksJson,
+      scriptDir: path.join(home, '.codex', 'hooks', 'skillstate'),
+      tomlConfigPath: configToml,
     });
-    expect(output()).toContain('[mcp_servers.skillstate] added');
+
+    expect(output()).toContain(
+      'opencode/claude: nothing to install machine-wide — glue is project-local (`skillstate init`).',
+    );
+    expect(output()).toContain('Done. Codex glue installed (~/.codex).');
+  });
+
+  it('is idempotent: re-run updates the manifest, adds no duplicate groups, no second TOML table', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    expect(await installMachine({ home, flags: { dryRun: false } })).toBe(0);
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const first = fs.readFileSync(hooksJson, 'utf-8');
+    const tomlPath = path.join(home, '.codex', 'config.toml');
+    const tomlFirst = fs.readFileSync(tomlPath, 'utf-8');
+    logSpy.mockClear();
+    expect(await installMachine({ home, flags: { dryRun: false } })).toBe(0);
+    expect(fs.readFileSync(hooksJson, 'utf-8')).toBe(first);
+    expect(fs.readFileSync(tomlPath, 'utf-8')).toBe(tomlFirst);
+    expect(output()).toContain('skillstate already registered');
+    expect((tomlFirst.match(/\[mcp_servers\.skillstate\]/g) ?? []).length).toBe(1);
+  });
+
+  it('--dry-run prints the plan and writes nothing', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    const code = await installMachine({ home, flags: { dryRun: true } });
+    expect(code).toBe(0);
+    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.codex', 'config.toml'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.skillstate'))).toBe(false);
+    expect(output()).toContain('[dry-run]');
+    expect(output()).toContain('dry run complete — nothing was written.');
   });
 });
 
-describe('uninstall', () => {
-  async function installThenUninstall(removeState: boolean): Promise<TestHome & { code: number }> {
-    const { home, project, configPath, baseConfig } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const code = await uninstall({ cwd: project, flags: { removeState, dryRun: false } });
-    return { home, project, configPath, baseConfig, code };
-  }
+describe('uninstall --machine', () => {
+  it('round-trips: installMachine → uninstall --machine leaves hooks.json/TOML clean, manifest gone', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    expect(await installMachine({ home, flags: { dryRun: false } })).toBe(0);
 
-  it('removes plugin, skill, mcp entry; config restored to a skillstate-free JSONC', async () => {
-    const { home, project, configPath, code } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const manifest = readManifest(project);
-    expect(await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } })).toBe(0);
-    expect(fs.existsSync(manifest.pluginPath!)).toBe(false);
-    expect(fs.existsSync(manifest.skillPath!)).toBe(false);
-    const after = fs.readFileSync(configPath, 'utf-8');
-    expect(parseJsoncSafe(after)).toEqual(
-      expect.objectContaining({ mcp: { existing: expect.objectContaining({ type: 'local' }) } }),
-    );
-    expect(after).toContain('// OpenCode config (test fixture)');
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(false);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, 'skillstate.json'))).toBe(true);
-    expect(output()).toContain('kept state');
-  });
+    // Foreign hook survives the round-trip.
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const doc = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as {
+      description?: string;
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    doc.hooks.PreToolUse = [{ hooks: [{ type: 'command', command: 'keep-me' }] }];
+    fs.writeFileSync(hooksJson, JSON.stringify(doc, null, 2));
+    const tomlPath = path.join(home, '.codex', 'config.toml');
+    const tomlBefore = fs.readFileSync(tomlPath, 'utf-8');
 
-  it('--remove-state deletes the whole state dir', async () => {
-    const { project, code } = await installThenUninstall(true);
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } });
     expect(code).toBe(0);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+
+    const after = JSON.parse(fs.readFileSync(hooksJson, 'utf-8')) as typeof doc;
+    expect(after.hooks.PreToolUse).toEqual([{ hooks: [{ type: 'command', command: 'keep-me' }] }]);
+    expect(after.hooks.UserPromptSubmit).toBeUndefined();
+    expect(after.hooks.SessionStart).toBeUndefined();
+    expect(after.hooks.PostToolUse).toBeUndefined();
+    expect(JSON.stringify(after)).not.toContain('.cjs');
+    expect(fs.existsSync(path.join(home, '.codex', 'hooks', 'skillstate'))).toBe(false);
+    expect(fs.readFileSync(tomlPath, 'utf-8')).not.toContain('[mcp_servers.skillstate]');
+    expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(false);
+    expect(tomlBefore).toContain('[mcp_servers.skillstate]');
+    expect(output()).toContain('Machine glue removed.');
   });
 
-  it('is idempotent: after uninstall there is nothing left to remove (exit 1, no manifest)', async () => {
-    const { project } = await installThenUninstall(true);
-    logSpy.mockClear();
-    errorSpy.mockClear();
-    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
+  it('fails with exit 1 when no machine manifest exists', async () => {
+    const home = makeTmp();
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } });
     expect(code).toBe(1);
-    expect(output()).toContain('No install manifest');
+    expect(output()).toContain('No machine install manifest');
   });
 
-  it('--dry-run removes nothing', async () => {
-    const { home, project, configPath } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const before = fs.readFileSync(configPath, 'utf-8');
-    const manifest = readManifest(project);
-    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: true } });
+  it('fails with exit 1 on a corrupt machine manifest', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.skillstate'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME), '{oops');
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } });
+    expect(code).toBe(1);
+    expect(output()).toContain('Corrupt machine install manifest');
+  });
+
+  it('fails with exit 1 on a wrong-shape machine manifest', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.skillstate'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.skillstate', MANIFEST_FILE_NAME),
+      JSON.stringify({ version: 1, codex: { hooksConfigPath: 1, scriptDir: 'x', tomlConfigPath: 'y' } }),
+    );
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } });
+    expect(code).toBe(1);
+    expect(output()).toContain('Corrupt machine install manifest');
+  });
+
+  it('machine --dry-run removes nothing', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    expect(await installMachine({ home, flags: { dryRun: false } })).toBe(0);
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const before = fs.readFileSync(hooksJson, 'utf-8');
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: true } });
     expect(code).toBe(0);
-    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
-    expect(fs.existsSync(manifest.pluginPath!)).toBe(true);
-    expect(fs.existsSync(manifest.skillPath!)).toBe(true);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(true);
+    expect(fs.readFileSync(hooksJson, 'utf-8')).toBe(before);
+    expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(true);
     expect(output()).toContain('[dry-run]');
   });
 
-  it('reports a corrupt manifest (exit 1)', async () => {
-    const project = makeTmp();
-    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
-    fs.writeFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), '{oops', 'utf-8');
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(1);
-    expect(output()).toContain('Corrupt install manifest');
-  });
-
-  it('reports a manifest with wrong shape (exit 1)', async () => {
-    const project = makeTmp();
-    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
-    fs.writeFileSync(
-      path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME),
-      JSON.stringify({ version: 2, host: 'opencode', statePath: '/x' }),
-      'utf-8',
-    );
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(1);
-    expect(output()).toContain('Corrupt install manifest');
-  });
-
-  it('handles claude-mcp-json rollback including backup', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const mcpJson = path.join(project, '.mcp.json');
-    const code = await uninstall({ cwd: project, flags: { removeState: true, dryRun: false } });
+  it('survives a missing hooks.json and an already-clean TOML during machine rollback', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    expect(await installMachine({ home, flags: { dryRun: false } })).toBe(0);
+    fs.rmSync(path.join(home, '.codex', 'hooks.json'));
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '# clean\n');
+    const code = await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } });
     expect(code).toBe(0);
-    const doc = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as { mcpServers: Record<string, unknown> };
-    expect(doc.mcpServers['skillstate']).toBeUndefined();
-    expect(fs.readdirSync(project).some((f) => f.startsWith('.mcp.json.bak.'))).toBe(true);
-  });
-
-  it('skips an unreadable claude mcp config without failing', async () => {
-    const home = makeBareHome('claude');
-    const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const mcpJson = path.join(project, '.mcp.json');
-    fs.writeFileSync(mcpJson, '{oops', 'utf-8');
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(0);
-    expect(output()).toContain(`Skipping mcp: ${mcpJson}`);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(false);
-  });
-
-  it('tolerates already-deleted files and a missing mcp config', async () => {
-    const { home, project, configPath } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const manifest = readManifest(project);
-    fs.rmSync(manifest.pluginPath!);
-    fs.rmSync(manifest.skillPath!);
-    fs.rmSync(configPath);
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(0);
-  });
-
-  it('init --uninstall routes through the same rollback', async () => {
-    const { home, project, configPath } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const code = await main(['init', '--uninstall'], project);
-    expect(code).toBe(0);
-    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8') === '' ? '{}' : parseJsoncSafe(fs.readFileSync(configPath, 'utf-8')) ? JSON.stringify(parseJsoncSafe(fs.readFileSync(configPath, 'utf-8'))) : '{}')).toEqual(
-      expect.objectContaining({ mcp: expect.not.objectContaining({ skillstate: expect.anything() }) }),
-    );
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(false);
-  });
-
-  it('uninstall command with --state-dir (the .skillstate dir) works from another cwd', async () => {
-    const { home, project } = makeOpencodeHome();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const elsewhere = makeTmp();
-    const code = await main(
-      ['uninstall', '--state-dir', path.join(project, STATE_DIR_NAME), '--remove-state'],
-      elsewhere,
-    );
-    expect(code).toBe(0);
-    expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(false);
   });
 });
 
-describe('main init — host install wiring', () => {
+describe('main — init/install/uninstall wiring', () => {
   it('install error paths map to exit 1, usage errors to exit 2', async () => {
     const home = makeTmp();
     const project = makeTmp();
@@ -1061,108 +1201,309 @@ describe('main init — host install wiring', () => {
       expect(await main(['init', '--help'], project)).toBe(0);
       expect(await main(['uninstall'], project)).toBe(1);
       expect(await main(['uninstall', '--bogus'], project)).toBe(2);
+      expect(await main(['install', '--bogus'], project)).toBe(2);
+      expect(await main(['install', '--help'], project)).toBe(0);
     } finally {
       process.env['HOME'] = prevHome;
     }
   });
 
-  it('full round-trip through main with a temp HOME', async () => {
-    const { home, project, configPath } = makeOpencodeHome();
+  it('full round-trip through main with a temp HOME (init → uninstall --remove-state)', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const project = makeTmp();
     const prevHome = process.env['HOME'];
     process.env['HOME'] = home;
     try {
       expect(await main(['init'], project)).toBe(0);
-      expect(readManifest(project).host).toBe('opencode');
+      expect(readManifest(project).version).toBe(2);
       expect(await main(['init'], project)).toBe(0);
       expect(await main(['init', '--dry-run'], project)).toBe(0);
       expect(await main(['uninstall', '--remove-state'], project)).toBe(0);
       expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
-      expect(JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/\/\*[\s\S]*?\*\//g, '').split('//').length > 1 ? '{}' : '{}')).toEqual({});
+    } finally {
+      process.env['HOME'] = prevHome;
+    }
+  });
+
+  it('uninstall command with --state-dir works from another cwd', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const project = makeTmp();
+    const prevHome = process.env['HOME'];
+    process.env['HOME'] = home;
+    try {
+      expect(await main(['init'], project)).toBe(0);
+      const elsewhere = makeTmp();
+      expect(await main(['uninstall', '--state-dir', path.join(project, STATE_DIR_NAME), '--remove-state'], elsewhere)).toBe(0);
+      expect(fs.existsSync(path.join(project, STATE_DIR_NAME))).toBe(false);
+    } finally {
+      process.env['HOME'] = prevHome;
+    }
+  });
+
+  it('install command wires codex machine glue with a temp HOME', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    const project = makeTmp();
+    const prevHome = process.env['HOME'];
+    process.env['HOME'] = home;
+    try {
+      expect(await main(['install'], project)).toBe(0);
+      expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(true);
+      expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(true);
+      expect(await main(['install', '--dry-run'], project)).toBe(0);
+    } finally {
+      process.env['HOME'] = prevHome;
+    }
+  });
+
+  it('uninstall --machine routes through the machine rollback', async () => {
+    const home = makeTmp();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    const project = makeTmp();
+    const prevHome = process.env['HOME'];
+    process.env['HOME'] = home;
+    try {
+      expect(await main(['install'], project)).toBe(0);
+      expect(await main(['uninstall', '--machine'], project)).toBe(0);
+      expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(false);
     } finally {
       process.env['HOME'] = prevHome;
     }
   });
 });
 
-/** Tolerant parse helper: strip comments then JSON.parse. */
-function parseJsoncSafe(text: string): unknown {
-  const stripped = text
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1'))
-    .join('\n')
-    .replace(/,(\s*[}\]])/g, '$1');
-  return JSON.parse(stripped) as unknown;
-}
-
-describe('codex install/uninstall edge branches', () => {
-  it('survives a corrupt previous manifest on re-install', async () => {
-    const home = makeBareHome('codex');
-    const project = makeTmp();
+describe('uninstall — opencode rollback edge branches', () => {
+  function writeManifest(project: string, manifest: unknown): void {
     fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
-    fs.writeFileSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME), '{corrupt');
-    const code = await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    expect(code).toBe(0);
-    expect(readManifest(project).host).toBe('codex');
+    fs.writeFileSync(
+      path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME),
+      JSON.stringify(manifest),
+    );
+  }
+
+  function v2(project: string, hosts: unknown, extra: Record<string, unknown> = {}): unknown {
+    return {
+      version: 2,
+      installedAt: new Date().toISOString(),
+      statePath: path.join(project, STATE_DIR_NAME, 'skillstate.json'),
+      hosts,
+      ...extra,
+    };
+  }
+
+  it('is a no-op for a config whose root is not an object (both install and uninstall)', async () => {
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.jsonc');
+    fs.writeFileSync(configPath, '[1]');
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    // Config untouched (non-object root), state+spec+manifest still written.
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('[1]');
+    expect(readManifest(project).hosts['opencode']).toBeDefined();
+    expect(await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
   });
 
-  it('uninstall removes the [mcp_servers.skillstate] TOML table', async () => {
-    const home = makeBareHome('codex');
+  it('skips an unreadable opencode config without failing', async () => {
     const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const configToml = path.join(home, '.codex', 'config.toml');
-    expect(fs.readFileSync(configToml, 'utf-8')).toContain('[mcp_servers.skillstate]');
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(configToml, 'utf-8')).not.toContain('[mcp_servers.skillstate]');
-    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+    const configPath = path.join(project, 'opencode.json');
+    writeManifest(project, v2(project, { opencode: { mcp: { configPath, format: 'opencode-json' } } }));
+    fs.mkdirSync(configPath); // config is a DIRECTORY → readFileSync throws
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
   });
 
-  it('uninstall is a no-op when the TOML table is already absent', async () => {
-    const home = makeBareHome('codex');
+  it('uninstall --dry-run of an opencode host writes nothing', async () => {
+    const home = makeTmp();
     const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const configToml = path.join(home, '.codex', 'config.toml');
-    fs.rmSync(configToml);
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: false } });
-    expect(code).toBe(0);
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    const configPath = path.join(project, 'opencode.json');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    expect(await uninstall({ cwd: project, home, flags: { removeState: false, machine: false, dryRun: true } })).toBe(0);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+    expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(true);
+  });
+
+  it('drops emptied containers, keeps single-quoted JSONC (parse failure tolerated), and keeps a non-array plugin', async () => {
+    const project = makeTmp();
+    // Plugin array without mcp: plugin entry dropped when emptied; no mcp key.
+    const configPath = path.join(project, 'opencode.jsonc');
+    writeManifest(project, v2(project, { opencode: { mcp: { configPath, format: 'opencode-json' } } }));
+    fs.writeFileSync(configPath, '{\n  "plugin": ["@skillstate/opencode"]\n}');
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(false);
+
+    // Single-quoted values survive the splice (parseJsonc fails → file kept).
+    const project2 = makeTmp();
+    const configPath2 = path.join(project2, 'opencode.jsonc');
+    writeManifest(project2, v2(project2, { opencode: { mcp: { configPath: configPath2, format: 'opencode-json' } } }));
+    fs.writeFileSync(configPath2, `{\n  "mcp": {\n    "skillstate": {},\n    "keep": 'me'\n  }\n}`);
+    expect(await uninstall({ cwd: project2, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    const kept = fs.readFileSync(configPath2, 'utf-8');
+    expect(kept).toContain("'me'");
+    expect(kept).not.toContain('skillstate');
+
+    // Non-array plugin value is skipped during rollback.
+    const project3 = makeTmp();
+    const configPath3 = path.join(project3, 'opencode.jsonc');
+    writeManifest(project3, v2(project3, { opencode: { mcp: { configPath: configPath3, format: 'opencode-json' } } }));
+    fs.writeFileSync(configPath3, '{"plugin": "x", "mcp": {"skillstate": {}}}');
+    expect(await uninstall({ cwd: project3, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    const after3 = fs.readFileSync(configPath3, 'utf-8');
+    expect(parseJsonc(after3)).toEqual({ plugin: 'x' });
   });
 });
 
-describe('codex install — remaining branches', () => {
-  it('codex --dry-run writes nothing', async () => {
-    const home = makeBareHome('codex');
+describe('uninstall — manifest host-record validation', () => {
+  function writeManifest(project: string, manifest: unknown): void {
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME),
+      JSON.stringify(manifest),
+    );
+  }
+
+  async function expectCorrupt(project: string): Promise<void> {
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(1);
+    expect(output()).toContain('Corrupt install manifest');
+  }
+
+  it('rejects non-record hosts and malformed host records (exit 1)', async () => {
     const project = makeTmp();
-    const code = await autoInstall({ cwd: project, home, flags: { ...defaultFlags(), dryRun: true } });
-    expect(code).toBe(0);
-    expect(fs.existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
-    expect(fs.existsSync(path.join(home, '.codex', 'config.toml'))).toBe(false);
-    expect(output()).toContain('[dry-run]');
+    const base = { version: 2, installedAt: 'x', statePath: '/x' };
+    writeManifest(project, { ...base, hosts: 42 });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: { opencode: 42 } });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: { opencode: { mcp: {} } } });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: { claude: 42 } });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: { claude: { hooks: {}, mcp: {} } } });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: { claude: { hooks: { configPath: 'a' }, mcp: { configPath: 'b' } } } });
+    await expectCorrupt(project);
+    writeManifest(project, { ...base, hosts: {}, skillPath: 42 });
+    await expectCorrupt(project);
   });
 
-  it('codex uninstall --dry-run with the table present writes nothing', async () => {
-    const home = makeBareHome('codex');
+  it('accepts a claude-only record and rolls it back', async () => {
+    const home = makeTmp();
     const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const configToml = path.join(home, '.codex', 'config.toml');
-    const before = fs.readFileSync(configToml, 'utf-8');
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(configToml, 'utf-8')).toBe(before);
-    expect(output()).toContain('removed mcp entry');
+    fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['claude'] });
+    // settings.json already gone → the hooks step is skipped gracefully.
+    fs.rmSync(path.join(project, '.claude', 'settings.json'));
+    expect(await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(path.join(project, '.mcp.json'))).toBe(false);
+  });
+});
+
+describe('uninstall — claude rollback edge branches', () => {
+  function writeManifest(project: string, manifest: unknown): void {
+    fs.mkdirSync(path.join(project, STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME),
+      JSON.stringify(manifest),
+    );
+  }
+
+  it('survives a missing script dir, a clean settings.json, and a missing .mcp.json', async () => {
+    const project = makeTmp();
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    const scriptDir = path.join(project, '.claude', 'hooks', 'skillstate');
+    const mcpJson = path.join(project, '.mcp.json');
+    writeManifest(project, {
+      version: 2,
+      installedAt: 'x',
+      statePath: path.join(project, STATE_DIR_NAME, 'skillstate.json'),
+      hosts: {
+        claude: {
+          hooks: { configPath: settingsPath, scriptDir },
+          mcp: { configPath: mcpJson, format: 'claude-mcp-json' },
+        },
+      },
+    });
+    // settings.json carries NO skillstate hooks (removeSkillstateHookGroups no-op).
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, '{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}]}}');
+    // No script dir, no .mcp.json.
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: true, machine: false, dryRun: false } })).toBe(0);
   });
 
-  it('codex uninstall leaves the TOML alone when the table is absent (match null)', async () => {
-    const home = makeBareHome('codex');
+  it('survives an unreadable settings.json (EISDIR) and skips the empty-text branch', async () => {
     const project = makeTmp();
-    await autoInstall({ cwd: project, home, flags: defaultFlags() });
-    const configToml = path.join(home, '.codex', 'config.toml');
-    // Strip the table manually but keep the file — uninstall must skip the
-    // removal branch (no backup written for a no-op).
-    fs.writeFileSync(configToml, '# just a comment\n');
-    const before = fs.readFileSync(configToml, 'utf-8');
-    const code = await uninstall({ cwd: project, flags: { removeState: false, dryRun: true } });
-    expect(code).toBe(0);
-    expect(fs.readFileSync(configToml, 'utf-8')).toBe(before);
+    const settingsPath = path.join(project, '.claude', 'settings.json');
+    const scriptDir = path.join(project, '.claude', 'hooks', 'skillstate');
+    writeManifest(project, {
+      version: 2,
+      installedAt: 'x',
+      statePath: path.join(project, STATE_DIR_NAME, 'skillstate.json'),
+      hosts: {
+        claude: {
+          hooks: { configPath: settingsPath, scriptDir },
+          mcp: { configPath: path.join(project, '.mcp.json'), format: 'claude-mcp-json' },
+        },
+      },
+    });
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.mkdirSync(settingsPath); // settings.json is a DIRECTORY → readFileSync throws
+    expect(await uninstall({ cwd: project, home: makeTmp(), flags: { removeState: false, machine: false, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(scriptDir)).toBe(false);
+  });
+});
+
+describe('uninstall --machine — edge branches', () => {
+  function writeMachineManifest(home: string, manifest: unknown): void {
+    fs.mkdirSync(path.join(home, '.skillstate'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME), JSON.stringify(manifest));
+  }
+
+  it('survives a hooks.json without skillstate groups, a missing script dir, and a missing TOML', async () => {
+    const home = makeTmp();
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const scriptDir = path.join(home, '.codex', 'hooks', 'skillstate');
+    const tomlPath = path.join(home, '.codex', 'config.toml');
+    writeMachineManifest(home, {
+      version: 1,
+      installedAt: 'x',
+      codex: { hooksConfigPath: hooksJson, scriptDir, tomlConfigPath: tomlPath },
+    });
+    fs.mkdirSync(path.dirname(hooksJson), { recursive: true });
+    fs.writeFileSync(hooksJson, '{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}]}}');
+    // No script dir, no config.toml.
+    expect(await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } })).toBe(0);
+  });
+
+  it('survives an empty hooks.json file (empty-text branch)', async () => {
+    const home = makeTmp();
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const tomlPath = path.join(home, '.codex', 'config.toml');
+    writeMachineManifest(home, {
+      version: 1,
+      installedAt: 'x',
+      codex: { hooksConfigPath: hooksJson, scriptDir: path.join(home, '.codex', 'hooks', 'skillstate'), tomlConfigPath: tomlPath },
+    });
+    fs.mkdirSync(path.dirname(hooksJson), { recursive: true });
+    fs.writeFileSync(hooksJson, ''); // exists but empty → removal skipped
+    fs.writeFileSync(tomlPath, '# clean\n'); // TOML present but no skillstate table
+    expect(await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } })).toBe(0);
+    expect(fs.readFileSync(hooksJson, 'utf-8')).toBe('');
+  });
+
+  it('survives unreadable hooks.json and config.toml (EISDIR branches)', async () => {
+    const home = makeTmp();
+    const hooksJson = path.join(home, '.codex', 'hooks.json');
+    const tomlPath = path.join(home, '.codex', 'config.toml');
+    writeMachineManifest(home, {
+      version: 1,
+      installedAt: 'x',
+      codex: { hooksConfigPath: hooksJson, scriptDir: path.join(home, '.codex', 'hooks', 'skillstate'), tomlConfigPath: tomlPath },
+    });
+    fs.mkdirSync(path.dirname(hooksJson), { recursive: true });
+    fs.mkdirSync(hooksJson); // hooks.json is a DIRECTORY → readFileSync throws
+    fs.mkdirSync(tomlPath); // config.toml is a DIRECTORY → readFileSync throws
+    expect(await uninstall({ cwd: makeTmp(), home, flags: { removeState: false, machine: true, dryRun: false } })).toBe(0);
+    expect(fs.existsSync(path.join(home, '.skillstate', MANIFEST_FILE_NAME))).toBe(false);
   });
 });

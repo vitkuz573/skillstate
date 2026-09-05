@@ -12,6 +12,7 @@ import {
   removeSkillstateHookGroups,
   resolveStateForCwd,
 } from '@skillstate/claude';
+import type { ClaudeHookEvent } from '@skillstate/claude';
 import { HISTORY_UNRELIABLE_NOTE } from '@skillstate/core';
 import type {
   SkillState,
@@ -284,9 +285,9 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
     );
   });
 
-  it('falls back to process.cwd() and to {} when the state file is missing', () => {
+  it('is INERT without state: emits {} (no hookSpecificOutput, no context added)', () => {
     const dir = makeTmp();
-    const cwd = path.join(dir, 'empty-project');
+    const cwd = path.join(dir, 'fresh-clone');
     fs.mkdirSync(cwd, { recursive: true });
     const scriptPath = writeScript(dir, adapter.generateHookScript('user-prompt-submit'));
     const emitted = execFileSync(nodePath, [scriptPath], {
@@ -294,8 +295,26 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
       encoding: 'utf-8',
       cwd,
     }).toString();
-    const parsed = JSON.parse(emitted) as any;
-    expect(parsed.hookSpecificOutput.additionalContext).toContain('Current skill state (JSON): {}');
+    expect(JSON.parse(emitted)).toEqual({});
+  });
+
+  it('session-start-compact is INERT without state (interrupted-session meta check skipped)', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'fresh-clone');
+    // A session-meta sidecar implies state — it must be ignored when the
+    // state file itself is missing.
+    fs.mkdirSync(path.join(cwd, '.skillstate'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, '.skillstate', '.session-meta.json'),
+      JSON.stringify({ status: 'interrupted' }),
+    );
+    const scriptPath = writeScript(dir, adapter.generateHookScript('session-start-compact'));
+    const emitted = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({ cwd, source: 'compact' }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    expect(JSON.parse(emitted)).toEqual({});
   });
 
   it('injects the AGENT-SCOPED state from input.session_id (8-char prefix)', () => {
@@ -390,12 +409,12 @@ describe('ClaudeAdapter.generateHookScript — post-tool-use', () => {
     const cwd = path.join(dir, 'project');
     fs.mkdirSync(path.join(cwd, '.skillstate'), { recursive: true });
     const statePath = path.join(cwd, '.skillstate', 'skillstate.json');
-    if (initialState !== undefined) {
-      fs.writeFileSync(
-        statePath,
-        `${JSON.stringify({ version: 1, state: initialState }, null, 2)}\n`,
-      );
-    }
+    // Hooks are INERT without state and never create the file themselves —
+    // the state always pre-exists ({} when no initial state is given).
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, state: initialState ?? {} }, null, 2)}\n`,
+    );
     const scriptPath = writeScript(dir, adapter.generateHookScript('post-tool-use'));
     const stdout = execFileSync(nodePath, [scriptPath], {
       input: JSON.stringify(stdin),
@@ -446,7 +465,7 @@ describe('ClaudeAdapter.generateHookScript — post-tool-use', () => {
   it('outputs {} (no systemMessage) when the tool response carries no patch (null-delete none)', () => {
     const result = runPostHook({ tool_response: 'plain ls output\nfile1 file2' });
     expect(JSON.parse(result.stdout)).toEqual({});
-    expect(result.state).toEqual({});
+    expect(result.state).toEqual({ version: 1, state: {} });
   });
 
   it('outputs a systemMessage for an invalid fenced patch and a non-object state_patch', () => {
@@ -486,8 +505,24 @@ describe('ClaudeAdapter.generateHookScript — post-tool-use', () => {
     expect(JSON.parse(stdout).systemMessage).toContain('failed to process');
   });
 
-  it('persists the patch into the AGENT-SCOPED state derived from input.session_id', () => {
+  it('is INERT without state: emits {} and creates NOTHING (hooks never create state)', () => {
     const dir = makeTmp();
+    const cwd = path.join(dir, 'fresh-clone');
+    fs.mkdirSync(cwd, { recursive: true });
+    const scriptPath = writeScript(dir, adapter.generateHookScript('post-tool-use'));
+    const stdout = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({
+        cwd,
+        tool_response: '```json\n{"state_patch":{"progress":1},"action":"go"}\n```',
+      }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    expect(JSON.parse(stdout)).toEqual({});
+    expect(fs.existsSync(path.join(cwd, '.skillstate'))).toBe(false);
+  });
+
+  it('persists the patch into the AGENT-SCOPED state derived from input.session_id', () => {    const dir = makeTmp();
     const cwd = path.join(dir, 'project');
     fs.mkdirSync(cwd, { recursive: true });
     const sessionId = 'ses_feedface99';
@@ -596,6 +631,35 @@ describe('ClaudeAdapter.generateHooksConfig', () => {
     const parsed = JSON.parse(adapter.generateHooksConfig(undefined, { scriptDir: '/sd' })) as any;
     expect(parsed.hooks.PostToolUse[0].hooks[0].command).toContain(path.join('/sd'));
   });
+
+  it('commandFor overrides the command PER EVENT (project-local $CLAUDE_PROJECT_DIR form)', () => {
+    const parsed = JSON.parse(
+      adapter.generateHooksConfig(undefined, {
+        scriptDir: '/sd',
+        commandFor: (event) =>
+          event === 'user-prompt-submit'
+            ? 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/user-prompt-submit.cjs" user-prompt-submit'
+            : `custom-${event}`,
+      }),
+    ) as any;
+    expect(parsed.hooks.UserPromptSubmit[0].hooks[0].command).toBe(
+      'node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/user-prompt-submit.cjs" user-prompt-submit',
+    );
+    expect(parsed.hooks.SessionStart[0].hooks[0].command).toBe('custom-session-start-compact');
+    expect(parsed.hooks.PostToolUse[0].hooks[0].command).toBe('custom-post-tool-use');
+  });
+
+  it('commandFor takes precedence over the global command override', () => {
+    const parsed = JSON.parse(
+      adapter.generateHooksConfig(undefined, {
+        command: 'global-command',
+        commandFor: (event) => `per-${event}`,
+      }),
+    ) as any;
+    for (const event of ['UserPromptSubmit', 'SessionStart', 'PostToolUse']) {
+      expect(parsed.hooks[event][0].hooks[0].command).toMatch(/^per-/);
+    }
+  });
 });
 
 // ─── mergeHooksConfig ───────────────────────────────────────────────────────
@@ -687,6 +751,24 @@ describe('ClaudeAdapter.mergeHooksConfig', () => {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
     };
     expect(doc.hooks.UserPromptSubmit[0].hooks[0].command).toContain('<stateDir>/hooks');
+  });
+
+  it('honors commandFor: custom commands are written AND detected as already wired', () => {
+    const commandFor = (event: ClaudeHookEvent): string =>
+      `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/${event}.cjs" ${event}`;
+    const first = adapter.mergeHooksConfig('{"hooks":{}}', { commandFor });
+    const doc = JSON.parse(first) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    for (const event of CLAUDE_HOOK_EVENTS) {
+      const group = doc.hooks[
+        event === 'user-prompt-submit' ? 'UserPromptSubmit' : event === 'session-start-compact' ? 'SessionStart' : 'PostToolUse'
+      ];
+      expect(group[0].hooks[0].command).toBe(commandFor(event));
+    }
+    // Idempotent: the same commandFor set is detected as already wired.
+    const second = adapter.mergeHooksConfig(first, { commandFor });
+    expect(second).toBe(first);
   });
 });
 
@@ -821,14 +903,6 @@ describe('ClaudeAdapter.claudeHookScriptPath + save helpers', () => {
     expect(parsed.hooks.SessionStart[0].matcher).toBe('^compact$');
   });
 
-  it('saveSkillMd writes the SKILL.md and returns the dest', async () => {
-    const dir = makeTmp();
-    const dest = path.join(dir, 'SKILL.md');
-    const returned = await adapter.saveSkillMd(dest, makeSpec(), './.skillstate/skillstate.json');
-    expect(returned).toBe(dest);
-    expect(fs.readFileSync(dest, 'utf-8')).toContain('# Test Skill');
-  });
-
   it('save helpers resolve {root, name} refs and reject traversal', async () => {
     const dir = makeTmp();
     const dest = await adapter.saveHooksConfig(
@@ -843,45 +917,6 @@ describe('ClaudeAdapter.claudeHookScriptPath + save helpers', () => {
     await expect(
       adapter.saveHooksConfig(dest, { root: dir, name: '../evil.json' }),
     ).rejects.toThrow('Path traversal blocked');
-    await expect(
-      adapter.saveSkillMd({ root: dir, name: '../evil.md' }, makeSpec()),
-    ).rejects.toThrow('Path traversal blocked');
-  });
-});
-
-// ─── generateSkillMd ────────────────────────────────────────────────────────
-
-describe('ClaudeAdapter.generateSkillMd', () => {
-  const adapter = new ClaudeAdapter();
-
-  it('renders frontmatter with name/description/version and the state path', () => {
-    const md = adapter.generateSkillMd(makeSpec(), './.skillstate/skillstate.json');
-    expect(md.startsWith('---\n')).toBe(true);
-    expect(md).toContain('name: "Test Skill"');
-    expect(md).toContain('description: "Do test things carefully."');
-    expect(md).toContain('version: 1.0.0');
-    expect(md).toContain('state_path: ./.skillstate/skillstate.json');
-  });
-
-  it('defaults the state path and documents the global bucket', () => {
-    const md = adapter.generateSkillMd(makeSpec());
-    expect(md).toContain('state_path: ./.skillstate/skillstate.json');
-    expect(md).toContain('~/.skillstate/global/skillstate.json');
-  });
-
-  it('instructs MCP state.get/state.patch and the hook-injected state contract', () => {
-    const md = adapter.generateSkillMd(makeSpec());
-    expect(md).toContain('state.get');
-    expect(md).toContain('state.patch');
-    expect(md).toContain('not reliable');
-    expect(md).toContain('UserPromptSubmit');
-    expect(md).toContain('SessionStart');
-    expect(md).toContain('PostToolUse');
-    expect(md).toContain('null');
-  });
-
-  it('is deterministic', () => {
-    expect(adapter.generateSkillMd(makeSpec())).toBe(adapter.generateSkillMd(makeSpec()));
   });
 });
 

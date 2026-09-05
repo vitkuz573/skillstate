@@ -9,25 +9,52 @@ was run against the real server — paste and go.
 Any of these work (Node >= 20, zero dependencies beyond `@skillstate/core`):
 
 ```bash
-# packaged bin
-npx -y skillstate-mcp
+# from the npm package (pinned major)
+npx -y @skillstate/mcp@^3
 
 # from a checkout
 node packages/mcp/bin/mcp.js
 ```
 
-Or register it with an MCP host (OpenCode example):
+Or register it with an MCP host — this is exactly what `skillstate init`
+(per project) and `skillstate install` (machine-level, Codex only) write,
+always `npx -y @skillstate/mcp@^3`:
+
+OpenCode project `opencode.json(c)`:
 
 ```jsonc
 {
   "mcp": {
     "skillstate": {
       "type": "local",
-      "command": ["node", "/abs/path/to/skillstate/packages/mcp/bin/mcp.js"],
+      "command": ["npx", "-y", "@skillstate/mcp@^3"],
       "enabled": true
     }
   }
 }
+```
+
+Claude Code project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "skillstate": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@skillstate/mcp@^3"]
+    }
+  }
+}
+```
+
+Codex `~/.codex/config.toml` (machine-level, via `skillstate install`):
+
+```toml
+[mcp_servers.skillstate]
+command = "npx"
+args = ["-y", "@skillstate/mcp@^3"]
+enabled = true
 ```
 
 The server reads **newline-delimited JSON-RPC 2.0** on stdin and writes one
@@ -83,6 +110,10 @@ A minimal custom spec (`skill-spec.json` at the repo root is a full example):
 
 Other knobs: `SKILLSTATE_AGENT_ID` (multi-agent scoping), and the state
 always resolves from the server's **cwd** as `<cwd>/.skillstate/skillstate.json`.
+The server is inert until the project has been initialized with
+`skillstate init` — state-touching tools return
+`no skillstate state in this directory — run \`skillstate init\`` and create
+nothing (not even the directory) until then; `spec.get` always works.
 
 ## 4. Drive a session
 

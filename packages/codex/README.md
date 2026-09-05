@@ -2,7 +2,7 @@
 
 # @skillstate/codex
 
-**OpenAI Codex CLI adapter (codex 0.142) for the @skillstate/core runtime — `hooks.json` lifecycle hooks, hook scripts, MCP registration, `SKILL.md`, and a programmatic O(1) fork-trim session.**
+**OpenAI Codex CLI adapter (codex 0.142) for the @skillstate/core runtime — `hooks.json` lifecycle hooks, hook scripts, MCP registration, and a programmatic O(1) fork-trim session.**
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/codex)](https://www.npmjs.com/package/@skillstate/codex)
 [![node](https://img.shields.io/node/v/@skillstate/codex)](https://www.npmjs.com/package/@skillstate/codex)
@@ -22,26 +22,34 @@ into **OpenAI Codex CLI** (0.142) sessions. It generates:
   Bash tool outputs (`PostToolUse` matcher `^Bash$`);
 - **self-contained `.cjs` hook scripts** (Node builtins only, no
   `@skillstate/*` import) that resolve the per-project state from the session
-  `cwd` at runtime — one global script directory serves every project;
+  `cwd` at runtime — one machine-level script directory serves every project,
+  and every script is inert when the cwd has no skillstate state;
 - a **`[mcp_servers.skillstate]` TOML block** for `~/.codex/config.toml`
-  (used by `@skillstate/cli init`; see `installCodexHost`);
-- a **`SKILL.md`** for `~/.codex/skills/<name>/` that makes the hook-injected
-  state authoritative (history is not reliable);
+  (used by `@skillstate/cli install`; see `buildCodexMcpToml`);
 - **`CodexForkSession`** (`fork-trim.ts`) — a `codex app-server` JSON-RPC
   client providing **programmatic O(1) history trimming** via
   `thread/fork` / `thread/rollback` (experimental, non-interactive runs).
+
+There is NO Codex `SKILL.md` — the bootstrap is the hook-injected state plus
+the skillstate MCP tools, and Codex has no project config support: the glue
+is MACHINE-LEVEL and belongs to `skillstate install`, which wires `~/.codex`
+once while every project's state (`.skillstate/skillstate.json`) is picked up
+automatically from the session cwd.
 
 > **@non-paper** — no adapters exist in arXiv 2608.26263v3. This adapter is an
 > additive integration, not part of the paper.
 
 ## Installation
 
-The one-command host install (hooks + scripts + MCP + skill + per-project
-state, idempotent, with backups):
+The machine-level install (hooks + scripts + MCP, once per machine,
+idempotent, with backups — project state needs no install):
 
 ```bash
-npm i -g @skillstate/cli && skillstate init --host codex
+npm i -g @skillstate/cli && skillstate install
 ```
+
+(`skillstate init` in a project prints a hint to run this when it detects
+the `~/.codex` marker; `skillstate uninstall --machine` rolls it back.)
 
 Or use the adapter as a library:
 
@@ -55,7 +63,6 @@ Requires Node.js >= 20. TypeScript types are bundled.
 
 ```ts
 import { CodexAdapter, CodexForkSession, resolveStateForCwd } from '@skillstate/codex';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const adapter = new CodexAdapter();
 
@@ -92,13 +99,12 @@ const scriptPath = await adapter.saveHookScript(
   '/home/me/.codex/hooks/skillstate/post-tool-use.cjs',
   statePath,
 );
-
-// SKILL.md for ~/.codex/skills/skillstate/SKILL.md — the injected state is
-// authoritative; persist via the MCP tools state.patch / state.get, and/or
-// print a fenced ```json state_patch block inside a Bash call:
-const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate/skillstate.json');
-await adapter.saveSkillMd('~/.codex/skills/skillstate/SKILL.md', INTERCODE_CTF_SPEC);
 ```
+
+There is no `generateSkillMd`/`saveSkillMd` on this adapter: Codex has no
+SKILL.md — the hook-injected state is authoritative, full read/write goes
+through the skillstate MCP tools (`state.patch` / `state.get`), and/or the
+agent prints a fenced ```json `state_patch` block inside a Bash call.
 
 ### Programmatic O(1) — `CodexForkSession` (experimental)
 
@@ -155,18 +161,15 @@ Events (`CodexHookEvent`): `'user-prompt-submit' | 'session-start-compact' | 'po
     ```json block or raw JSON, wrapper-tolerant), applies the ⊕
     null-deletion merge and writes the state file; stdout is `{}` or a
     `systemMessage` when the patch is invalid.
-- `generateSkillMd(spec, statePath?): string` — `SKILL.md` frontmatter
-  (name/description/version + `execution_context`) and the state-based
-  process body.
 - `mergeHooksConfig(existingJson, options?): string` — idempotent merge of the
   skillstate hook groups into an existing `hooks.json` (foreign hooks are
   preserved; missing/malformed files start a fresh document).
 - `codexHookScriptPath(scriptDir, event): string` — canonical absolute `.cjs`
   path (`<scriptDir>/<event>.cjs`).
 - `saveHooksConfig(target, statePath, options?): Promise<string>`,
-  `saveHookScript(event, target, statePath?): Promise<string>`,
-  `saveSkillMd(target, spec, statePath?): Promise<string>` — atomic writes
-  returning the absolute destination.
+  `saveHookScript(event, target, statePath?): Promise<string>` — atomic
+  writes returning the absolute destination. (There is no SKILL.md for
+  Codex: bootstrap = hook-injected state + MCP tools.)
 - `resolveStateForCwd(cwd, home?): string` — per-project state resolution
   shared by the hooks, the fork-trim session, and the CLI install.
 - `new CodexForkSession({ cwd, codexBin?, home?, requestTimeoutMs?,
@@ -180,10 +183,12 @@ Events (`CodexHookEvent`): `'user-prompt-submit' | 'session-start-compact' | 'po
   O(1) path is `CodexForkSession` (`fork-trim.ts`, `codex app-server`
   `thread/fork` / `thread/rollback`) — **experimental**, for non-interactive
   runs.
-- One global `hooks.json` + one script directory serve **every project**:
-  each script resolves the per-project state from the session `cwd`
+- One machine-level `hooks.json` + one script directory serve **every
+  project** (installed once by `skillstate install`): each script resolves
+  the per-project state from the session `cwd`
   (`<cwd>/.skillstate/skillstate.json`; the global bucket
-  `~/.skillstate/global/skillstate.json` when cwd === home).
+  `~/.skillstate/global/skillstate.json` when cwd === home) and is inert
+  when the project has no state — hooks never create state files.
 - The `post-tool-use` script accepts both fenced ```json blocks and an
   unfenced JSON object, and tolerates wrappers such as `Here is: {...}`.
   Malformed outputs are rejected and never persisted.
@@ -194,7 +199,9 @@ Events (`CodexHookEvent`): `'user-prompt-submit' | 'session-start-compact' | 'po
 
 - Paper: [arXiv:2608.26263](https://arxiv.org/abs/2608.26263).
 - Core runtime: [`@skillstate/core`](../core).
-- Host install CLI: [`@skillstate/cli`](../cli) (`skillstate init --host codex`).
+- Host install CLI: [`@skillstate/cli`](../cli) (`skillstate install` —
+  machine-level Codex glue; `skillstate init` — per-project wiring for every
+  detected host).
 - [`state.md`](../../state.md) — design notes.
 - Other adapters: `@skillstate/claude`, `@skillstate/opencode`, `@skillstate/mcp`.
 

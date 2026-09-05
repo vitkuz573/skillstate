@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/codex",
-  "version": "2.2.2",
+  "version": "3.0.0",
   "description": "OpenAI Codex platform adapter for the skillstate runtime.",
   "type": "module",
   "main": "dist/index.js",
@@ -21,6 +21,6 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@skillstate/core": "^2.2.2"
+    "@skillstate/core": "^3.0.0"
   }
 }

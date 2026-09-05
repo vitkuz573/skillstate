@@ -344,6 +344,23 @@ export function findRawPatch(text: string): PatchLookup {
 }
 
 /**
+ * Existence guard for the generated hook scripts' INERT mode: `true` when
+ * the state file at `statePath` is accessible via the injected `fs` (real
+ * `node:fs` in hooks, mocks in tests). A missing file means the project has
+ * no skillstate state — the generated hooks then stay INERT (no context
+ * injection, no state-file creation). Plain JS — survives `fn.toString()`
+ * inlining.
+ */
+export function stateFileExists(statePath: string, fs: { accessSync(path: string): void }): boolean {
+  try {
+    fs.accessSync(statePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Read the session-meta sidecar's status (`<dir>/.session-meta.json`,
  * sibling of the state file). Plain JS — inlined into the generated
  * SessionStart hooks via `fn.toString()`. Returns the `status` string for
@@ -387,6 +404,7 @@ export function hookRuntimeSnippet(): string {
     findRawPatch,
     sleepSync,
     lockStateWrite,
+    stateFileExists,
     readSessionMetaStatus,
   ]
     .map((fn) => fn.toString())

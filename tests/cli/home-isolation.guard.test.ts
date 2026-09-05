@@ -1,10 +1,10 @@
 // Layer-3 guard: prove that the test suite never writes into the REAL user
-// home. Runs `main(['init'])` / `main(['run'])` against temp dirs under an
-// isolated $HOME, then verifies that the real OpenCode config + plugin file
-// are byte-identical (sha256) to the BeforeAll snapshot — and that nothing
-// appeared that was not there before. Fails LOUDLY with
-// "tests wrote into REAL home" if the HOME isolation ever regresses
-// (e.g. `defaultHome()` stops honoring $HOME).
+// home, and that the NEW install model keeps every piece of glue
+// project-local: `init` writes NOTHING into $HOME (fresh clones work for
+// the whole team) and `install` only touches ~/.codex + ~/.skillstate.
+// Fails LOUDLY with "tests wrote into REAL home" if HOME isolation ever
+// regresses (e.g. `defaultHome()` stops honoring $HOME) — or if the CLI
+// starts scattering global glue into ~/.config/~/.claude again.
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -12,9 +12,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { main } from '@skillstate/cli';
 
-const REAL_PLUGIN = path.join(os.homedir(), '.config', 'opencode', 'plugins', 'skillstate.ts');
-const REAL_CONFIG_JSONC = path.join(os.homedir(), '.config', 'opencode', 'opencode.jsonc');
-const REAL_CONFIG_JSON = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+const REAL_HOME = os.homedir();
+const REAL_FILES = [
+  path.join(REAL_HOME, '.config', 'opencode', 'opencode.jsonc'),
+  path.join(REAL_HOME, '.config', 'opencode', 'opencode.json'),
+  path.join(REAL_HOME, '.claude', 'settings.json'),
+  path.join(REAL_HOME, '.codex', 'hooks.json'),
+  path.join(REAL_HOME, '.codex', 'config.toml'),
+  path.join(REAL_HOME, '.skillstate', 'install-manifest.json'),
+];
 
 interface Snapshot {
   existed: boolean;
@@ -49,8 +55,24 @@ function assertUnchanged(label: string, before: Snapshot, absPath: string): void
   }
 }
 
+/** Recursive file listing relative to `root` — the cheap home-tree guard. */
+function treeFiles(root: string, prefix = ''): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      out.push(...treeFiles(path.join(root, entry.name), rel));
+    } else {
+      out.push(rel);
+    }
+  }
+  return out.sort();
+}
+
 let before: Record<string, Snapshot> = {};
 let isolatedHome = '';
+let isolatedMarker = '';
+let isolatedTreeBefore: string[] = [];
 let prevHome: string | undefined;
 let tmpDirs: string[] = [];
 
@@ -61,14 +83,14 @@ function makeTmp(): string {
 }
 
 beforeAll(() => {
-  before = {
-    plugin: snapshot(REAL_PLUGIN),
-    configJsonc: snapshot(REAL_CONFIG_JSONC),
-    configJson: snapshot(REAL_CONFIG_JSON),
-  };
+  for (const [index, file] of REAL_FILES.entries()) {
+    before[String(index)] = snapshot(file);
+  }
   isolatedHome = makeTmp();
-  fs.mkdirSync(path.join(isolatedHome, '.config', 'opencode'), { recursive: true });
-  fs.writeFileSync(path.join(isolatedHome, '.config', 'opencode', 'opencode.jsonc'), '{\n}\n', 'utf-8');
+  isolatedMarker = path.join(isolatedHome, '.config', 'opencode', 'opencode.jsonc');
+  fs.mkdirSync(path.dirname(isolatedMarker), { recursive: true });
+  fs.writeFileSync(isolatedMarker, '{\n}\n', 'utf-8');
+  isolatedTreeBefore = treeFiles(isolatedHome);
   prevHome = process.env['HOME'];
   process.env['HOME'] = isolatedHome;
 });
@@ -80,28 +102,74 @@ afterAll(() => {
   }
 });
 
-describe('HOME isolation guard (real ~/.config must be untouched)', () => {
+describe('HOME isolation guard (real ~/.config must be untouched, glue must be project-local)', () => {
   it(
-    'init + run on temp cwds never mutate the real home files',
+    'init is 100% project-local; install/uninstall --machine only touch ~/.codex + ~/.skillstate',
     async () => {
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
+        // init: everything lands in the project, NOTHING in the isolated home.
         const project = makeTmp();
         expect(await main(['init'], project)).toBe(0);
-        expect(await main(['run'], project)).toBe(0);
+        expect(fs.existsSync(path.join(project, '.skillstate', 'skillstate.json'))).toBe(true);
+        expect(fs.existsSync(path.join(project, '.skillstate', 'install-manifest.json'))).toBe(true);
+        expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(true);
+        expect(fs.existsSync(path.join(project, 'opencode.json'))).toBe(true);
+        expect(fs.existsSync(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
+        expect(treeFiles(isolatedHome)).toEqual(isolatedTreeBefore);
 
+        expect(await main(['run'], project)).toBe(0);
+        expect(treeFiles(isolatedHome)).toEqual(isolatedTreeBefore);
+
+        // A second project re-inits without touching the home either.
         const second = makeTmp();
         expect(await main(['init'], second)).toBe(0);
+        expect(treeFiles(isolatedHome)).toEqual(isolatedTreeBefore);
 
+        // install: machine glue appears ONLY under ~/.codex + ~/.skillstate.
+        expect(await main(['install'], second)).toBe(0);
+        expect(treeFiles(isolatedHome)).toEqual(
+          [
+            ...isolatedTreeBefore,
+            '.codex/config.toml',
+            '.codex/hooks.json',
+            '.codex/hooks/skillstate/post-tool-use.cjs',
+            '.codex/hooks/skillstate/session-start-compact.cjs',
+            '.codex/hooks/skillstate/user-prompt-submit.cjs',
+            '.skillstate/install-manifest.json',
+          ].sort(),
+        );
+
+        // uninstall --machine: skillstate glue + manifest are gone; the live
+        // config files remain (surgical removal) plus the timestamped
+        // backups (by design, never auto-deleted).
+        expect(await main(['uninstall', '--machine'], second)).toBe(0);
+        const afterMachine = treeFiles(isolatedHome);
+        expect(afterMachine.filter((f) => f.startsWith('.codex/hooks/') || f.startsWith('.skillstate/'))).toEqual([]);
+        const hooksAfter = JSON.parse(
+          fs.readFileSync(path.join(isolatedHome, '.codex', 'hooks.json'), 'utf-8'),
+        ) as { hooks?: Record<string, unknown> };
+        expect(hooksAfter.hooks).toEqual({});
+        expect(fs.readFileSync(path.join(isolatedHome, '.codex', 'config.toml'), 'utf-8')).not.toContain(
+          '[mcp_servers.skillstate]',
+        );
+        expect(fs.existsSync(path.join(isolatedHome, '.skillstate', 'install-manifest.json'))).toBe(false);
         expect(
-          fs.existsSync(path.join(isolatedHome, '.config', 'opencode', 'plugins', 'skillstate.ts')),
-        ).toBe(true);
+          afterMachine.filter(
+            (f) => f.startsWith('.codex/config.toml.bak.') || f.startsWith('.codex/hooks.json.bak.'),
+          ),
+        ).toHaveLength(2);
+        expect(afterMachine.filter((f) => !f.startsWith('.codex/'))).toEqual(isolatedTreeBefore);
 
-        assertUnchanged('plugin', before['plugin'] as Snapshot, REAL_PLUGIN);
-        assertUnchanged('opencode.jsonc', before['configJsonc'] as Snapshot, REAL_CONFIG_JSONC);
-        assertUnchanged('opencode.json', before['configJson'] as Snapshot, REAL_CONFIG_JSON);
+        // The marker opencode.jsonc was never spliced (it is a detection marker).
+        expect(fs.readFileSync(isolatedMarker, 'utf-8')).toBe('{\n}\n');
+
+        // Real home untouched across the whole run.
+        for (const [index, file] of REAL_FILES.entries()) {
+          assertUnchanged(path.basename(file), before[String(index)] as Snapshot, file);
+        }
       } finally {
         logSpy.mockRestore();
         errorSpy.mockRestore();

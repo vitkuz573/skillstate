@@ -23,6 +23,16 @@
  * named sidecar under `<stateDir>/checkpoints/<seq>-<label>.json`; the
  * write-sequence number `seq` is derived from the sidecar catalog, so it
  * survives server restarts.
+ *
+ * INERT UNTIL INIT: the server may be registered machine-level (e.g. codex
+ * `~/.codex/config.toml`) and is launched per-project (cwd = the project),
+ * so it must never materialize `.skillstate/` in a project that never ran
+ * `skillstate init`. Every tool call except `spec.get` — and every
+ * resource read except `skillstate://spec` — first checks that the
+ * launch-time state directory (`root`) exists on disk; when it does not,
+ * the call returns a normal `isError` tool result with a fixed hint and
+ * NOTHING is created (the launch-time session stamp is skipped too).
+ * `spec.get` stays available: it reads the in-memory config only.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -90,6 +100,17 @@ const SUMMARY_NEXT_PREVIEW = 3;
  */
 const ACTIVITY_DEBOUNCE_MS = 5000;
 
+/**
+ * The exact text of the inert-gate error: a tool call (or state-backed
+ * resource read) that arrives in a directory with no skillstate state —
+ * the server is inert until `skillstate init` runs.
+ */
+const NOT_INITIALIZED_MESSAGE =
+  'no skillstate state in this directory — run `skillstate init`';
+
+/** Tools that stay callable in an uninitialized directory: config-only. */
+const UNGATED_TOOLS: ReadonlySet<string> = new Set(['spec.get']);
+
 /** A JSON-RPC request object (id may be a number, string, or null). */
 export interface JsonRpcRequest {
   jsonrpc?: string;
@@ -114,7 +135,13 @@ export interface ToolAnnotations {
 export interface McpServerOptions {
   /** Procedural spec: drives `spec.get`/`spec.next`, schema validation, and state defaults. */
   spec: ProceduralSpec;
-  /** State file root directory (confined by `resolveStatePath`). */
+  /**
+   * State file root directory (confined by `resolveStatePath`). The
+   * launch-time existence of this DIRECTORY is the inert gate: while it
+   * does not exist (the project never ran `skillstate init`), every tool
+   * except `spec.get` and the state-backed resources are refused and
+   * nothing is ever created here.
+   */
   root: string;
   /** State file name (confined by `resolveStatePath`). */
   name: string;
@@ -450,12 +477,20 @@ export class McpServer {
    * `merged`) recorded by the agent itself are never clobbered — hosts
    * SIGTERM their servers after a clean finalize too. Idempotent; returns
    * an uninstall closure for embedders/tests.
+   *
+   * INERT UNTIL INIT: when the launch-time state directory does not
+   * exist, there is nothing to flush and the flush itself must not
+   * materialize it — the handler just exits.
    */
   installInterruptHandler(): () => void {
     if (this.uninstallShutdown !== null) {
       return this.uninstallShutdown;
     }
     this.uninstallShutdown = installShutdown(async () => {
+      if (this.isStateDirMissing()) {
+        process.exit(130);
+        return;
+      }
       try {
         const current = readSessionMeta(this.sessionDir);
         if (
@@ -681,6 +716,14 @@ export class McpServer {
     }
   }
 
+  /**
+   * `resources/read` for the three advertised URIs. INERT UNTIL INIT:
+   * `skillstate://state` and `skillstate://summary` read the persisted
+   * state, so they are refused with a JSON-RPC error (code `-32000`,
+   * message = {@link NOT_INITIALIZED_MESSAGE}) when the launch-time state
+   * directory does not exist — a read must not imply state exists.
+   * `skillstate://spec` reads the in-memory config and stays ungated.
+   */
   private handleResourceRead(
     id: number | string | null,
     params: unknown,
@@ -691,6 +734,9 @@ export class McpServer {
         : undefined;
     if (uri === undefined) {
       return this.errorResponse(id, -32602, 'Invalid params: uri required');
+    }
+    if (uri !== 'skillstate://spec' && this.isStateDirMissing()) {
+      return this.errorResponse(id, -32000, NOT_INITIALIZED_MESSAGE);
     }
     let text: string;
     switch (uri) {
@@ -732,10 +778,27 @@ export class McpServer {
   /*  Tool implementations                                               */
   /* ------------------------------------------------------------------ */
 
+  /**
+   * INERT UNTIL INIT: the launch-time state directory must already exist
+   * (created by `skillstate init`). The gate runs BEFORE any state access
+   * — including `state.patch`, whose write path would otherwise
+   * `mkdirSync` the directory into existence. It checks `root` itself, so
+   * agent-scoped calls are covered uniformly (the `agents/<id>` directory
+   * is irrelevant: no `root`, no session). Overridden `{ root }` args are
+   * intentionally NOT followed here — the gate pins the launch-time root,
+   * which is the directory the host resolved for this project.
+   */
+  private isStateDirMissing(): boolean {
+    return !fs.existsSync(this.options.root);
+  }
+
   private async callTool(
     name: string,
     args: Record<string, unknown>,
   ): Promise<McpToolResult> {
+    if (!UNGATED_TOOLS.has(name) && this.isStateDirMissing()) {
+      return { content: [{ type: 'text', text: NOT_INITIALIZED_MESSAGE }], isError: true };
+    }
     switch (name) {
       case 'state.get':
         return this.stateGet(args);
@@ -1614,6 +1677,12 @@ export { resolveHostStateForCwd as resolveStatePathForCwd } from '@skillstate/co
  * In-process embedders that do not own the process can pass
  * `installInterruptHandler: false` (tests) or call
  * `server.detachInterruptHandler()` afterwards.
+ *
+ * INERT UNTIL INIT: when the launch-time state directory does not exist
+ * (the project never ran `skillstate init`), the session stamp is skipped
+ * and every tool call except `spec.get` is refused (see
+ * {@link McpServer.isStateDirMissing}) — the server never creates the
+ * state directory itself.
  */
 export async function launch(args?: LaunchArgs): Promise<McpServer> {
   const spec = resolveSpec(args, process.env);
@@ -1635,20 +1704,24 @@ export async function launch(args?: LaunchArgs): Promise<McpServer> {
   // Lifecycle: a live launch means this session is running NOW. The
   // sidecar lives next to the DEFAULT state file (the agent's own
   // directory when the launch is agent-scoped). Written through the core
-  // meta API (merge under the meta lock, atomic write).
-  try {
-    const defaultFilePath =
-      sanitizedAgent.length > 0
-        ? resolveStatePath(root, path.join('agents', sanitizedAgent, name))
-        : resolveStatePath(root, name);
-    await writeSessionMeta(path.dirname(defaultFilePath), {
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      agentId: sanitizedAgent,
-      protocolVersion: PROTOCOL_VERSION,
-    });
-  } catch {
-    // Best-effort stamp: an unwritable sidecar must not block the server.
+  // meta API (merge under the meta lock, atomic write). Inert until
+  // init: a missing state directory means the stamp must NOT create it
+  // (machine-level server registrations land in arbitrary projects).
+  if (fs.existsSync(root)) {
+    try {
+      const defaultFilePath =
+        sanitizedAgent.length > 0
+          ? resolveStatePath(root, path.join('agents', sanitizedAgent, name))
+          : resolveStatePath(root, name);
+      await writeSessionMeta(path.dirname(defaultFilePath), {
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        agentId: sanitizedAgent,
+        protocolVersion: PROTOCOL_VERSION,
+      });
+    } catch {
+      // Best-effort stamp: an unwritable sidecar must not block the server.
+    }
   }
   if (args?.installInterruptHandler !== false) {
     server.installInterruptHandler();

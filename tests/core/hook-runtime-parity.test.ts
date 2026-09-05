@@ -30,6 +30,7 @@ import {
   saveStateEnvelope,
   sanitizeAgentId,
   sleepSync,
+  stateFileExists,
 } from '@skillstate/core';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -58,6 +59,7 @@ const SNIPPET_MARKERS = [
   'function findRawPatch(',
   'function sleepSync(',
   'function lockStateWrite(',
+  'function stateFileExists(',
   'function readSessionMetaStatus(',
 ];
 
@@ -107,6 +109,7 @@ function evalSnippet(script: string): Record<string, (...args: never[]) => unkno
     'findRawPatch',
     'sleepSync',
     'lockStateWrite',
+    'stateFileExists',
     'readSessionMetaStatus',
   ];
   const out: Record<string, (...args: never[]) => unknown> = {};
@@ -427,6 +430,19 @@ describe('snippet-vs-original parity', () => {
       (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
       ['/x/.session-meta.json', () => '{"status":7}'],
     ],
+    // stateFileExists — accessible / missing (accessSync throws)
+    [
+      'state file exists when accessSync succeeds',
+      (p, fsys) =>
+        stateFileExists(p as string, fsys as { accessSync(path: string): void }),
+      ['/s.json', { accessSync: (_p: string) => undefined }],
+    ],
+    [
+      'state file exists is false when accessSync throws (missing file)',
+      (p, fsys) =>
+        stateFileExists(p as string, fsys as { accessSync(path: string): void }),
+      ['/s.json', { accessSync: (_p: string) => { throw new Error('ENOENT'); } }],
+    ],
   ];
 
   for (const [label, invoke, args] of cases) {
@@ -617,6 +633,22 @@ describe('snippet-vs-original parity', () => {
     }
   });
 
+  it('stateFileExists: real fs parity (existing and missing state file)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-parity-sfe-'));
+    try {
+      const existing = path.join(dir, 'skillstate.json');
+      fs.writeFileSync(existing, '{}', 'utf-8');
+      const missing = path.join(dir, 'absent.json');
+      for (const statePath of [existing, missing]) {
+        const expected = stateFileExists(statePath, fs);
+        expect(expected).toBe(statePath === existing);
+        expect(snippetFns['stateFileExists'](statePath, fs)).toBe(expected);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sleepSync: falls back to a busy spin when Atomics is unavailable', () => {
     const originalAtomics = (globalThis as Record<string, unknown>)['Atomics'];
     (globalThis as Record<string, unknown>)['Atomics'] = undefined;
@@ -649,6 +681,7 @@ const FN_NAMES = [
   'findRawPatch',
   'readResponseText',
   'readSessionMetaStatus',
+  'stateFileExists',
   'sanitizeAgentId',
   'sleepSync',
   'lockStateWrite',

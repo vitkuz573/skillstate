@@ -1,4 +1,4 @@
-// skillstate CLI — init [--host ...] [--dry-run] [--uninstall] | uninstall | run | report.
+// skillstate CLI — init [flags] | install [flags] | uninstall [flags] | run | report.
 //
 // @non-paper Wave-4 DX layer (additive): thin file orchestration over the
 // paper-exact runtime. `run` uses a deterministic offline stub LLM (empty
@@ -10,12 +10,7 @@
 /// <reference types="node" />
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-  defaultConfig,
-  loadConfig,
-  mergeConfig,
-  CONFIG_FILE_NAME,
-} from '@skillstate/core';
+import { loadConfig, mergeConfig } from '@skillstate/core';
 import type { SkillStateConfig } from '@skillstate/core';
 import { SkillStateRuntime } from '@skillstate/core';
 import { TokenTracker } from '@skillstate/core';
@@ -28,16 +23,18 @@ import {
   autoInstall,
   CLI_USAGE_INSTALL,
   defaultHome,
+  installMachine,
   HelpRequestedInitError,
   parseInitArgs,
+  parseInstallArgs,
   parseUninstallArgs,
   resolveInitSpec,
   uninstall,
 } from './install.js';
-import type { InitFlags } from './install.js';
+import type { InitFlags, InstallFlags } from './install.js';
 
-export const CLI_USAGE = `Usage: skillstate init [flags] | uninstall [flags] | run [--config <path>] [--resume] | report [--format json|md]
-  init flags: ${CLI_USAGE_INSTALL.slice('Usage: skillstate '.length)}`;
+export const CLI_USAGE = `Usage: skillstate init [flags] | install [flags] | uninstall [flags] | run [--config <path>] [--resume] | report [--format json|md]
+  flags: ${CLI_USAGE_INSTALL.slice('Usage: skillstate '.length)}`;
 
 /** Parsed `run` flags. */
 export interface RunFlags {
@@ -204,31 +201,10 @@ export function stubLlmResponse(): string {
 }
 
 async function cmdInit(cwd: string, flags: InitFlags): Promise<number> {
-  if (flags.uninstall) {
-    return uninstall({ cwd, flags: { removeState: false, dryRun: flags.dryRun } });
-  }
+  // init writes NO config file — run/report use loadConfig defaults. It
+  // resolves (or creates) the shared procedure spec and wires every
+  // detected host project-locally.
   const spec = resolveInitSpec(cwd, flags);
-  if (flags.dryRun) {
-    console.log('[dry-run] would create ./skillstate.json + ./skill-spec.json (if missing)');
-    return autoInstall({ cwd, home: defaultHome(), flags, spec });
-  }
-  const configPath = path.join(cwd, CONFIG_FILE_NAME);
-  const defaults = defaultConfig();
-  if (fs.existsSync(configPath) === false) {
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, `${JSON.stringify(defaults, null, 2)}\n`, 'utf-8');
-    console.log(`Created ${CONFIG_FILE_NAME}`);
-  } else {
-    console.log(`${CONFIG_FILE_NAME} already exists`);
-  }
-  const specAbs = resolveInCwd(cwd, defaults.specPath);
-  if (fs.existsSync(specAbs) === false) {
-    fs.mkdirSync(path.dirname(specAbs), { recursive: true });
-    fs.writeFileSync(specAbs, `${JSON.stringify(spec, null, 2)}\n`, 'utf-8');
-    console.log(`Created ${defaults.specPath} (${spec.id})`);
-  } else {
-    console.log(`${defaults.specPath} already exists`);
-  }
   return autoInstall({ cwd, home: defaultHome(), flags, spec });
 }
 
@@ -370,8 +346,12 @@ export async function main(argv: string[], cwd?: string): Promise<number> {
     if (command === 'init') {
       return await cmdInit(dir, parseInitArgs(rest));
     }
+    if (command === 'install') {
+      const flags: InstallFlags = parseInstallArgs(rest);
+      return await installMachine({ home: defaultHome(), flags });
+    }
     if (command === 'uninstall') {
-      return await uninstall({ cwd: dir, flags: parseUninstallArgs(rest) });
+      return await uninstall({ cwd: dir, home: defaultHome(), flags: parseUninstallArgs(rest) });
     }
     if (command === 'run') {
       return await cmdRun(dir, parseRunArgs(rest));

@@ -1,42 +1,53 @@
-// skillstate host auto-install (additive, @non-paper Wave-4 DX).
+// skillstate host wiring (v2 model: project-local glue, machine install).
 //
-// `skillstate init` detects the host (opencode | claude | codex) and installs
-// everything in one shot:
-// - state dir `./.skillstate/` in the project (per-project state + manifest);
-// - OpenCode: plugin into `~/.config/opencode/plugins/` (auto-loaded at
-//   startup, thin loader — the plugin resolves
-//   `<cwd>/.skillstate/skillstate.json` from the host session's cwd),
-//   `mcp.skillstate` entry spliced into `opencode.jsonc` (with a timestamped
-//   backup, no baked env — the server resolves the state from its own cwd),
-//   `SKILL.md` into `~/.config/opencode/skills/`;
-// - Claude: `.cjs` hook scripts into `~/.claude/hooks/skillstate/` +
-//   skillstate hook groups merged into `~/.claude/settings.json`
-//   (UserPromptSubmit / SessionStart(^compact$) / PostToolUse(^Bash$)),
-//   `SKILL.md` into `~/.claude/skills/`, `.mcp.json` (stdio server) in the
-//   project;
-// - Codex: `SKILL.md` into `~/.codex/skills/` (no MCP — TOML config untouched).
+// Global machine install (`npm i -g`) is the ONLY global thing. `skillstate
+// init` writes NO files into `~` — every piece of glue lives inside the
+// project and is committed, so a fresh clone works for the whole team:
+// - state dir `./.skillstate/skillstate.json` (per-project state + manifest);
+// - OpenCode: `"plugin": ["@skillstate/opencode"]` + `mcp.skillstate`
+//   spliced into the PROJECT `opencode.jsonc|json` (one timestamped backup
+//   per run; no baked env — everything resolves the state from its cwd);
+// - Claude: self-contained `.cjs` hook scripts + hook groups merged into the
+//   PROJECT `.claude/settings.json` (`$CLAUDE_PROJECT_DIR`-anchored
+//   commands) and the stdio server into the project `.mcp.json`;
+// - ONE host-neutral SKILL.md at `<cwd>/.claude/skills/skillstate/` serves
+//   both opencode and claude (opencode reads project `.claude/skills/` too);
+// - Codex: machine-level only (no project config support) — `skillstate
+//   install` wires `~/.codex` once and the project state is picked up
+//   automatically.
 //
-// An install manifest (`<stateDir>/install-manifest.json`) records every path
-// touched so `skillstate uninstall` (or `init --uninstall`) can roll it all
-// back exactly.
+// Hosts are wired ALL AT ONCE (every detected host), so switching harnesses
+// needs no re-init. An install manifest (`<stateDir>/install-manifest.json`,
+// v2) records per-host glue and MERGES across re-inits; the machine manifest
+// (`<home>/.skillstate/install-manifest.json`, v1) records the codex glue so
+// `skillstate uninstall [--machine]` can roll either back exactly.
 /// <reference types="node" />
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createRequire } from 'node:module';
-import { atomicWriteFile } from '@skillstate/core';
-import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import {
+  atomicWriteFile,
+  STATE_PATCH_EXAMPLE_JSON,
+  STATE_PATCH_RULES,
+} from '@skillstate/core';
+import { GENERIC_PROCEDURE_SPEC } from '@skillstate/core/schemas';
 import type { ProceduralSpec } from '@skillstate/core';
-import { OpenCodeAdapter } from '@skillstate/opencode';
 import { CodexAdapter, CODEX_HOOK_EVENTS } from '@skillstate/codex';
 import { ClaudeAdapter, CLAUDE_HOOK_EVENTS, removeSkillstateHookGroups } from '@skillstate/claude';
-import { findTopLevelObject, insertObjectEntry, parseJsonc, removeObjectEntry } from './jsonc.js';
+import {
+  findTopLevelObject,
+  insertArrayStringEntry,
+  insertObjectEntry,
+  parseJsonc,
+  removeArrayStringEntry,
+  removeObjectEntry,
+  scanArray,
+  scanObject,
+} from './jsonc.js';
 import { resolveInCwd } from './commands.js';
 
 /** Supported hosts. */
 export type HostId = 'opencode' | 'claude' | 'codex';
-
-const HOSTS: readonly HostId[] = ['opencode', 'claude', 'codex'];
 
 /** Project runtime directory created by init. */
 export const STATE_DIR_NAME = '.skillstate';
@@ -48,26 +59,22 @@ export const MANIFEST_FILE_NAME = 'install-manifest.json';
 const SKILL_DESCRIPTION =
   'State-based execution: persist agent state to a JSON file, keep the prompt O(1), and resume any procedure from disk.';
 
+/** The `npx` command + args every host uses to launch the MCP server (pinned major). */
+const MCP_NPX_COMMAND = 'npx';
+const MCP_NPX_ARGS = ['-y', '@skillstate/mcp@^3'] as const;
+
 /** Parsed `init` flags. */
 export interface InitFlags {
-  /** Forced host (`--host`); auto-detected when omitted. */
-  host?: HostId;
-  /** Non-system messages kept by the plugin (`--max-history`, default 3). */
-  maxHistory?: number;
   /** User spec file (`--spec <path>`); overrides the default spec. */
   specPath?: string;
-  /** Builtin demo spec (`--example ctf` → InterCode CTF). */
-  example?: 'ctf';
-  /** Skip MCP server registration (`--no-mcp`). */
-  noMcp: boolean;
-  /** Skip SKILL.md installation (`--no-skill`). */
-  noSkill: boolean;
   /** Print the plan without touching anything (`--dry-run`). */
   dryRun: boolean;
-  /** Accepted alias for the default auto behavior (`--auto`). */
-  auto: boolean;
-  /** Roll the install back instead of installing (`--uninstall`). */
-  uninstall: boolean;
+}
+
+/** Parsed `install` flags (machine-level codex glue). */
+export interface InstallFlags {
+  /** Print the plan without touching anything (`--dry-run`). */
+  dryRun: boolean;
 }
 
 /** Parsed `uninstall` flags. */
@@ -76,23 +83,34 @@ export interface UninstallFlags {
   stateDir?: string;
   /** Also delete the state directory (`--remove-state`). */
   removeState: boolean;
+  /** Roll back the machine-level codex glue instead of the project glue (`--machine`). */
+  machine: boolean;
   /** Print the plan without touching anything (`--dry-run`). */
   dryRun: boolean;
 }
 
-/** What was installed, where — persisted for a precise uninstall. */
+/** Per-host glue recorded by a project install (manifest v2). */
 export interface InstallManifest {
-  version: 1;
-  host: HostId;
+  version: 2;
   installedAt: string;
+  /** Absolute path of the created/used state envelope. */
   statePath: string;
-  maxHistoryMessages: number;
-  pluginPath?: string;
+  /** Absolute path of the host-neutral SKILL.md (when opencode/claude wired). */
   skillPath?: string;
-  hooksBackup?: string;
-  /** Claude: settings.json path + the generated `.cjs` script directory. */
-  hooks?: { configPath: string; scriptDir: string };
-  mcp?: { configPath: string; format: 'opencode-jsonc' | 'claude-mcp-json' | 'codex-toml' };
+  hosts: {
+    opencode?: { mcp: { configPath: string; format: 'opencode-json' } };
+    claude?: {
+      hooks: { configPath: string; scriptDir: string };
+      mcp: { configPath: string; format: 'claude-mcp-json' };
+    };
+  };
+}
+
+/** Codex machine-level install record (`<home>/.skillstate/install-manifest.json`). */
+export interface MachineInstallManifest {
+  version: 1;
+  installedAt: string;
+  codex: { hooksConfigPath: string; scriptDir: string; tomlConfigPath: string };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,86 +130,51 @@ export function isInsideTemp(dir: string): boolean {
 }
 
 /**
- * Detect the host from marker files under `home` (opencode first):
+ * Detect ALL supported hosts from marker files under `home`, in fixed order
+ * [opencode, claude, codex]:
  * - opencode: `~/.config/opencode/opencode.jsonc|opencode.json` or `~/.opencode/bin/opencode`;
  * - claude: `~/.claude`;
  * - codex: `~/.codex`.
- * Returns null when nothing matches.
+ * Returns every match (empty when nothing does) — init wires them all at once.
  */
-export function detectHost(home: string): HostId | null {
+export function detectHosts(home: string): HostId[] {
+  const detected: HostId[] = [];
   const configDir = path.join(home, '.config', 'opencode');
   if (
     fs.existsSync(path.join(configDir, 'opencode.jsonc')) ||
     fs.existsSync(path.join(configDir, 'opencode.json')) ||
     fs.existsSync(path.join(home, '.opencode', 'bin', 'opencode'))
   ) {
-    return 'opencode';
+    detected.push('opencode');
   }
   if (fs.existsSync(path.join(home, '.claude'))) {
-    return 'claude';
+    detected.push('claude');
   }
   if (fs.existsSync(path.join(home, '.codex'))) {
-    return 'codex';
+    detected.push('codex');
   }
-  return null;
+  return detected;
 }
 
 /**
- * Parse `init` flags: `--host <h>`, `--max-history <n>`, `--no-mcp`,
- * `--no-skill`, `--dry-run`, `--auto`, `--uninstall` (`=`-forms accepted).
+ * Parse `init` flags: `--spec <path>` (or `--spec=<path>`), `--dry-run`.
  * Throws an `Error` with the usage line on unknown/invalid flags.
  */
 export function parseInitArgs(args: string[]): InitFlags {
   if (wantsHelpInit(args)) {
     throw new HelpRequestedInitError();
   }
-  const flags: InitFlags = {
-    noMcp: false,
-    noSkill: false,
-    dryRun: false,
-    auto: false,
-    uninstall: false,
-  };
+  const flags: InitFlags = { dryRun: false };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
-    if (arg === '--auto') {
-      flags.auto = true;
-    } else if (arg === '--dry-run') {
+    if (arg === '--dry-run') {
       flags.dryRun = true;
-    } else if (arg === '--no-mcp') {
-      flags.noMcp = true;
-    } else if (arg === '--no-skill') {
-      flags.noSkill = true;
-    } else if (arg === '--uninstall') {
-      flags.uninstall = true;
-    } else if (arg === '--host' || arg.startsWith('--host=')) {
-      const value = arg === '--host' ? args[++i] : arg.slice('--host='.length);
-      if (
-        value === undefined ||
-        (value !== 'opencode' && value !== 'claude' && value !== 'codex')
-      ) {
-        throw new Error(`Invalid --host (want opencode|claude|codex)\n${CLI_USAGE_INSTALL}`);
-      }
-      flags.host = value;
-    } else if (arg === '--max-history' || arg.startsWith('--max-history=')) {
-      const value = arg === '--max-history' ? args[++i] : arg.slice('--max-history='.length);
-      const parsed = typeof value === 'string' ? Number(value) : NaN;
-      if (value === undefined || !Number.isInteger(parsed) || parsed < 1) {
-        throw new Error(`Invalid --max-history (want a positive integer)\n${CLI_USAGE_INSTALL}`);
-      }
-      flags.maxHistory = parsed;
     } else if (arg === '--spec' || arg.startsWith('--spec=')) {
       const value = arg === '--spec' ? args[++i] : arg.slice('--spec='.length);
       if (value === undefined || value.length === 0) {
         throw new Error(`Missing value for --spec\n${CLI_USAGE_INSTALL}`);
       }
       flags.specPath = value;
-    } else if (arg === '--example' || arg.startsWith('--example=')) {
-      const value = arg === '--example' ? args[++i] : arg.slice('--example='.length);
-      if (value !== 'ctf') {
-        throw new Error(`Invalid --example (want ctf)\n${CLI_USAGE_INSTALL}`);
-      }
-      flags.example = value;
     } else {
       throw new Error(`Unknown flag for init: ${arg}\n${CLI_USAGE_INSTALL}`);
     }
@@ -200,18 +183,41 @@ export function parseInitArgs(args: string[]): InitFlags {
 }
 
 /**
+ * Parse `install` flags: `--dry-run` only (the command wires the machine-
+ * level codex glue; project wiring belongs to `init`).
+ */
+export function parseInstallArgs(args: string[]): InstallFlags {
+  if (wantsHelpInit(args)) {
+    throw new HelpRequestedInitError();
+  }
+  const flags: InstallFlags = { dryRun: false };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === '--dry-run') {
+      flags.dryRun = true;
+    } else {
+      throw new Error(`Unknown flag for install: ${arg}\n${CLI_USAGE_INSTALL}`);
+    }
+  }
+  return flags;
+}
+
+/**
  * Parse `uninstall` flags: `--state-dir <path>`, `--remove-state`,
- * `--dry-run`. Throws an `Error` with the usage line on unknown flags.
+ * `--machine`, `--dry-run`. Throws an `Error` with the usage line on
+ * unknown flags.
  */
 export function parseUninstallArgs(args: string[]): UninstallFlags {
   if (wantsHelpInit(args)) {
     throw new HelpRequestedInitError();
   }
-  const flags: UninstallFlags = { removeState: false, dryRun: false };
+  const flags: UninstallFlags = { removeState: false, machine: false, dryRun: false };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === '--remove-state') {
       flags.removeState = true;
+    } else if (arg === '--machine') {
+      flags.machine = true;
     } else if (arg === '--dry-run') {
       flags.dryRun = true;
     } else if (arg === '--state-dir' || arg.startsWith('--state-dir=')) {
@@ -227,12 +233,12 @@ export function parseUninstallArgs(args: string[]): UninstallFlags {
   return flags;
 }
 
-/** Help marker for init/uninstall flags (kept local to avoid a commands.ts cycle). */
+/** Help marker for init/install/uninstall flags (kept local to avoid a commands.ts cycle). */
 function wantsHelpInit(args: string[]): boolean {
   return args.includes('--help') || args.includes('-h');
 }
 
-/** Thrown by `parseInitArgs`/`parseUninstallArgs` on `--help`/`-h`. */
+/** Thrown by `parseInitArgs`/`parseInstallArgs`/`parseUninstallArgs` on `--help`/`-h`. */
 export class HelpRequestedInitError extends Error {
   constructor() {
     super('help requested');
@@ -240,54 +246,18 @@ export class HelpRequestedInitError extends Error {
   }
 }
 
-/** Usage line for init/uninstall (composed with the CLI usage in commands.ts). */
+/** Usage line for init/install/uninstall (composed with the CLI usage in commands.ts). */
 export const CLI_USAGE_INSTALL =
-  'Usage: skillstate init [--host opencode|claude|codex] [--max-history <n>] [--no-mcp] [--no-skill] [--dry-run] | init --uninstall | uninstall [--state-dir <path>] [--remove-state] [--dry-run]';
-
-/** Resolve the MCP server command: the `@skillstate/mcp` bin via `node`, or the global `skillstate-mcp` bin. */
-export function resolveMcpCommandWith(resolve: (id: string) => string): { command: string; args: string[] } {
-  try {
-    const pkg = resolve('@skillstate/mcp/package.json');
-    return { command: 'node', args: [path.join(path.dirname(pkg), 'bin', 'mcp.js')] };
-  } catch {
-    return { command: 'skillstate-mcp', args: [] };
-  }
-}
-
-/** `resolveMcpCommandWith` bound to this module's require resolver. */
-export function resolveMcpCommand(): { command: string; args: string[] } {
-  return resolveMcpCommandWith((id) => createRequire(import.meta.url).resolve(id));
-}
+  'Usage: skillstate init [--spec <path>] [--dry-run] | install [--dry-run] | uninstall [--state-dir <path>] [--remove-state] [--machine] [--dry-run]';
 
 function backupPathFor(file: string): string {
   return `${file}.bak.${new Date().toISOString().replace(/[:.]/g, '-')}`;
 }
 
-/** Path of the OpenCode host config: existing `.jsonc`, else `.json`, else the canonical `.jsonc`. */
-function resolveOpencodeConfig(home: string): string {
-  const dir = path.join(home, '.config', 'opencode');
-  const jsonc = path.join(dir, 'opencode.jsonc');
-  if (fs.existsSync(jsonc)) {
-    return jsonc;
-  }
-  const json = path.join(dir, 'opencode.json');
-  return fs.existsSync(json) ? json : jsonc;
-}
-
-function skillDirFor(host: HostId, home: string): string {
-  if (host === 'opencode') {
-    return path.join(home, '.config', 'opencode', 'skills', 'skillstate');
-  }
-  if (host === 'claude') {
-    return path.join(home, '.claude', 'skills', 'skillstate');
-  }
-  return path.join(home, '.codex', 'skills', 'skillstate');
-}
-
 /**
- * Spec resolution for `init`: `--spec <path>` wins (validated), then
- * `--example ctf`, then the neutral domain-agnostic default. Never defaults
- * to a domain-specific example.
+ * Spec resolution for `init`: `--spec <path>` wins (validated), else the
+ * neutral domain-agnostic default. Never defaults to a domain-specific
+ * example.
  */
 export function resolveInitSpec(cwd: string, flags: InitFlags): ProceduralSpec {
   if (flags.specPath !== undefined) {
@@ -319,68 +289,90 @@ export function resolveInitSpec(cwd: string, flags: InitFlags): ProceduralSpec {
     }
     return parsed as ProceduralSpec;
   }
-  if (flags.example === 'ctf') {
-    return INTERCODE_CTF_SPEC;
-  }
   return GENERIC_PROCEDURE_SPEC;
 }
 
-/** SKILL.md with a short frontmatter description + the adapter-generated body. */
-export function buildSkillMd(statePathRel: string, spec: ProceduralSpec, host: HostId = 'opencode'): string {
-  const generated =
-    host === 'claude'
-      ? new ClaudeAdapter().generateSkillMd(spec, statePathRel)
-      : new OpenCodeAdapter().generateSkillMd(spec, statePathRel);
-  const body = generated.slice(generated.indexOf('\n---', 3) + '\n---\n'.length);
+/**
+ * Host-neutral SKILL.md: ONE file (`<cwd>/.claude/skills/skillstate/`)
+ * serves opencode AND claude (opencode reads project `.claude/skills/`
+ * too). The body names no host-specific hook/plugin events — the harness
+ * integration (npm plugin for opencode, hooks for claude) injects the
+ * current state into context every turn, and everything else goes through
+ * the host-agnostic skillstate MCP tools.
+ */
+export function buildSkillMd(spec: ProceduralSpec): string {
   return `---
 name: skillstate
 description: ${JSON.stringify(SKILL_DESCRIPTION)}
 ---
-${body}`;
+
+# ${spec.name}
+
+${spec.instructions}
+
+## Execution model (state-based)
+
+- The session state lives at \`./.skillstate/skillstate.json\`; the procedure
+  spec lives at \`./skill-spec.json\`.
+- The harness (plugin or hooks) injects the CURRENT state into your context
+  every turn. The injected state is authoritative — conversation history is
+  not. Never reconstruct execution context from the conversation.
+- One state file per session: the injected state and the skillstate MCP
+  tools address THE SAME file — never reconstruct or duplicate it.
+
+## Process
+
+1. Orient yourself: read the injected state, or call the skillstate MCP
+   tools \`state.summary\` (compact) / \`state.get\` (full dump).
+2. Observe the result of your last action and reason about the next step.
+3. Persist progress with the skillstate MCP tool \`state.patch\` (sparse
+   patch), and/or end your response with a fenced JSON block carrying
+   exactly two keys so the harness persists it:
+
+${STATE_PATCH_EXAMPLE_JSON}
+
+- ${STATE_PATCH_RULES}
+- \`action\` names what you will do next (e.g. "continue", "done").
+- Reasoning and history are discarded — put anything you need to survive
+  into \`state_patch\`.
+
+4. Risky or hard-to-undo step? Call \`state.checkpoint\` before it and
+   \`state.rollback\` after a failure to return to the checkpoint.
+5. When the procedure is done, call \`state.finalize\` with
+   \`{ "status": "completed" }\` (\`"failed"\` on failure).
+
+## Sub-agents
+
+Sub-agent sessions get isolated state copies under the state directory.
+List them with \`agent.list\`, read one with \`agent.read\`, and merge a
+finished sub-agent's results back with \`agent.merge\`.
+`;
 }
 
-/**
- * Skillstate MCP entry shaped like the host's existing local-server entries.
- * No environment is written — the server resolves the state from its own
- * cwd at startup (`<cwd>/.skillstate/skillstate.json`).
- */
+/** Skillstate MCP entry shaped like OpenCode's local-server entries (`npx @skillstate/mcp`). */
 export function buildMcpEntry(): Record<string, unknown> {
-  const cmd = resolveMcpCommand();
   return {
     type: 'local',
-    command: [cmd.command, ...cmd.args],
+    command: [MCP_NPX_COMMAND, ...MCP_NPX_ARGS],
     enabled: true,
   };
 }
 
-/**
- * Claude Code `.mcp.json` entry (2.1.260 wire format: `type: "stdio"`,
- * `command` is a string, args go to the separate `args` array). No
- * environment is written — the server resolves the per-project state from
- * its own cwd at startup.
- */
+/** Claude Code `.mcp.json` entry (stdio wire format, `npx @skillstate/mcp`). */
 export function buildClaudeMcpEntry(): Record<string, unknown> {
-  const cmd = resolveMcpCommand();
   return {
     type: 'stdio',
-    command: cmd.command,
-    args: cmd.args,
+    command: MCP_NPX_COMMAND,
+    args: [...MCP_NPX_ARGS],
   };
 }
 
-/**
- * `[mcp_servers.skillstate]` TOML block for `~/.codex/config.toml` (codex
- * 0.142 wire format: `command` is a string, args go to the separate `args`
- * array). The server resolves the per-project state from the session cwd,
- * so no `SKILLSTATE_STATE_PATH` is pinned.
- */
+/** `[mcp_servers.skillstate]` TOML block for `~/.codex/config.toml` (`npx @skillstate/mcp`). */
 export function buildCodexMcpToml(): string {
-  const cmd = resolveMcpCommand();
-  const args = cmd.args.map((part) => JSON.stringify(part)).join(', ');
   return [
     '[mcp_servers.skillstate]',
-    `command = ${JSON.stringify(cmd.command)}`,
-    `args = [${args}]`,
+    `command = ${JSON.stringify(MCP_NPX_COMMAND)}`,
+    `args = [${MCP_NPX_ARGS.map((part) => JSON.stringify(part)).join(', ')}]`,
     'enabled = true',
     '',
   ].join('\n');
@@ -434,178 +426,199 @@ export function removeSkillstateMcp(configText: string): { text: string; changed
   return removeObjectEntry(configText, mcp.valueStart, 'skillstate');
 }
 
+/**
+ * Splice `"@skillstate/opencode"` into the top-level `plugin` array of
+ * OpenCode config text (creating the key when missing). A non-array
+ * `plugin` key is left untouched and reported via `pluginSkipped`.
+ */
+function spliceOpencodePlugin(
+  text: string,
+): { text: string; changed: boolean; pluginSkipped: boolean } {
+  const root = findTopLevelObject(text);
+  if (root === null) {
+    return { text, changed: false, pluginSkipped: false };
+  }
+  const plugin = root.entries.find((e) => e.key === 'plugin');
+  if (plugin === undefined) {
+    const inserted = insertObjectEntry(
+      text,
+      root.braceStart,
+      'plugin',
+      JSON.stringify(['@skillstate/opencode']),
+    );
+    return { text: inserted.text, changed: inserted.changed, pluginSkipped: false };
+  }
+  if (text[plugin.valueStart] !== '[') {
+    return { text, changed: false, pluginSkipped: true };
+  }
+  const result = insertArrayStringEntry(text, plugin.valueStart, '@skillstate/opencode');
+  return { text: result.text, changed: result.changed, pluginSkipped: false };
+}
+
+/** Project-local OpenCode config: existing `.jsonc`, else `.json`, else the created `.json`. */
+function resolveProjectOpencodeConfig(cwd: string): { configPath: string; existed: boolean } {
+  const jsonc = path.join(cwd, 'opencode.jsonc');
+  if (fs.existsSync(jsonc)) {
+    return { configPath: jsonc, existed: true };
+  }
+  const json = path.join(cwd, 'opencode.json');
+  return { configPath: json, existed: fs.existsSync(json) };
+}
+
+/**
+ * Read a previous project manifest's `hosts` so a re-init MERGES instead of
+ * clobbering (multi-host accumulation). Corrupt/wrong-shape manifests are
+ * treated as absent.
+ */
+function previousProjectHosts(manifestAbs: string): InstallManifest['hosts'] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(manifestAbs, 'utf-8')) as unknown;
+    if (isRecord(parsed) && parsed['version'] === 2 && isRecord(parsed['hosts'])) {
+      return parsed['hosts'] as InstallManifest['hosts'];
+    }
+  } catch {
+    // Absent or corrupt → treated as absent.
+  }
+  return {};
+}
+
 /** Options for {@link autoInstall}. */
 export interface InstallOptions {
   cwd: string;
   home: string;
   flags: InitFlags;
-  /** Spec used for the SKILL.md body; defaults to the flags-driven choice. */
+  /** Programmatic host override (tests); defaults to `detectHosts(home)`. */
+  hosts?: HostId[];
+  /** Spec override; defaults to `resolveInitSpec(cwd, flags)`. */
   spec?: ProceduralSpec;
 }
 
 /**
- * Full one-shot install for the detected (or forced) host. Never throws for
+ * Full one-shot project wiring for EVERY detected host. Never throws for
  * expected conditions; returns a process exit code (0 ok, 1 no host).
  */
 export async function autoInstall(options: InstallOptions): Promise<number> {
   const { cwd, home, flags } = options;
-  if (isInsideTemp(cwd)) {
-    console.warn('[skillstate] installing from a temp directory — is this intended?');
-  }
-  const host = flags.host ?? detectHost(home);
-  if (host === null) {
+  const hosts = options.hosts ?? detectHosts(home);
+  if (hosts.length === 0) {
     console.error(
-      'No supported host detected (~/.config/opencode, ~/.claude, ~/.codex). Install one or pass --host.',
+      'No supported host detected (~/.config/opencode, ~/.claude, ~/.codex). Install one, then re-run `skillstate init`.',
     );
     return 1;
+  }
+  if (isInsideTemp(cwd)) {
+    console.warn('[skillstate] installing from a temp directory — is this intended?');
   }
   const dry = flags.dryRun;
   const say = (line: string): void => {
     console.log(dry ? `[dry-run] ${line}` : line);
   };
-  const maxHistory = flags.maxHistory ?? 3;
   const spec = options.spec ?? resolveInitSpec(cwd, flags);
 
+  // Project state envelope (the glue resolves the state from its own cwd).
   const stateDir = path.join(cwd, STATE_DIR_NAME);
   const stateAbs = path.join(stateDir, 'skillstate.json');
-  const stateCreated = !dry && !fs.existsSync(stateAbs);
-  if (!dry) {
-    fs.mkdirSync(path.dirname(stateAbs), { recursive: true });
-    if (stateCreated) {
-      await atomicWriteFile(stateAbs, `${JSON.stringify({ version: 1, state: {} }, null, 2)}\n`);
-    }
+  const stateCreated = !fs.existsSync(stateAbs);
+  if (!dry && stateCreated) {
+    await atomicWriteFile(stateAbs, `${JSON.stringify({ version: 1, state: {} }, null, 2)}\n`);
   }
-  say(`host:     ${host}${flags.host === undefined ? ' (detected)' : ''}`);
   say(`state:    ${stateAbs}${stateCreated ? ' (created)' : ''}`);
 
-  // Preserve fields recorded by a previous install (idempotent re-init must
-  // not lose e.g. the mcp record when the entry is already registered).
-  let previous: Partial<InstallManifest> = {};
-  const previousManifestPath = path.join(stateDir, MANIFEST_FILE_NAME);
-  if (fs.existsSync(previousManifestPath)) {
-    try {
-      previous = JSON.parse(fs.readFileSync(previousManifestPath, 'utf-8')) as Partial<InstallManifest>;
-    } catch {
-      previous = {};
+  // Procedure spec written into the project so the whole team shares it.
+  const specAbs = path.join(cwd, 'skill-spec.json');
+  if (fs.existsSync(specAbs)) {
+    say('skill-spec.json already exists');
+  } else {
+    if (!dry) {
+      await atomicWriteFile(specAbs, `${JSON.stringify(spec, null, 2)}\n`);
     }
+    say(`Created skill-spec.json (${spec.id})`);
   }
+
+  say(`host(s):  ${hosts.join(', ')}`);
+
+  // Preserve host records from a previous install (multi-host accumulation).
+  const manifestAbs = path.join(stateDir, MANIFEST_FILE_NAME);
   const manifest: InstallManifest = {
-    version: 1,
-    host,
+    version: 2,
     installedAt: new Date().toISOString(),
     statePath: stateAbs,
-    maxHistoryMessages: maxHistory,
-    ...(previous.mcp !== undefined ? { mcp: previous.mcp } : {}),
-    ...(previous.hooks !== undefined ? { hooks: previous.hooks } : {}),
+    hosts: { ...previousProjectHosts(manifestAbs) },
   };
 
-  if (host === 'opencode') {
-    const pluginAbs = path.join(home, '.config', 'opencode', 'plugins', 'skillstate.ts');
+  // ONE host-neutral skill file serves opencode AND claude.
+  if (hosts.includes('opencode') || hosts.includes('claude')) {
+    const skillAbs = path.join(cwd, '.claude', 'skills', 'skillstate', 'SKILL.md');
     if (!dry) {
-      // Thin loader: imports the static plugin from @skillstate/opencode
-      // (single source of truth); the plugin itself resolves the state from
-      // the host session's cwd on every hook call.
-      const adapter = new OpenCodeAdapter();
-      await adapter.savePluginCode(pluginAbs, { maxHistoryMessages: maxHistory });
+      await atomicWriteFile(skillAbs, buildSkillMd(spec));
     }
-    say(`plugin:   ${pluginAbs} (auto-loaded from plugins/)`);
-    manifest.pluginPath = pluginAbs;
+    say(`skill:    ${skillAbs}`);
+    manifest.skillPath = skillAbs;
   }
 
-  if (host === 'codex') {
-    const hooksDir = path.join(home, '.codex', 'hooks', 'skillstate');
-    const hooksConfigPath = path.join(home, '.codex', 'hooks.json');
-    const codex = new CodexAdapter();
-    if (!dry) {
-      for (const event of CODEX_HOOK_EVENTS) {
-        await codex.saveHookScript(event, codex.codexHookScriptPath(hooksDir, event));
-      }
-      // Merge the skillstate hook groups into the user hooks.json (backup first).
-      let existing = '{\n  "hooks": {}\n}\n';
-      if (fs.existsSync(hooksConfigPath)) {
-        const backup = backupPathFor(hooksConfigPath);
-        await atomicWriteFile(backup, fs.readFileSync(hooksConfigPath, 'utf-8'));
-        existing = fs.readFileSync(hooksConfigPath, 'utf-8');
-        manifest.hooksBackup = backup;
-      }
-      await atomicWriteFile(
-        hooksConfigPath,
-        codex.mergeHooksConfig(existing, { maxHistoryMessages: maxHistory, scriptDir: hooksDir }),
-      );
+  if (hosts.includes('opencode')) {
+    const { configPath, existed } = resolveProjectOpencodeConfig(cwd);
+    const text = existed ? fs.readFileSync(configPath, 'utf-8') : '{\n}\n';
+    const pluginResult = spliceOpencodePlugin(text);
+    let next = pluginResult.text;
+    let changed = pluginResult.changed;
+    if (pluginResult.pluginSkipped) {
+      say(`opencode: plugin key in ${configPath} is not an array — skipped plugin registration`);
     }
-    say(`hooks:    ${hooksConfigPath} + ${hooksDir}/ (*.cjs)`);
-    manifest.pluginPath = hooksConfigPath;
+    const mcpResult = addSkillstateMcp(next, buildMcpEntry());
+    if (mcpResult.changed) {
+      next = mcpResult.text;
+      changed = true;
+    }
+    if (changed) {
+      if (existed) {
+        const backup = backupPathFor(configPath);
+        if (!dry) {
+          await atomicWriteFile(backup, text);
+        }
+        say(`backup:   ${backup}`);
+      }
+      if (!dry) {
+        await atomicWriteFile(configPath, next);
+      }
+    }
+    say(`opencode: ${configPath} (${changed ? 'plugin + mcp registered' : 'already registered'})`);
+    manifest.hosts['opencode'] = { mcp: { configPath, format: 'opencode-json' } };
   }
 
-  if (host === 'claude') {
-    const hooksDir = path.join(home, '.claude', 'hooks', 'skillstate');
-    const settingsPath = path.join(home, '.claude', 'settings.json');
+  if (hosts.includes('claude')) {
+    const hooksDir = path.join(cwd, '.claude', 'hooks', 'skillstate');
+    const settingsPath = path.join(cwd, '.claude', 'settings.json');
     const claude = new ClaudeAdapter();
     if (!dry) {
-      // Self-contained .cjs scripts — one global script dir serves every
-      // project (each script resolves the state from the session cwd).
+      // Self-contained .cjs scripts — project-local, inert without state.
       for (const event of CLAUDE_HOOK_EVENTS) {
         await claude.saveHookScript(event, claude.claudeHookScriptPath(hooksDir, event));
       }
-      // Merge the skillstate hook groups into the user settings.json.
-      // A backup is written only when the merge actually changes the file,
-      // so re-init stays byte-idempotent and never spams backups.
+      // Merge the skillstate hook groups into the project settings.json with
+      // $CLAUDE_PROJECT_DIR-anchored commands. A backup is written only when
+      // the merge actually changes the file, so re-init stays byte-idempotent.
       let existing = '{\n  "hooks": {}\n}\n';
       const hadSettings = fs.existsSync(settingsPath);
       if (hadSettings) {
         existing = fs.readFileSync(settingsPath, 'utf-8');
       }
-      const merged = claude.mergeHooksConfig(existing, { scriptDir: hooksDir });
+      const merged = claude.mergeHooksConfig(existing, {
+        scriptDir: hooksDir,
+        commandFor: (event) =>
+          `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/${event}.cjs" ${event}`,
+      });
       if (merged !== existing) {
         if (hadSettings) {
           const backup = backupPathFor(settingsPath);
           await atomicWriteFile(backup, existing);
-          manifest.hooksBackup = backup;
+          say(`backup:   ${backup}`);
         }
         await atomicWriteFile(settingsPath, merged);
       }
     }
     say(`hooks:    ${settingsPath} + ${hooksDir}/ (*.cjs)`);
-    manifest.hooks = { configPath: settingsPath, scriptDir: hooksDir };
-  }
 
-  if (!flags.noSkill) {
-    const skillAbs = path.join(skillDirFor(host, home), 'SKILL.md');
-    if (!dry) {
-      // The state file always lives inside cwd, so the SKILL.md reference is
-      // always relative.
-      await atomicWriteFile(skillAbs, buildSkillMd('./.skillstate/skillstate.json', spec, host));
-    }
-    say(`skill:    ${skillAbs}`);
-    manifest.skillPath = skillAbs;
-  } else {
-    say('skill:    skipped (--no-skill)');
-  }
-
-  if (flags.noMcp) {
-    say('mcp:      skipped (--no-mcp)');
-  } else if (host === 'opencode') {
-    const configPath = resolveOpencodeConfig(home);
-    let text: string;
-    try {
-      text = fs.readFileSync(configPath, 'utf-8');
-    } catch {
-      text = '{\n}\n';
-    }
-    const result = addSkillstateMcp(text, buildMcpEntry());
-    if (result.changed) {
-      const backup = backupPathFor(configPath);
-      if (!dry) {
-        await atomicWriteFile(backup, text);
-        await atomicWriteFile(configPath, result.text);
-      }
-      say(`mcp:      ${configPath} (skillstate server added)`);
-      say(`mcp backup: ${backup}`);
-      manifest.mcp = { configPath, format: 'opencode-jsonc' };
-    } else {
-      say(`mcp:      ${configPath} (skillstate already registered)`);
-    }
-  } else if (host === 'claude') {
     const mcpJson = path.join(cwd, '.mcp.json');
     let doc: { mcpServers?: Record<string, unknown> } = {};
     if (fs.existsSync(mcpJson)) {
@@ -628,60 +641,305 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
         );
       }
       say(`mcp:      ${mcpJson} (skillstate server added)`);
-      manifest.mcp = { configPath: mcpJson, format: 'claude-mcp-json' };
     } else {
       say(`mcp:      ${mcpJson} (skillstate already registered)`);
     }
-  } else {
-    // Codex: [mcp_servers.skillstate] in ~/.codex/config.toml (idempotent).
-    const configToml = path.join(home, '.codex', 'config.toml');
-    let toml = '';
-    if (fs.existsSync(configToml)) {
-      const backup = backupPathFor(configToml);
-      await atomicWriteFile(backup, fs.readFileSync(configToml, 'utf-8'));
-      toml = fs.readFileSync(configToml, 'utf-8');
-      manifest.hooksBackup = backup;
-    }
-    const serverBlock = buildCodexMcpToml();
-    if (toml.includes('[mcp_servers.skillstate]')) {
-      say(`mcp:      ${configToml} (skillstate already registered)`);
-    } else {
-      const next = `${toml.replace(/\s*$/, '')}\n\n${serverBlock}`;
-      if (!dry) {
-        await atomicWriteFile(configToml, next);
-      }
-      say(`mcp:      ${configToml} ([mcp_servers.skillstate] added)`);
-      manifest.mcp = { configPath: configToml, format: 'codex-toml' };
-    }
+    manifest.hosts['claude'] = {
+      hooks: { configPath: settingsPath, scriptDir: hooksDir },
+      mcp: { configPath: mcpJson, format: 'claude-mcp-json' },
+    };
   }
 
-  const manifestAbs = path.join(stateDir, MANIFEST_FILE_NAME);
+  if (hosts.includes('codex')) {
+    // Codex has no project config support — the glue is machine-level.
+    say('codex:    machine-level glue — run `skillstate install` once (project state is picked up automatically)');
+  }
+
   if (!dry) {
     await atomicWriteFile(manifestAbs, `${JSON.stringify(manifest, null, 2)}\n`);
   }
   say(`manifest: ${manifestAbs}`);
-  say(dry ? 'dry run complete — nothing was written.' : 'Done. Next: `skillstate run` in this project, then open your host.');
+  say(
+    dry
+      ? 'dry run complete — nothing was written.'
+      : `Done. Wired for: ${hosts.join(', ')}. Open your harness in this project — skill, hooks, and MCP are project-local.`,
+  );
+  return 0;
+}
+
+/**
+ * Options for {@link installMachine}: wire the machine-level codex glue
+ * under `home`.
+ */
+export interface MachineInstallOptions {
+  home: string;
+  flags: InstallFlags;
+}
+
+/**
+ * Machine-level install (`skillstate install`): codex ONLY. Writes the
+ * self-contained `.cjs` hook scripts into `~/.codex/hooks/skillstate/`,
+ * merges the skillstate hook groups into `~/.codex/hooks.json`, and appends
+ * the `[mcp_servers.skillstate]` table to `~/.codex/config.toml`. Every
+ * script resolves the per-project state from the session cwd, so one
+ * machine install serves every project. Idempotent (re-merging hooks is a
+ * no-op; the TOML table is appended only when absent). opencode/claude glue
+ * is project-local and belongs to `skillstate init`. Returns a process exit
+ * code (always 0).
+ */
+export async function installMachine(options: MachineInstallOptions): Promise<number> {
+  const { home, flags } = options;
+  const dry = flags.dryRun;
+  const say = (line: string): void => {
+    console.log(dry ? `[dry-run] ${line}` : line);
+  };
+  const hooksDir = path.join(home, '.codex', 'hooks', 'skillstate');
+  const hooksConfigPath = path.join(home, '.codex', 'hooks.json');
+  const configToml = path.join(home, '.codex', 'config.toml');
+  const codex = new CodexAdapter();
+
+  if (!dry) {
+    for (const event of CODEX_HOOK_EVENTS) {
+      await codex.saveHookScript(event, codex.codexHookScriptPath(hooksDir, event));
+    }
+    // Merge the skillstate hook groups into the user hooks.json (backup first).
+    let existing = '{\n  "hooks": {}\n}\n';
+    if (fs.existsSync(hooksConfigPath)) {
+      const backup = backupPathFor(hooksConfigPath);
+      await atomicWriteFile(backup, fs.readFileSync(hooksConfigPath, 'utf-8'));
+      existing = fs.readFileSync(hooksConfigPath, 'utf-8');
+    }
+    await atomicWriteFile(
+      hooksConfigPath,
+      codex.mergeHooksConfig(existing, { scriptDir: hooksDir }),
+    );
+  }
+  say(`hooks:    ${hooksConfigPath} + ${hooksDir}/ (*.cjs)`);
+
+  // [mcp_servers.skillstate] appended only when the table is absent.
+  let toml = '';
+  if (fs.existsSync(configToml)) {
+    toml = fs.readFileSync(configToml, 'utf-8');
+  }
+  if (toml.includes('[mcp_servers.skillstate]')) {
+    say(`mcp:      ${configToml} (skillstate already registered)`);
+  } else {
+    const next = `${toml.replace(/\s*$/, '')}\n\n${buildCodexMcpToml()}`;
+    if (!dry) {
+      if (fs.existsSync(configToml)) {
+        const backup = backupPathFor(configToml);
+        await atomicWriteFile(backup, toml);
+      }
+      await atomicWriteFile(configToml, next);
+    }
+    say(`mcp:      ${configToml} ([mcp_servers.skillstate] added)`);
+  }
+
+  say('opencode/claude: nothing to install machine-wide — glue is project-local (`skillstate init`).');
+
+  // Machine manifest under <home>/.skillstate (idempotent: re-run updates it).
+  const manifestPath = path.join(home, '.skillstate', MANIFEST_FILE_NAME);
+  const machineManifest: MachineInstallManifest = {
+    version: 1,
+    installedAt: new Date().toISOString(),
+    codex: { hooksConfigPath, scriptDir: hooksDir, tomlConfigPath: configToml },
+  };
+  if (!dry) {
+    await atomicWriteFile(manifestPath, `${JSON.stringify(machineManifest, null, 2)}\n`);
+  }
+  say(`manifest: ${manifestPath}`);
+  say(
+    dry
+      ? 'dry run complete — nothing was written.'
+      : 'Done. Codex glue installed (~/.codex). Project wiring: run `skillstate init` in your project.',
+  );
   return 0;
 }
 
 /** Options for {@link uninstall}. */
 export interface UninstallOptions {
   cwd: string;
+  home: string;
   flags: UninstallFlags;
 }
 
 /**
- * Roll back exactly what an install recorded in the manifest: plugin file,
- * SKILL.md, `mcp.skillstate` entry (with a config backup), and optionally
- * the whole state directory. Returns a process exit code (0 ok, 1 no/manifest
- * unreadable).
+ * Machine-level rollback (`uninstall --machine`): read the machine manifest
+ * under `home`, remove the skillstate hook groups from `~/.codex/hooks.json`
+ * (surgically — foreign hooks survive), delete the generated script dir,
+ * drop the `[mcp_servers.skillstate]` TOML table, and delete the manifest.
+ * Returns a process exit code (0 ok, 1 missing/corrupt manifest).
+ */
+async function uninstallMachine(home: string, dry: boolean, say: (line: string) => void): Promise<number> {
+  const manifestPath = path.join(home, '.skillstate', MANIFEST_FILE_NAME);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(manifestPath, 'utf-8');
+  } catch {
+    console.error(`No machine install manifest at ${manifestPath} — nothing to uninstall.`);
+    return 1;
+  }
+  let manifest: MachineInstallManifest | null = null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      isRecord(parsed) &&
+      parsed['version'] === 1 &&
+      isRecord(parsed['codex']) &&
+      typeof (parsed['codex'] as Record<string, unknown>)['hooksConfigPath'] === 'string' &&
+      typeof (parsed['codex'] as Record<string, unknown>)['scriptDir'] === 'string' &&
+      typeof (parsed['codex'] as Record<string, unknown>)['tomlConfigPath'] === 'string'
+    ) {
+      manifest = parsed as unknown as MachineInstallManifest;
+    }
+  } catch {
+    manifest = null;
+  }
+  if (manifest === null) {
+    console.error(`Corrupt machine install manifest at ${manifestPath}`);
+    return 1;
+  }
+  const codex = manifest.codex;
+
+  // Hooks: hooks.json is LIVE (foreign hooks must survive), so skillstate
+  // groups are removed surgically instead of restoring a backup.
+  if (fs.existsSync(codex.hooksConfigPath)) {
+    let text = '';
+    try {
+      text = fs.readFileSync(codex.hooksConfigPath, 'utf-8');
+    } catch {
+      text = '';
+    }
+    const result = text ? removeSkillstateHookGroups(text) : { text: '', changed: false };
+    if (result.changed) {
+      const backup = backupPathFor(codex.hooksConfigPath);
+      if (!dry) {
+        await atomicWriteFile(backup, text);
+        await atomicWriteFile(codex.hooksConfigPath, result.text);
+      }
+      say(`removed hooks: ${codex.hooksConfigPath} (backup: ${backup})`);
+    }
+  }
+  if (fs.existsSync(codex.scriptDir)) {
+    if (!dry) {
+      fs.rmSync(codex.scriptDir, { recursive: true, force: true });
+    }
+    say(`removed hook scripts: ${codex.scriptDir}`);
+  }
+
+  // TOML: drop the [mcp_servers.skillstate] table.
+  if (fs.existsSync(codex.tomlConfigPath)) {
+    let toml = '';
+    try {
+      toml = fs.readFileSync(codex.tomlConfigPath, 'utf-8');
+    } catch {
+      toml = '';
+    }
+    const match = toml.match(/\n?\[mcp_servers\.skillstate\][^[]*/);
+    if (match !== null) {
+      const backup = backupPathFor(codex.tomlConfigPath);
+      if (!dry) {
+        await atomicWriteFile(backup, toml);
+        await atomicWriteFile(codex.tomlConfigPath, toml.replace(match[0], '\n'));
+      }
+      say(`removed mcp entry: ${codex.tomlConfigPath} (backup: ${backup})`);
+    }
+  }
+
+  if (!dry) {
+    fs.rmSync(manifestPath, { force: true });
+  }
+  say(`removed manifest: ${manifestPath}`);
+  say('Machine glue removed.');
+  return 0;
+}
+
+/**
+ * Splice the `"@skillstate/opencode"` string out of the project OpenCode
+ * config's `plugin` array (leaving the rest of the JSONC intact). Returns
+ * the spliced text and whether anything changed.
+ */
+function spliceOutOpencodePlugin(text: string): { text: string; changed: boolean } {
+  const root = findTopLevelObject(text);
+  if (root === null) {
+    return { text, changed: false };
+  }
+  const plugin = root.entries.find((e) => e.key === 'plugin');
+  if (plugin === undefined || text[plugin.valueStart] !== '[') {
+    return { text, changed: false };
+  }
+  return removeArrayStringEntry(text, plugin.valueStart, '@skillstate/opencode');
+}
+
+/**
+ * Drop the top-level `mcp`/`plugin` entries when their containers became
+ * empty after the skillstate splice-out — an init-created config (nothing
+ * but skillstate glue) reduces to `{}` so the uninstall path can delete the
+ * file. Pre-existing empty containers are dropped as well.
+ */
+function dropEmptyOpencodeEntries(text: string): string {
+  let next = text;
+  for (const key of ['mcp', 'plugin'] as const) {
+    const root = findTopLevelObject(next);
+    const entry = root?.entries.find((e) => e.key === key);
+    if (entry === undefined) {
+      continue;
+    }
+    const open = next[entry.valueStart];
+    const emptyObject = open === '{' && scanObject(next, entry.valueStart).entries.length === 0;
+    const emptyArray = open === '[' && scanArray(next, entry.valueStart).elements.length === 0;
+    if (emptyObject || emptyArray) {
+      next = removeObjectEntry(next, root!.braceStart, key).text;
+    }
+  }
+  return next;
+}
+
+/** True when a manifest `hosts` record carries well-shaped host entries. */
+function isValidHosts(hosts: unknown): hosts is InstallManifest['hosts'] {
+  if (!isRecord(hosts)) {
+    return false;
+  }
+  const opencode = hosts['opencode'];
+  if (opencode !== undefined) {
+    const mcp = isRecord(opencode) ? opencode['mcp'] : undefined;
+    if (!isRecord(mcp) || typeof mcp['configPath'] !== 'string') {
+      return false;
+    }
+  }
+  const claude = hosts['claude'];
+  if (claude !== undefined) {
+    const hooks = isRecord(claude) ? claude['hooks'] : undefined;
+    const mcp = isRecord(claude) ? claude['mcp'] : undefined;
+    if (
+      !isRecord(hooks) ||
+      typeof hooks['configPath'] !== 'string' ||
+      typeof hooks['scriptDir'] !== 'string' ||
+      !isRecord(mcp) ||
+      typeof mcp['configPath'] !== 'string'
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Roll back exactly what an install recorded in the manifest: project glue
+ * per host record (opencode config splices, claude hooks + scripts + mcp,
+ * the shared SKILL.md), and optionally the whole state directory. With
+ * `--machine`, rolls the machine-level codex glue back instead. Returns a
+ * process exit code (0 ok, 1 no/corrupt manifest).
  */
 export async function uninstall(options: UninstallOptions): Promise<number> {
-  const { cwd, flags } = options;
+  const { cwd, home, flags } = options;
   const dry = flags.dryRun;
   const say = (line: string): void => {
     console.log(dry ? `[dry-run] ${line}` : line);
   };
+  if (flags.machine) {
+    return uninstallMachine(home, dry, say);
+  }
   const stateDir = flags.stateDir !== undefined ? resolveInCwd(cwd, flags.stateDir) : path.join(cwd, STATE_DIR_NAME);
   const manifestAbs = path.join(stateDir, MANIFEST_FILE_NAME);
   let raw: string;
@@ -691,110 +949,124 @@ export async function uninstall(options: UninstallOptions): Promise<number> {
     console.error(`No install manifest at ${manifestAbs} — nothing to uninstall.`);
     return 1;
   }
-  let manifest: unknown;
+  let manifest: InstallManifest | null = null;
   try {
-    manifest = JSON.parse(raw) as unknown;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      isRecord(parsed) &&
+      parsed['version'] === 2 &&
+      typeof parsed['statePath'] === 'string' &&
+      (parsed['skillPath'] === undefined || typeof parsed['skillPath'] === 'string') &&
+      isValidHosts(parsed['hosts'])
+    ) {
+      manifest = parsed as unknown as InstallManifest;
+    }
   } catch {
+    manifest = null;
+  }
+  if (manifest === null) {
     console.error(`Corrupt install manifest at ${manifestAbs}`);
     return 1;
   }
-  if (
-    !isRecord(manifest) ||
-    manifest['version'] !== 1 ||
-    typeof manifest['host'] !== 'string' ||
-    typeof manifest['statePath'] !== 'string'
-  ) {
-    console.error(`Corrupt install manifest at ${manifestAbs}`);
-    return 1;
-  }
-  const m = manifest as unknown as InstallManifest;
-  say(`uninstall (${m.host})`);
+  say('uninstall (project)');
 
-  // Claude hooks: settings.json is LIVE (env/permissions/model/etc must
-  // survive), so skillstate hook groups are removed surgically instead of
-  // restoring a backup; the generated `.cjs` script dir is deleted.
-  if (m.hooks !== undefined) {
-    if (fs.existsSync(m.hooks.configPath)) {
+  // Shared host-neutral skill.
+  if (manifest.skillPath !== undefined && fs.existsSync(manifest.skillPath)) {
+    if (!dry) {
+      fs.rmSync(path.dirname(manifest.skillPath), { recursive: true, force: true });
+    }
+    say(`removed skill: ${manifest.skillPath}`);
+  }
+
+  const hosts = manifest.hosts;
+
+  // opencode: mcp entry + plugin string spliced out of the project config.
+  const opencode = hosts['opencode'];
+  if (opencode !== undefined && fs.existsSync(opencode.mcp.configPath)) {
+    const configPath = opencode.mcp.configPath;
+    let text: string;
+    try {
+      text = fs.readFileSync(configPath, 'utf-8');
+    } catch {
+      text = '';
+    }
+    const mcpResult = removeSkillstateMcp(text);
+    const pluginResult = spliceOutOpencodePlugin(mcpResult.text);
+    if (mcpResult.changed || pluginResult.changed) {
+      const next = dropEmptyOpencodeEntries(pluginResult.text);
+      const backup = backupPathFor(configPath);
+      if (!dry) {
+        await atomicWriteFile(backup, text);
+        let parsed: unknown = null;
+        try {
+          parsed = parseJsonc(next);
+        } catch {
+          parsed = null;
+        }
+        if (isRecord(parsed) && Object.keys(parsed).length === 0) {
+          // The config only carried skillstate glue — remove the file.
+          fs.rmSync(configPath, { force: true });
+          say(`removed opencode config: ${configPath} (backup: ${backup})`);
+        } else {
+          await atomicWriteFile(configPath, next);
+          say(`removed mcp entry: ${configPath} (backup: ${backup})`);
+        }
+      }
+    }
+  }
+
+  // claude: hook groups out of settings.json, scripts dir, .mcp.json entry.
+  const claude = hosts['claude'];
+  if (claude !== undefined) {
+    if (fs.existsSync(claude.hooks.configPath)) {
       let text: string;
       try {
-        text = fs.readFileSync(m.hooks.configPath, 'utf-8');
+        text = fs.readFileSync(claude.hooks.configPath, 'utf-8');
       } catch {
         text = '';
       }
       const result = text ? removeSkillstateHookGroups(text) : { text: '', changed: false };
       if (result.changed) {
-        const backup = backupPathFor(m.hooks.configPath);
+        const backup = backupPathFor(claude.hooks.configPath);
         if (!dry) {
           await atomicWriteFile(backup, text);
-          await atomicWriteFile(m.hooks.configPath, result.text);
+          await atomicWriteFile(claude.hooks.configPath, result.text);
         }
-        say(`removed hooks: ${m.hooks.configPath} (backup: ${backup})`);
+        say(`removed hooks: ${claude.hooks.configPath} (backup: ${backup})`);
       }
     }
-    if (fs.existsSync(m.hooks.scriptDir)) {
+    if (fs.existsSync(claude.hooks.scriptDir)) {
       if (!dry) {
-        fs.rmSync(m.hooks.scriptDir, { recursive: true, force: true });
+        fs.rmSync(claude.hooks.scriptDir, { recursive: true, force: true });
       }
-      say(`removed hook scripts: ${m.hooks.scriptDir}`);
+      say(`removed hook scripts: ${claude.hooks.scriptDir}`);
     }
-  }
-
-  if (m.pluginPath !== undefined && fs.existsSync(m.pluginPath)) {
-    if (!dry) {
-      fs.rmSync(m.pluginPath);
-    }
-    say(`removed plugin: ${m.pluginPath}`);
-  }
-  if (m.skillPath !== undefined && fs.existsSync(m.skillPath)) {
-    if (!dry) {
-      fs.rmSync(m.skillPath);
-    }
-    say(`removed skill: ${m.skillPath}`);
-  }
-  if (m.mcp !== undefined && fs.existsSync(m.mcp.configPath)) {
-    const configPath = m.mcp.configPath;
-    if (m.mcp.format === 'claude-mcp-json') {
+    if (fs.existsSync(claude.mcp.configPath)) {
+      const mcpPath = claude.mcp.configPath;
       try {
-        const doc = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        const doc = JSON.parse(fs.readFileSync(mcpPath, 'utf-8')) as {
           mcpServers?: Record<string, unknown>;
         };
         if (isRecord(doc.mcpServers) && doc.mcpServers['skillstate'] !== undefined) {
           const { ['skillstate']: _removed, ...rest } = doc.mcpServers;
-          const backup = backupPathFor(configPath);
+          const backup = backupPathFor(mcpPath);
           if (!dry) {
-            await atomicWriteFile(backup, fs.readFileSync(configPath, 'utf-8'));
-            await atomicWriteFile(configPath, `${JSON.stringify({ mcpServers: rest }, null, 2)}\n`);
+            await atomicWriteFile(backup, fs.readFileSync(mcpPath, 'utf-8'));
+            if (Object.keys(rest).length === 0) {
+              // The file only carried the skillstate entry — delete it.
+              fs.rmSync(mcpPath, { force: true });
+            } else {
+              await atomicWriteFile(mcpPath, `${JSON.stringify({ mcpServers: rest }, null, 2)}\n`);
+            }
           }
-          say(`removed mcp entry: ${configPath} (backup: ${backup})`);
+          say(`removed mcp entry: ${mcpPath} (backup: ${backup})`);
         }
       } catch {
-        console.error(`Skipping mcp: ${configPath} is unreadable`);
-      }
-    } else if (m.mcp.format === 'codex-toml') {
-      // Drop the [mcp_servers.skillstate] TOML table.
-      const text = fs.readFileSync(configPath, 'utf-8');
-      const match = text.match(/\n?\[mcp_servers\.skillstate\][^[]*/);
-      if (match !== null) {
-        const backup = backupPathFor(configPath);
-        if (!dry) {
-          await atomicWriteFile(backup, text);
-          await atomicWriteFile(configPath, text.replace(match[0], '\n'));
-        }
-        say(`removed mcp entry: ${configPath} (backup: ${backup})`);
-      }
-    } else {
-      const text = fs.readFileSync(configPath, 'utf-8');
-      const result = removeSkillstateMcp(text);
-      if (result.changed) {
-        const backup = backupPathFor(configPath);
-        if (!dry) {
-          await atomicWriteFile(backup, text);
-          await atomicWriteFile(configPath, result.text);
-        }
-        say(`removed mcp entry: ${configPath} (backup: ${backup})`);
+        console.error(`Skipping mcp: ${mcpPath} is unreadable`);
       }
     }
   }
+
   if (dry) {
     say('dry run complete — nothing was written.');
     return 0;

@@ -34,6 +34,15 @@
  * state from `input.cwd` at runtime — one global `settings.json` hooks
  * section + one script directory serve every project.
  *
+ * PROJECT-LOCAL / INERT WITHOUT STATE: the scripts are INERT when the
+ * session cwd has no skillstate state file — inject hooks emit `{}` (no
+ * `hookSpecificOutput`, nothing added to context) and `post-tool-use`
+ * writes nothing (hooks NEVER create state files). A fresh clone behaves
+ * like a vanilla Claude Code install. The CLI install is project-local:
+ * project `.claude/settings.json` hooks whose commands are passed
+ * per-event via {@link ClaudeHooksConfigOptions.commandFor} (typically
+ * `$CLAUDE_PROJECT_DIR`-anchored).
+ *
  * @non-paper — no adapters exist in arXiv 2608.26263v3.
  */
 import * as path from 'node:path';
@@ -55,7 +64,6 @@ import {
   resolveHostStateForCwd,
   resolveTarget,
   saveGenerated,
-  skillMdBody,
   STATE_PATCH_CONTRACT,
 } from '@skillstate/core';
 import type { StatePathRef } from '@skillstate/core';
@@ -98,6 +106,14 @@ export interface ClaudeHooksConfigOptions {
   scriptDir?: string;
   /** Full command override for every event (defaults to `node <script> <event>`). */
   command?: string;
+  /**
+   * Per-event command override — takes precedence over {@link command}.
+   * The CLI passes e.g. `(event) => \`node "$CLAUDE_PROJECT_DIR"/...\`` to
+   * make the hook commands PROJECT-LOCAL. When it returns a command for
+   * `event`, that exact string is written; events not covered fall back to
+   * {@link command} / the default form.
+   */
+  commandFor?: (event: ClaudeHookEvent) => string;
   /** Hook `timeout` in seconds (default {@link CLAUDE_HOOK_TIMEOUT_SECONDS}). */
   timeoutSeconds?: number;
 }
@@ -165,7 +181,26 @@ ${STATE_PATCH_CONTRACT}`;
   }
 
   /**
-   * Generate the hooks section for `~/.claude/settings.json` (2.1.260
+   * Resolve the settings.json command for `event` — the shared precedence
+   * used by BOTH {@link generateHooksConfig} and {@link mergeHooksConfig}
+   * (so the `commandsOf` idempotency set always matches what was written):
+   * `options.commandFor(event)` → `options.command` → the default
+   * `node "<script>" <event>` form. The `commandFor` hook is how the CLI
+   * installs PROJECT-LOCAL commands (e.g. a `$CLAUDE_PROJECT_DIR`-anchored
+   * per-event template).
+   */
+  private commandOf(
+    scriptDir: string,
+    options?: ClaudeHooksConfigOptions,
+  ): (event: ClaudeHookEvent) => string {
+    return (event) =>
+      options?.commandFor?.(event) ??
+      options?.command ??
+      `node ${JSON.stringify(this.claudeHookScriptPath(scriptDir, event))} ${event}`;
+  }
+
+  /**
+   * Generate the hooks section for the (project) `settings.json` (2.1.260
    * schema: `{ hooks: { Event: [ { matcher?, hooks: [ { type: "command",
    * command, timeout } ] } ] } }`). The document carries ONLY the
    * `hooks` key — {@link mergeHooksConfig} is what splices these groups
@@ -176,11 +211,13 @@ ${STATE_PATCH_CONTRACT}`;
    * - `PostToolUse` (matcher `^Bash$`) → persist `state_patch` blocks from
    *   Bash tool outputs.
    *
-   * Commands are absolute `node <script> <event>` lines pointing at the
-   * generated `.cjs` scripts in `options.scriptDir` (default: the state
-   * file's directory, else a `<stateDir>/hooks` placeholder). No matcher
-   * on UserPromptSubmit — the event has no matcher support and fires on
-   * every prompt.
+   * Commands default to absolute `node <script> <event>` lines pointing at
+   * the generated `.cjs` scripts in `options.scriptDir` (default: the state
+   * file's directory, else a `<stateDir>/hooks` placeholder). A per-event
+   * `options.commandFor` override wins over the global `options.command`;
+   * the CLI passes a `$CLAUDE_PROJECT_DIR`-anchored template there to make
+   * the installed hooks PROJECT-LOCAL. No matcher on UserPromptSubmit —
+   * the event has no matcher support and fires on every prompt.
    */
   generateHooksConfig(
     statePath?: string | StatePathRef,
@@ -189,8 +226,7 @@ ${STATE_PATCH_CONTRACT}`;
     const scriptDir =
       options?.scriptDir ??
       (statePath === undefined ? '<stateDir>/hooks' : path.dirname(resolveTarget(statePath)));
-    const command = (event: ClaudeHookEvent): string =>
-      options?.command ?? `node ${JSON.stringify(this.claudeHookScriptPath(scriptDir, event))} ${event}`;
+    const command = this.commandOf(scriptDir, options);
     const timeout = options?.timeoutSeconds ?? CLAUDE_HOOK_TIMEOUT_SECONDS;
 
     const entry = (event: ClaudeHookEvent) => ({
@@ -243,6 +279,12 @@ ${STATE_PATCH_CONTRACT}`;
    *   and writes the state file (under the built-in cross-process lock);
    *   stdout is `{}` or a `systemMessage` when the patch is invalid.
    *
+   * INERT WITHOUT STATE: all three scripts resolve the per-project state
+   * path first and, when the state FILE does not exist, are no-ops — the
+   * inject scripts emit `{}` (no `hookSpecificOutput`, the interrupted-
+   * session meta check is skipped since it implies state) and
+   * `post-tool-use` writes nothing. Hooks NEVER create state files.
+   *
    * AGENT-SCOPED STATE: the hook stdin's `session_id` scopes the state to
    * `<cwd>/.skillstate/agents/<session-prefix>/skillstate.json`, so
    * parallel Claude Code sessions never last-writer-win over each other.
@@ -274,24 +316,6 @@ ${STATE_PATCH_CONTRACT}`;
   }
 
   /**
-   * Generate a SKILL.md for Claude Code's skill directory
-   * (`~/.claude/skills/<name>/SKILL.md`). The body instructs the agent to
-   * treat the hook-injected state as authoritative (history is not
-   * reliable), to orient via `state.summary` (full dump via `state.get`),
-   * and to persist via `state.patch` — the PostToolUse hook also merges any
-   * fenced ```json `state_patch` block printed by a Bash tool call.
-   */
-  generateSkillMd(spec: ProceduralSpec, statePath?: string): string {
-    return skillMdBody({
-      hostLabel: 'Claude Code',
-      injectionPhrase: 'injected into your context via hooks',
-      hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
-      spec,
-      statePath,
-    });
-  }
-
-  /**
    * Merge the skillstate hook groups into an existing `settings.json`
    * text. Preserves every other top-level key (env, permissions, model,
    * …) and every existing (non-skillstate) hook. Idempotent: if any
@@ -301,12 +325,14 @@ ${STATE_PATCH_CONTRACT}`;
    *
    * The mechanics live in the shared {@link mergeHookGroups}; this method
    * supplies only the format specifics (generated settings.json groups and
-   * the `node <script> <event>` skillstate commands).
+   * the skillstate commands — `commandFor`/`command` overrides and the
+   * `node <script> <event>` default, resolved IDENTICALLY to
+   * {@link generateHooksConfig} so idempotency detection matches what was
+   * written).
    */
   mergeHooksConfig(existingJson: string, options?: ClaudeHooksConfigOptions): string {
     const scriptDir = options?.scriptDir ?? '<stateDir>/hooks';
-    const command = (event: ClaudeHookEvent): string =>
-      `node ${JSON.stringify(this.claudeHookScriptPath(scriptDir, event))} ${event}`;
+    const command = this.commandOf(scriptDir, options);
     const generated = JSON.parse(
       this.generateHooksConfig(undefined, { ...options, scriptDir }),
     ) as { hooks: Record<string, unknown[]> };
@@ -345,18 +371,6 @@ ${STATE_PATCH_CONTRACT}`;
     return saveGenerated(target, this.generateHooksConfig(statePath, options));
   }
 
-  /**
-   * Generate a SKILL.md and persist it via the shared `saveGenerated`.
-   * Returns the absolute destination path.
-   */
-  async saveSkillMd(
-    target: string | StatePathRef,
-    spec: ProceduralSpec,
-    statePath?: string,
-  ): Promise<string> {
-    return saveGenerated(target, this.generateSkillMd(spec, statePath));
-  }
-
   generateAppendPrompt(): string {
     return `You are operating in state-based execution mode. Your state is maintained across steps.
 
@@ -380,6 +394,11 @@ ${STATE_PATCH_CONTRACT}
    * current state JSON read from the SESSION cwd. Brand specifics stay in
    * the adapter (comment lines only); the `contextSuffix` is the shared
    * {@link HISTORY_UNRELIABLE_NOTE} from `@skillstate/core`.
+   *
+   * INERT WITHOUT STATE: after resolving `statePath` the script emits `{}`
+   * (no `hookSpecificOutput`, nothing added to context) when the state
+   * FILE does not exist — the interrupted-session meta check is skipped
+   * too, since a session-meta sidecar implies state.
    */
   private buildInjectScriptTemplate(options: {
     header: string;
@@ -391,7 +410,8 @@ ${STATE_PATCH_CONTRACT}
     // this session was killed before it could finalize), the hook appends
     // the shared INTERRUPTED_SESSION_NOTE — with the preserved state path
     // substituted — so the model reviews progress/blockers first. A fresh
-    // MCP launch overwrites the status back to `running`.
+    // MCP launch overwrites the status back to `running`. The check only
+    // runs when state exists (no state → inert, no sidecar read).
     const interruptedCheck = options.hookEventName === 'SessionStart';
     return [
       '#!/usr/bin/env node',
@@ -399,6 +419,8 @@ ${STATE_PATCH_CONTRACT}
       '// Self-contained CommonJS: reads one hook JSON document on stdin,',
       '// resolves the state from the SESSION cwd, and emits',
       '// { hookSpecificOutput: { hookEventName, additionalContext } }.',
+      '// INERT without state: no state file → stdout is "{}" (no context',
+      '// is added; hooks never create state files).',
       options.header,
       "'use strict';",
       'const fs = require("fs");',
@@ -428,6 +450,10 @@ ${STATE_PATCH_CONTRACT}
       '    path.resolve(os.homedir()),',
       '    agentId,',
       '  );',
+      '  if (!stateFileExists(statePath, fs)) {',
+      '    process.stdout.write("{}");',
+      '    return;',
+      '  }',
       '  const state = readStateEnvelope(statePath, (p) => fs.readFileSync(p, "utf-8"));',
       '  let contextSuffix = ' + JSON.stringify(options.contextSuffix) + ';',
       ...(interruptedCheck
@@ -456,7 +482,12 @@ ${STATE_PATCH_CONTRACT}
     ].join('\n');
   }
 
-  /** PostToolUse script: extract state_patch, ⊕ merge, persist. */
+  /**
+   * PostToolUse script: extract state_patch, ⊕ merge, persist.
+   *
+   * INERT WITHOUT STATE: when the state file does not exist the hook
+   * writes nothing and emits `{}` — hooks NEVER create state files.
+   */
   private buildPostToolUseScript(header: string): string {
     const fence = '```';
     return [
@@ -466,6 +497,8 @@ ${STATE_PATCH_CONTRACT}
       '// extracts state_patch from the tool_response (fenced ```json block or',
       '// raw JSON), applies the null-deletion merge and writes the state file.',
       '// stdout is "{}" or a systemMessage when the patch is invalid.',
+      '// INERT without state: no state file → stdout is "{}", nothing is',
+      '// written (hooks never create state files).',
       header,
       "'use strict';",
       'const fs = require("fs");',
@@ -492,6 +525,10 @@ ${STATE_PATCH_CONTRACT}
       '      path.resolve(os.homedir()),',
       '      resolveAgentIdFromSession(input.session_id),',
       '    );',
+      '    if (!stateFileExists(statePath, fs)) {',
+      '      process.stdout.write(JSON.stringify(output));',
+      '      return;',
+      '    }',
       '    const response = input.tool_response;',
       '    let result;',
       '    if (isPlainObject(response) && isPlainObject(response.state_patch)) {',

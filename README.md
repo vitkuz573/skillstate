@@ -182,10 +182,15 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 
 | Host | Mechanism | State injection | O(1)? |
 | --- | --- | --- | --- |
-| **Claude Code** | `UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)` hook scripts + `~/.claude/settings.json` merge + stdio `.mcp.json` + SKILL.md | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
-| **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
-| **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
+| **Claude Code** | project `.claude/settings.json` hook groups (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + project hook scripts + stdio project `.mcp.json` + shared project `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
+| **OpenCode** | npm plugin (`"plugin": ["@skillstate/opencode"]` in the project config) + project MCP server + shared project `SKILL.md` | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
+| **Codex** | machine-level glue (`skillstate install`): `~/.codex/hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML | state injected per prompt, re-injected after compaction, persisted per Bash tool call — project state is picked up automatically from the session cwd | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
 | **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
+
+All project glue is committed and **inert until init**: a project without
+`.skillstate/` state behaves like a vanilla host — the plugin trims/injects
+nothing, hooks inject nothing and never create state files, and the MCP tools
+return `no skillstate state in this directory — run \`skillstate init\``.
 
 ## Multi-agent state (release 2.2.0)
 
@@ -277,7 +282,6 @@ its own `withStateLock` (never the state lock):
 
 ```ts
 import { ClaudeAdapter } from '@skillstate/claude';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 
 const adapter = new ClaudeAdapter();
 
@@ -285,42 +289,48 @@ const adapter = new ClaudeAdapter();
 // state-based execution mode:
 const modePrompt = adapter.generateAppendPrompt();
 
-// Lifecycle hooks (self-contained CommonJS scripts, run via `node script.cjs`):
-const pre = adapter.generateHookScript('PreToolUse', './.skillstate.json');
-// -> injects the persisted state into the tool call's additionalContext
+// Lifecycle hooks (self-contained CommonJS scripts, run via `node script.cjs`).
+// Each resolves the per-project state from the session cwd at runtime and is
+// INERT when the project has no skillstate state:
+const inject = adapter.generateHookScript('user-prompt-submit');
+// -> injects the current state into the prompt's additionalContext
 
-const post = adapter.generateHookScript(
-  'PostToolUse',
-  './.skillstate.json',
-  INTERCODE_CTF_SPEC.schema,
-);
-// -> extracts state_patch from the response, validates it against the
-//    embedded schema, applies the null-deletion merge, saves the state file
+const survive = adapter.generateHookScript('session-start-compact');
+// -> re-injects the state right after compaction (matcher ^compact$)
 
-// Compact hooks for O(1)-friendly session management:
-const hooks = adapter.generateAllHooksScripts('./.skillstate.json', INTERCODE_CTF_SPEC.schema);
-// hooks.preCompact: injects state + diff into compaction summary
-// hooks.sessionStartCompact: re-injects state after compaction
+const post = adapter.generateHookScript('post-tool-use');
+// -> extracts state_patch from the Bash tool response, applies the
+//    null-deletion merge, saves the state file (matcher ^Bash$)
+
+// Merge the hook groups into the PROJECT .claude/settings.json ($CLAUDE_PROJECT_DIR-
+// anchored commands; idempotent, env/permissions/model and foreign hooks preserved):
+const merged = adapter.mergeHooksConfig(existingSettingsText, {
+  scriptDir: '.claude/hooks/skillstate',
+  commandFor: (event) => `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/${event}.cjs" ${event}`,
+});
 
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
 ```
 
+`skillstate init` writes the scripts and merges the hook groups for you —
+everything under the project `.claude/` directory, committed with the repo.
+
 ### opencode
 
 ```ts
-import { OpenCodeAdapter } from '@skillstate/opencode';
+import { OpenCodeAdapter, SkillStatePlugin } from '@skillstate/opencode';
 
 const adapter = new OpenCodeAdapter();
 
-// SKILL.md with frontmatter (name/description/version + execution_context
-// pointing at the persisted state file) and the state-based process body:
-const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate.json');
-
-// Plugin with real O(1) history trimming via experimental.chat.messages.transform,
-// compaction context injection, and state persistence via tool.execute.after.
-// The state path resolves per session from the host cwd inside the plugin:
-const plugin = adapter.generatePluginCode();
+// The host glue is the npm package itself: the PROJECT opencode.json lists
+// "plugin": ["@skillstate/opencode"] and OpenCode loads SkillStatePlugin
+// directly (default export === named export === createSkillStatePlugin()).
+// It hooks experimental.chat.messages.transform (real O(1) history trimming),
+// experimental.session.compacting (state into the compaction context), and
+// tool.execute.after (persist state_patch) — resolving the state per session
+// from the host cwd, inert without state.
+const plugin = SkillStatePlugin;
 
 // Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
 // adapter.extractPatch(response), adapter.extractAction(response)
@@ -363,14 +373,14 @@ const scriptPath = await adapter.saveHookScript(
   '/home/me/.codex/hooks/skillstate/post-tool-use.cjs',
   statePath,
 );
-
-// SKILL.md for ~/.codex/skills/skillstate/SKILL.md:
-const skillMd = adapter.generateSkillMd(INTERCODE_CTF_SPEC, './.skillstate/skillstate.json');
 ```
 
 The hook scripts are self-contained CommonJS (Node builtins only) and resolve
-the state from the session `cwd` — one global `hooks.json` + one script
-directory serve every project. The `post-tool-use` script parses
+the state from the session `cwd` — one machine-level `hooks.json` + one script
+directory (installed once by `skillstate install`) serve every project, and
+each script is inert when the project has no skillstate state. There is no
+Codex SKILL.md: the bootstrap is the hook-injected state plus the skillstate
+MCP tools. The `post-tool-use` script parses
 `state_patch` from the `tool_response`: it accepts both fenced ```json
 blocks and an unfenced JSON object, and is tolerant of wrappers such as
 `Here is: {...}`. `user-prompt-submit` and `session-start-compact` inject
@@ -400,7 +410,7 @@ import { McpAdapter, McpServer, launch } from '@skillstate/mcp';
 const adapter = new McpAdapter();
 
 // .mcp.json config registering the skillstate stdio server:
-const config = adapter.generateMcpConfig('/path/to/.skillstate.json');
+const config = adapter.generateMcpConfig('/path/to/.mcp.json');
 
 // Or run an in-process server and drive it line-by-line:
 const server = new McpServer({ spec: INTERCODE_CTF_SPEC, root: '.', name: '.skillstate.json' });
@@ -422,50 +432,69 @@ The `skillstate-mcp` bin launches it directly. Tools: `state.get`,
 `spec.get`, `spec.next`. State is redacted on every read;
 the transport is newline-delimited JSON-RPC (protocol `2026-07-28`).
 
-### Integrate into your OpenCode host
+### Integrate into your hosts
 
 One command — detection, plugin, MCP registration, skill, and per-project
-state are all handled automatically:
+state are all handled automatically, for EVERY detected host at once:
 
 ```bash
 npm i -g @skillstate/cli && skillstate init
 ```
 
-`skillstate init` detects the host (OpenCode, Claude Code, Codex; override
-with `--host`), writes the plugin to `~/.config/opencode/plugins/` (auto-loaded
-by OpenCode 1.17 — no `plugin: []` edit), splices the `skillstate` stdio MCP
-server into the existing `mcp` object of `opencode.jsonc` (comment-preserving,
-with a timestamped backup), installs the `SKILL.md`, and creates a per-project
-`./.skillstate/` runtime dir with an install manifest. Idempotent: re-running
-never duplicates entries. `skillstate uninstall` rolls everything back.
+`skillstate init [--spec <path>] [--dry-run]` detects the hosts from home-dir
+markers (OpenCode, Claude Code, Codex) and writes ONLY project-local glue —
+nothing lands in `~`:
+
+- state envelope `./.skillstate/skillstate.json` + the procedure spec
+  `./skill-spec.json` (from `--spec <path>` or the domain-neutral default);
+- ONE host-neutral skill at `.claude/skills/skillstate/SKILL.md` — both
+  OpenCode (project `.claude/skills/` discovery) and Claude Code read it;
+- OpenCode: `"plugin": ["@skillstate/opencode"]` + an `mcp.skillstate`
+  server spliced into the project `opencode.json(c)` (comment-preserving,
+  timestamped backup; the plugin is auto-installed by OpenCode via Bun);
+- Claude Code: self-contained `.cjs` hook scripts in
+  `.claude/hooks/skillstate/`, hook groups merged into the project
+  `.claude/settings.json` with `node "$CLAUDE_PROJECT_DIR/.../<event>.cjs"
+  <event>` commands (full path:
+  `.claude/hooks/skillstate/<event>.cjs`), and the stdio server in the
+  project `.mcp.json`;
+- Codex: a hint only — `skillstate install` (machine-level, run once) wires
+  `~/.codex` and picks up every project's state automatically;
+- the v2 install manifest `.skillstate/install-manifest.json`, which
+  re-init MERGES (adding a harness later = re-run `init`).
+
+Idempotent: re-running never duplicates entries. `skillstate uninstall` rolls
+exactly the manifest-recorded glue back; `skillstate uninstall --machine`
+rolls the Codex machine glue back.
 
 The installed skill is **domain-neutral** by default (a state-based execution
 protocol — no task-specific assumptions). Bring your own procedure with
-`skillstate init --spec ./my-task.json`; the paper's InterCode CTF demo is
-available via `--example ctf`.
+`skillstate init --spec ./my-task.json`.
 
 #### What gets committed vs ignored
 
 | Path | Git | Why |
 | --- | --- | --- |
-| `.skillstate/` (state file + `install-manifest.json`) | **ignored** | runtime state; the manifest records absolute host paths |
-| `.skillstate.json` (default state file) | **ignored** | runtime state envelope, rewritten every step |
+| `.claude/skills/skillstate/SKILL.md` | **committed** | host-neutral skill shared by OpenCode + Claude Code |
+| `.claude/hooks/skillstate/*.cjs` | **committed** | self-contained Claude hook scripts (inert without state) |
+| `.claude/settings.json` | **committed** | merged hook groups (`$CLAUDE_PROJECT_DIR`-anchored) |
+| `opencode.json(c)` | **committed** | merged `plugin` + `mcp.skillstate` entries |
+| `.mcp.json` | **committed** | merged `mcpServers.skillstate` stdio entry |
+| `skill-spec.json` | **committed** | declarative task spec (instructions + schema) shared by the whole team; `init` never touches `.gitignore` |
+| `.skillstate/` (state envelope, `install-manifest.json`, session sidecars, `agents/`) | **ignored** | per-session runtime state |
 | `skillstate-report.json` | **ignored** | per-run report, overwritten on every `run` |
-| `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
 
-The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
-entry in `opencode.jsonc` / `.mcp.json` / `~/.codex/config.toml`, the Codex
-hooks in `~/.codex/hooks.json` + `~/.codex/hooks/skillstate/`, and
-`SKILL.md` in the host skills directory — live in your home directory,
-outside any git repo.
+The only machine-level files live under your home directory, outside any git
+repo: the Codex glue (`~/.codex/hooks/skillstate/`, `~/.codex/hooks.json`,
+`~/.codex/config.toml`) installed once by `skillstate install`, and the
+machine manifest `~/.skillstate/install-manifest.json`.
 
 Manual step-by-step guides (tested on OpenCode 1.17):
 
 - [`packages/opencode` → "Install into OpenCode (host)"](./packages/opencode/README.md#install-into-opencode-host) —
-  generate the plugin, create the state file, register it under `plugin` in
-  `opencode.jsonc` (`"file:///abs/path/skillstate.plugin.ts"`), install the
-  `SKILL.md`.
-- [`packages/mcp` → "Register in opencode.jsonc"](./packages/mcp/README.md#register-in-opencodejsonc) —
+  add the npm plugin to the project `opencode.json(c)`, register the MCP
+  server, share the project skill.
+- [`packages/mcp` → "Registering the server"](./packages/mcp/README.md#registering-the-server) —
   add the `skillstate` stdio MCP server (`state.get` / `state.patch` / …);
   it resolves the state from the session cwd on its own.
 
@@ -476,18 +505,25 @@ Verify with `opencode debug config`, `opencode debug skill`, and an
 
 ### OpenCode — real O(1) via `experimental.chat.messages.transform`
 
-The generated plugin hooks OpenCode's `experimental.chat.messages.transform` to trim history **before** each LLM call. Old messages are dropped — only the last N non-system messages plus an injected state message are sent to the model. This is real O(1) prompt footprint. State resolves per session from the host cwd: `<cwd>/.skillstate/skillstate.json` (global bucket from `~`).
+The npm plugin (`SkillStatePlugin`, loaded from the project
+`"plugin": ["@skillstate/opencode"]`) hooks OpenCode's
+`experimental.chat.messages.transform` to trim history **before** each LLM
+call. Old messages are dropped — only the last 3 non-system messages plus an
+injected state message are sent to the model. This is real O(1) prompt
+footprint. State resolves per session from the host cwd:
+`<cwd>/.skillstate/skillstate.json` (global bucket from `~`). The plugin is
+inert when the project has no skillstate state.
 
 ```ts
-const adapter = new OpenCodeAdapter();
+import { SkillStatePlugin } from '@skillstate/opencode';
 
-// Default: keeps last 3 non-system messages + state injection
-const plugin = adapter.generatePluginCode();
+// The ready-made plugin instance (default export too) — what OpenCode
+// loads from "plugin": ["@skillstate/opencode"]:
+const plugin = SkillStatePlugin;
 
-// Or configure history depth:
-const plugin = adapter.generatePluginCode({
-  maxHistoryMessages: 5,  // keep last 5 non-system messages
-});
+// Need a custom configuration? Build your own instance:
+import { createSkillStatePlugin } from '@skillstate/opencode';
+const configured = createSkillStatePlugin({ maxHistoryMessages: 5 });
 ```
 
 The plugin also hooks:
@@ -516,17 +552,22 @@ const survive = adapter.generateHookScript('session-start-compact');
 // ⊕ null-deletion merge, saves the state file:
 const persist = adapter.generateHookScript('post-tool-use');
 
-// Hooks section for ~/.claude/settings.json, or merge it into a live
-// settings.json (idempotent; env/permissions/model and foreign hooks
+// Hooks section for the PROJECT .claude/settings.json, or merge it into a
+// live settings.json (idempotent; env/permissions/model and foreign hooks
 // preserved):
 const hooksJson = adapter.generateHooksConfig('./.skillstate/skillstate.json', { scriptDir });
-const merged = adapter.mergeHooksConfig(existingSettingsText, { scriptDir });
+const merged = adapter.mergeHooksConfig(existingSettingsText, {
+  scriptDir: '.claude/hooks/skillstate',
+  commandFor: (event) => `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/${event}.cjs" ${event}`,
+});
 ```
 
-`skillstate init` wires all of it: scripts to `~/.claude/hooks/skillstate/`,
-groups merged into `~/.claude/settings.json`, a stdio `skillstate` server in
-the project `.mcp.json` (`state.get` / `state.patch` MCP tools), and
-`SKILL.md` into `~/.claude/skills/`.
+`skillstate init` wires all of it project-locally: the `.cjs` scripts into
+`.claude/hooks/skillstate/` (committed), the hook groups merged into the
+project `.claude/settings.json` with `$CLAUDE_PROJECT_DIR`-anchored commands,
+a stdio `skillstate` server in the project `.mcp.json` (`state.get` /
+`state.patch` MCP tools), and one host-neutral
+`.claude/skills/skillstate/SKILL.md` shared with OpenCode.
 
 **Honest limitation**: prompts stay O(T) with a fresh state at every turn —
 true O(1) requires host-side trimming, which Claude Code does not expose.
@@ -580,7 +621,7 @@ re-exports — import exactly the package you need:
 | `@skillstate/opencode` | `OpenCodeAdapter`, `SkillStatePlugin` (+ default export) |
 | `@skillstate/codex` | `CodexAdapter` |
 | `@skillstate/mcp` | `McpAdapter`, `McpServer`, `launch` |
-| `@skillstate/cli` | `main`, `parseRunArgs`, `parseReportArgs`, `loadCliConfig`, `loadCliSpec`, `loadResumeState`, `resolveInCwd`, `stubLlmResponse`, `CLI_USAGE`, dashboard helpers. Ships the `skillstate` bin (`init \| run \| report`). |
+| `@skillstate/cli` | `main`, `parseRunArgs`, `parseReportArgs`, `parseInitArgs`, `parseInstallArgs`, `parseUninstallArgs`, `loadCliConfig`, `loadCliSpec`, `loadResumeState`, `resolveInCwd`, `stubLlmResponse`, `CLI_USAGE`, host installers (`autoInstall` / `installMachine` / `uninstall`), dashboard helpers. Ships the `skillstate` bin (`init \| install \| uninstall \| run \| report`). |
 | `@skillstate/bench` | deterministic benchmark harness (`npm run bench` in the repo) |
 
 Every package exposes its root export path `@skillstate/<pkg>` (`.`).
@@ -602,8 +643,8 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
 - [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios fixed as fixtures (`tests/core/paper-fidelity.test.ts`)
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
-- [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into `~/.claude/settings.json`; stdio `.mcp.json` + `SKILL.md` installed by `skillstate init`
-- [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` inject and persist state; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
+- [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into the project `.claude/settings.json`; stdio project `.mcp.json` + the shared project `SKILL.md` installed by `skillstate init`
+- [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML, wired machine-level by `skillstate install` and picking up each project's state automatically; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
 - [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
 - [x] Session lifecycle (`@non-paper`): `<stateDir>/.session-meta.json` sidecar (statuses `running`/`interrupted`/`completed`/`failed`/`merged`, debounced `lastActivityAt`, `STALE_MS` staleness in `agent.list`/`state.summary`), `state.finalize` marker, SIGINT/SIGTERM interrupt flush via `installShutdown`, and the `SessionStart` interrupted-session note in the claude/codex hooks
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming

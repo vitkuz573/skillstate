@@ -181,6 +181,14 @@ describe('MCP JSON-RPC handshake', () => {
     });
   });
 
+  it('initialize treats non-object params as no requested revision (newest fallback)', async () => {
+    const server = makeServer();
+    for (const params of ['nope', 42, null]) {
+      const parsed = await parseResult(call(server, 'initialize', params));
+      expect(parsed.result?.protocolVersion).toBe('2026-07-28');
+    }
+  });
+
   it('responds to ping', async () => {
     const server = makeServer();
     expect((await parseResult(call(server, 'ping'))).result).toEqual({});
@@ -1605,6 +1613,9 @@ describe('MCP launch', () => {
     const project = makeTmp();
     const restore = withCwd(project);
     try {
+      // `skillstate init` semantics: the state directory exists BEFORE the
+      // server session starts (the server itself is inert without it).
+      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
       const { input, output } = streams();
       const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
@@ -1623,6 +1634,7 @@ describe('MCP launch', () => {
     process.env['HOME'] = home;
     const restore = withCwd(home);
     try {
+      fs.mkdirSync(path.join(home, '.skillstate', 'global'), { recursive: true });
       const { input, output } = streams();
       const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
@@ -1649,6 +1661,193 @@ describe('MCP launch', () => {
     expect(resolveStatePathForCwd(home, home)).toBe(
       path.join(path.resolve(home), '.skillstate', 'global', 'skillstate.json'),
     );
+  });
+});
+
+// ─── inert until init (no state directory → nothing created) ────────────────
+
+describe('MCP inert until init', () => {
+  /** A server whose launch-time state directory does NOT exist on disk. */
+  function makeInertServer(opts?: { spec?: ProceduralSpec }): McpServer {
+    const dir = path.join(makeTmp(), 'missing', '.skillstate');
+    return makeServer({ root: dir, spec: opts?.spec });
+  }
+
+  /** Assert the fixed inert error and that nothing was materialized. */
+  async function expectInertError(
+    server: McpServer,
+    name: string,
+    args: unknown,
+  ): Promise<void> {
+    const root = (server as unknown as ServerOptionsShape).options.root;
+    const { result } = await toolCall(server, name, args);
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toBe(
+      'no skillstate state in this directory — run `skillstate init`',
+    );
+    expect(fs.existsSync(root)).toBe(false);
+  }
+
+  it('state.get / state.summary / agent.list / spec.next return the exact inert error', async () => {
+    const server = makeInertServer();
+    for (const [name, args] of [
+      ['state.get', {}],
+      ['state.summary', {}],
+      ['state.diff', {}],
+      ['state.rollback', {}],
+      ['agent.list', {}],
+      ['spec.next', {}],
+    ] as const) {
+      await expectInertError(server, name, args);
+    }
+  });
+
+  it('state.patch does NOT mkdir the state directory (gate runs before the write)', async () => {
+    const server = makeInertServer();
+    await expectInertError(server, 'state.patch', {
+      patch: { working_dir: '/should-never-persist' },
+    });
+  });
+
+  it('state.checkpoint does NOT create the checkpoints sidecar directory', async () => {
+    const server = makeInertServer();
+    await expectInertError(server, 'state.checkpoint', { label: 'x' });
+  });
+
+  it('state.patch with an invalid patch reports the GATE, not the validation error', async () => {
+    const server = makeInertServer();
+    const { result } = await toolCall(server, 'state.patch', { patch: { bogus: 1 } });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toBe(
+      'no skillstate state in this directory — run `skillstate init`',
+    );
+  });
+
+  it('agent.read / agent.merge with a sub-agent id are gated on the launch root', async () => {
+    const server = makeInertServer();
+    await expectInertError(server, 'agent.read', { agent: 'w1' });
+    await expectInertError(server, 'agent.merge', { agent: 'w1' });
+  });
+
+  it('state.finalize and state.metrics are gated too', async () => {
+    const server = makeInertServer();
+    await expectInertError(server, 'state.finalize', { status: 'completed' });
+    await expectInertError(server, 'state.metrics', {});
+  });
+
+  it('spec.get stays available in an uninitialized directory', async () => {
+    const server = makeInertServer();
+    const { result } = await toolCall(server, 'spec.get', {});
+    expect(result?.isError).toBeUndefined();
+    expect(toolJson(result).id).toBe('intercode-ctf');
+  });
+
+  it('state-backed resources are refused; skillstate://spec stays readable', async () => {
+    const server = makeInertServer();
+    const state = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://state' }),
+    );
+    expect(state.error?.code).toBe(-32000);
+    expect(state.error?.message).toBe(
+      'no skillstate state in this directory — run `skillstate init`',
+    );
+    const summary = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://summary' }),
+    );
+    expect(summary.error?.code).toBe(-32000);
+    const spec = await parseResult(
+      call(server, 'resources/read', { uri: 'skillstate://spec' }),
+    );
+    expect(spec.error).toBeUndefined();
+    expect(JSON.parse((spec.result?.contents as Array<AnyRecord>)[0].text as string)).toMatchObject({
+      id: 'intercode-ctf',
+    });
+  });
+
+  it('launch skips the session stamp when the state directory is missing', async () => {
+    const project = makeTmp();
+    const { input, output } = streams();
+    const server = await launch({
+      spec: makeSpec(),
+      root: path.join(project, '.skillstate'),
+      name: 'skillstate.json',
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    try {
+      expect(fs.existsSync(path.join(project, '.skillstate'))).toBe(false);
+      const parsed = await toolCall(server, 'state.get', {});
+      expect(toolText(parsed.result)).toBe(
+        'no skillstate state in this directory — run `skillstate init`',
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('the interrupt flush exits without materializing a missing state directory', async () => {
+    const dir = path.join(makeTmp(), 'missing');
+    const server = makeServer({ root: dir });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const uninstall = server.installInterruptHandler();
+    try {
+      process.emit('SIGTERM', 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(exitSpy).toHaveBeenCalledWith(130);
+      expect(fs.existsSync(dir)).toBe(false);
+    } finally {
+      server.detachInterruptHandler();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('after creating the state directory (simulated init) the same calls proceed', async () => {
+    const dir = path.join(makeTmp(), '.skillstate');
+    const server = makeServer({ root: dir, spec: GENERIC_PROCEDURE_SPEC });
+    // Inert first: the patch is refused and creates nothing.
+    await expectInertError(server, 'state.patch', { patch: { goal: 'pre-init' } });
+    // `skillstate init` runs.
+    fs.mkdirSync(dir, { recursive: true });
+    await toolCall(server, 'state.patch', { patch: { goal: 'post-init' } });
+    expect(toolJson((await toolCall(server, 'state.get', {})).result).goal).toBe('post-init');
+    expect(toolJson((await toolCall(server, 'state.summary', {})).result).goal).toBe('post-init');
+    await toolCall(server, 'state.checkpoint', { label: 'after-init' });
+    expect(toolJson((await toolCall(server, 'agent.list', {})).result)).toEqual({ agents: [] });
+    await toolCall(server, 'agent.merge', { agent: 'w1' });
+    // spec.next derives from the persisted state now.
+    expect(toolJson((await toolCall(server, 'spec.next', {})).result).goal).toBe('post-init');
+  });
+
+  it('a per-call { root } override does NOT bypass the inert gate', async () => {
+    const server = makeInertServer();
+    const other = makeTmp();
+    const { result } = await toolCall(server, 'state.patch', {
+      patch: { working_dir: '/elsewhere' },
+      root: other,
+    });
+    expect(result?.isError).toBe(true);
+    expect(toolText(result)).toBe(
+      'no skillstate state in this directory — run `skillstate init`',
+    );
+    expect(fs.existsSync(path.join(other, '.skillstate.json'))).toBe(false);
+  });
+
+  it('the gate follows an overridden launch root, not per-call { root } args', async () => {
+    const dir = makeTmp();
+    fs.mkdirSync(path.join(dir, '.skillstate'), { recursive: true });
+    const server = makeServer({ root: path.join(dir, '.skillstate') });
+    // The launch root EXISTS → ungated, even though `other/` does not exist
+    // (per-call root overrides still resolve + create, unchanged behavior).
+    const payload = toolJson(
+      (
+        await toolCall(server, 'state.patch', {
+          patch: { working_dir: '/elsewhere' },
+          root: path.join(dir, 'other'),
+        })
+      ).result,
+    );
+    expect((payload.state as AnyRecord).working_dir).toBe('/elsewhere');
   });
 });
 
@@ -1749,6 +1948,9 @@ describe('MCP agent-scoped state', () => {
     const oldAgent = process.env['SKILLSTATE_AGENT_ID'];
     process.env['SKILLSTATE_AGENT_ID'] = 'env-agent';
     try {
+      // The state directory exists before the session (as `skillstate init`
+      // would leave it) — the server itself is inert without it.
+      fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
       const { input, output } = streams();
       const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/from-env' } });

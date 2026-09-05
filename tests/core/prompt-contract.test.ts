@@ -176,4 +176,24 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
     ).toBe(codexBody);
     expect(codexBody.endsWith('\n')).toBe(true);
   });
+
+  it('renders the hook-neutral shape when the host has no patch hook (opencode)', () => {
+    const body = skillMdBody({
+      hostLabel: 'OpenCode',
+      injectionPhrase: 'injected into the message list before every model call',
+      hooks: { inject: 'messages.transform', reInject: 'session.compacting' },
+      spec,
+    });
+    expect(body).toContain('The skillstate OpenCode integration:');
+    expect(body).toContain('injected into the message list before every model call');
+    expect(body).toContain('`messages.transform`');
+    expect(body).toContain('`session.compacting`');
+    // No patch hook → no PostToolUse bullets, and the contract block is
+    // appended in the compact hook-neutral form (":' + example + rules").
+    expect(body).not.toContain('PostToolUse');
+    expect(body).not.toContain('watch every Bash tool result');
+    expect(body).toContain('your last look)\n:');
+    expect(body).toContain(STATE_PATCH_EXAMPLE_JSON);
+    expect(body).toContain(STATE_PATCH_RULES);
+  });
 });

@@ -1,11 +1,22 @@
 /**
- * Static OpenCode plugin — the SINGLE SOURCE OF TRUTH for the skillstate
- * host integration. `OpenCodeAdapter.generatePluginCode` emits a thin loader
- * that imports `createSkillStatePlugin` from this module; the per-project
- * state resolution lives in `@skillstate/core`
+ * Static OpenCode npm plugin — the SINGLE SOURCE OF TRUTH for the skillstate
+ * host integration. Loaded DIRECTLY from the project `opencode.json`
+ * `"plugin": ["@skillstate/opencode"]` (both the named `SkillStatePlugin`
+ * and the default export are usable — no generated plugin file exists);
+ * the per-project state resolution lives in `@skillstate/core`
  * (`resolveHostStateForCwd`, re-exported here) and the hook logic
  * (envelope read/write, ⊕ merge, patch extraction) in the core
  * hook-runtime — this module only adapts it to the OpenCode hooks.
+ *
+ * PROJECT-LOCAL / INERT WITHOUT STATE: every state-mutating or
+ * prompt-mutating hook first resolves the per-project state path and
+ * returns EARLY when the state FILE does not exist — `hooks NEVER create
+ * state files`. A fresh clone (or any project without skillstate state)
+ * therefore behaves like vanilla opencode: `experimental.chat.messages.
+ * transform` leaves the message array untouched,
+ * `experimental.session.compacting` pushes nothing into the context, and
+ * `tool.execute.after` writes nothing. Only the harmless `event`
+ * session-registry hook stays unguarded.
  *
  * Hooks (opencode 1.17 contract, verified on host):
  * - `experimental.chat.messages.transform` — entries are `{ info, parts }`
@@ -41,6 +52,7 @@ import {
   resolveAgentIdFromSession,
   resolveHostStateForCwd,
   saveStateEnvelope,
+  stateFileExists,
 } from '@skillstate/core';
 import type {
   OpenCodeMessage,
@@ -218,7 +230,7 @@ const SUB_AGENT_PARENTS = new Map<string, string>();
 
 /**
  * Build the OpenCode plugin function with the same behavior for every host
- * entry point (thin generated loaders, direct imports).
+ * entry point (direct npm loading via `"plugin": ["@skillstate/opencode"]`).
  *
  * State resolution is ALWAYS per-project: the state file path is computed
  * from the session cwd on EVERY hook call via
@@ -226,6 +238,12 @@ const SUB_AGENT_PARENTS = new Map<string, string>();
  * project gets its own `<cwd>/.skillstate/`, each session (sub-agent) its
  * isolated `agents/<session>/` copy, and a session launched from `$HOME`
  * uses the global bucket.
+ *
+ * INERT WITHOUT STATE: `experimental.chat.messages.transform`,
+ * `experimental.session.compacting`, and `tool.execute.after` resolve the
+ * state path first and return EARLY when the state FILE does not exist —
+ * a project without skillstate state behaves like vanilla opencode, and
+ * hooks never create state files.
  */
 export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): SkillStatePlugin {
   const resolvePath = (agentId: string): string =>
@@ -261,13 +279,17 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       // Filters messages BEFORE each LLM call: keeps all system messages
       // plus the last `maxHistory` non-system messages, then injects a
       // synthetic state element. Old messages are DROPPED from the prompt,
-      // not just hidden.
+      // not just hidden. INERT without state: when the project has no
+      // state file the hook returns before touching `output.messages`
+      // (fresh clones behave like vanilla opencode).
       'experimental.chat.messages.transform': async (
         input,
         output,
       ): Promise<void> => {
         const agentId = pluginAgentId(input as { sessionID?: unknown }, output.messages);
-        const state = readSkillState(resolvePath(agentId));
+        const statePath = resolvePath(agentId);
+        if (!stateFileExists(statePath, fs)) return;
+        const state = readSkillState(statePath);
         const messages = output.messages;
         const systemMessages = messages.filter((m) => m.info.role === 'system');
         const trimmed = messages
@@ -307,9 +329,13 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       // ── Compaction context injection ───────────────────────────────────
       // Before compaction, inject the current state into the context so the
       // compaction summary preserves state even after history is compressed.
+      // INERT without state: no state file → nothing is pushed (and a
+      // missing `output.context` array is NOT created).
       'experimental.session.compacting': async (input, output): Promise<void> => {
         const agentId = pluginAgentId(input);
-        const state = readSkillState(resolvePath(agentId));
+        const statePath = resolvePath(agentId);
+        if (!stateFileExists(statePath, fs)) return;
+        const state = readSkillState(statePath);
         if (!Array.isArray(output.context)) {
           output.context = [];
         }
@@ -320,14 +346,16 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       // After tool execution, extract state_patch from the tool response
       // (output.output), and atomically merge it into the session-scoped
       // state (read + merge + write all inside the cross-process lock).
+      // INERT without state: hooks NEVER create state files — a project
+      // without an existing state file is left untouched.
       'tool.execute.after': async (input, output): Promise<void> => {
         const response = output.output ?? '';
         if (typeof response !== 'string') return;
-        const agentId = pluginAgentId(input);
         const patch = extractPatch(response);
-        if (patch) {
-          mergeSkillState(resolvePath(agentId), patch);
-        }
+        if (!patch) return;
+        const statePath = resolvePath(pluginAgentId(input));
+        if (!stateFileExists(statePath, fs)) return;
+        mergeSkillState(statePath, patch);
       },
     } satisfies SkillStateHooks;
   };

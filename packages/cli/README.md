@@ -2,7 +2,7 @@
 
 # @skillstate/cli
 
-**skillstate CLI — `init | run | report` over the paper-exact runtime, plus a terminal dashboard.**
+**skillstate CLI — `init | install | uninstall | run | report` over the paper-exact runtime, plus a terminal dashboard.**
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
 [![node](https://img.shields.io/node/v/@skillstate/cli)](https://www.npmjs.com/package/@skillstate/cli)
@@ -14,11 +14,13 @@
 ---
 
 `@skillstate/cli` is a thin file-orchestration layer over the paper-exact
-runtime ([`@skillstate/core`](../core)): `init` writes a `skillstate.json`
-config plus a spec file, `run` drives a deterministic offline stub LLM (empty
-patch + `noop` action) so the whole `init → run → report` flow works from a
-clean directory with no network, and `report` renders the session metrics as
-JSON or a markdown dashboard.
+runtime ([`@skillstate/core`](../core)): `init` wires every detected host
+**project-locally** (state + spec + skill + hooks + MCP — nothing is written
+into `~`), `install` wires the machine-level Codex glue, `uninstall` rolls
+exactly what the manifests record back, `run` drives a deterministic offline
+stub LLM (empty patch + `noop` action) so the whole
+`init → run → report` flow works from a clean directory with no network, and
+`report` renders the session metrics as JSON or a markdown dashboard.
 
 > **@non-paper** — the CLI is an additive Wave-4 DX tool, not part of the
 > paper. Bring your own `LLMFn`/`LLMProvider` (via the library API) for real
@@ -26,12 +28,22 @@ JSON or a markdown dashboard.
 
 ## Installation
 
-One command installs the CLI **and** wires skillstate into your host
-(OpenCode, Claude Code, or Codex — auto-detected):
+The global machine install is the only global thing:
 
 ```bash
-npm i -g @skillstate/cli && skillstate init
+npm i -g @skillstate/cli
 ```
+
+Then, inside each project:
+
+```bash
+skillstate init
+```
+
+Every piece of glue lands inside the project and is committed — a fresh clone
+works for the whole team, and teammates need no global install (the npm
+plugin and MCP entries resolve `@skillstate/opencode` / `@skillstate/mcp`
+from the npm registry at runtime).
 
 Requires Node.js >= 20. TypeScript types are bundled. Ships the `skillstate`
 bin.
@@ -39,52 +51,98 @@ bin.
 ## Quick start
 
 ```bash
-skillstate init              # full auto-install into the detected host
+skillstate init              # wire every detected host, project-locally
+skillstate install           # machine-level Codex glue only (run once per machine)
 skillstate run               # runs the offline stub-LLM against the spec
-skillstate run --resume      # continue from the persisted .skillstate.json
+skillstate run --resume      # continue from the persisted state file
 skillstate run --config ./my-config.json
 skillstate report            # pretty JSON report
 skillstate report --format md   # markdown dashboard
-skillstate uninstall         # roll the host install back (manifest-driven)
+skillstate uninstall         # roll the project glue back (manifest-driven)
+skillstate uninstall --machine  # roll the Codex machine glue back
 ```
 
 ### `skillstate init` — what it does
 
-1. Detects the host: `opencode` (`~/.config/opencode/opencode.jsonc` or
-   `~/.opencode/bin/opencode`), `claude` (`~/.claude`), `codex` (`~/.codex`).
-   Override with `--host <opencode|claude|codex>`.
-2. Creates a per-project runtime dir `./.skillstate/` with the state file
-   (`skillstate.json`), an install manifest, and the `skillstate.json` config
-   + spec file for `run`/`report`.
-3. For OpenCode:
-   - writes the plugin to `~/.config/opencode/plugins/skillstate.ts` — files
-     in `plugins/` are **auto-loaded at startup** by OpenCode 1.17, so no
-     `plugin: []` edit is needed;
-   - splices a `skillstate` stdio MCP server into the existing `mcp` object of
-     `opencode.jsonc` **in place** (comments and unknown keys preserved,
-     timestamped `.bak.*` backup written);
-   - installs `~/.config/opencode/skills/skillstate/SKILL.md`.
-4. For Claude Code: writes the `.cjs` hook scripts to
-   `~/.claude/hooks/skillstate/`, merges the skillstate hook groups into
-   `~/.claude/settings.json` (`UserPromptSubmit` /
-   `SessionStart(^compact$)` / `PostToolUse(^Bash$)`; timestamped backup,
-   idempotent, `env`/`permissions`/`model` and foreign hooks preserved),
-   writes a project `.mcp.json` (`mcpServers.skillstate`, `type: "stdio"`),
-   and installs `~/.claude/skills/skillstate/SKILL.md`. Uninstall removes
-   the skillstate groups surgically — live settings are never restored
-   from a backup.
-5. For Codex: writes the `.cjs` hook scripts to `~/.codex/hooks/skillstate/`,
-   merges the skillstate hook groups into `~/.codex/hooks.json`
-   (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`),
-   splices a `[mcp_servers.skillstate]` TOML block into
-   `~/.codex/config.toml` (timestamped backup, idempotent), and installs
-   `~/.codex/skills/skillstate/SKILL.md`.
+Detects EVERY supported host from home-dir markers, in fixed order
+[opencode, claude, codex] — `opencode` (`~/.config/opencode/opencode.jsonc`,
+`~/.config/opencode/opencode.json`, or `~/.opencode/bin/opencode`), `claude`
+(`~/.claude`), `codex` (`~/.codex`) — and wires them all at once. Switching
+harnesses later = re-running `init` (the manifest merges host records).
 
-Flags: `--host <name>`, `--max-history <n>`, `--spec <path>`, `--example ctf`,
-`--no-mcp`, `--no-skill`, `--dry-run`, `--uninstall`. Init is **idempotent** —
-re-running never duplicates config entries and never overwrites an existing
-spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
-`--dry-run`) removes exactly what the manifest records.
+1. Creates the per-project runtime state envelope
+   `./.skillstate/skillstate.json` and writes the procedure spec to
+   `./skill-spec.json` (`--spec <path>` or the domain-neutral default).
+   `init` does NOT create a root `skillstate.json` config file — `run` and
+   `report` use built-in defaults.
+2. Writes ONE host-neutral skill to
+   `.claude/skills/skillstate/SKILL.md`: both OpenCode (which reads project
+   `.claude/skills/` too) and Claude Code load this same file. Nothing is
+   ever installed into `~/.config/opencode`, `~/.claude`, or `~/.codex`.
+3. For OpenCode: splices `"plugin": ["@skillstate/opencode"]` (npm plugin,
+   auto-installed by OpenCode via Bun — no generated plugin file) and the
+   `mcp.skillstate` local server (`["npx", "-y", "@skillstate/mcp@^3"]`,
+   `enabled: true`) into the PROJECT `opencode.jsonc|json` — top-level
+   comments and unknown keys preserved, a timestamped `.bak.*` backup when
+   the file changes.
+4. For Claude Code: writes self-contained `.cjs` hook scripts into
+   `.claude/hooks/skillstate/`, merges the skillstate hook groups into the
+   PROJECT `.claude/settings.json` (`UserPromptSubmit` /
+   `SessionStart(^compact$)` / `PostToolUse(^Bash$)`; commands are
+   `node "$CLAUDE_PROJECT_DIR/.claude/hooks/skillstate/<event>.cjs" <event>`;
+   timestamped backup only when the merge changes the file, idempotent,
+   `env`/`permissions`/`model` and foreign hooks preserved), and adds
+   `mcpServers.skillstate` (`type: "stdio"`, `npx -y @skillstate/mcp@^3`) to
+   the project `.mcp.json`. Uninstall removes the skillstate groups
+   surgically — live settings are never restored from a backup.
+5. For Codex: prints a hint only — "codex: machine-level glue — run
+   `skillstate install` once (project state is picked up automatically)".
+6. Writes the v2 install manifest `.skillstate/install-manifest.json`
+   (`{ version: 2, installedAt, statePath, skillPath?, hosts: { opencode?,
+   claude? } }`). Re-init MERGES the previous manifest's host records;
+   v1 manifests are not migrated (reported as corrupt).
+
+Flags: `--spec <path>` (or `--spec=<path>`), `--dry-run`. That's all — the
+v2 flags `--host`, `--max-history`, `--no-mcp`, `--no-skill`, `--example`,
+`--auto`, and `init --uninstall` are gone. Init is **idempotent** — re-running
+never duplicates config entries and never overwrites an existing spec.
+
+### `skillstate install` — machine-level glue (Codex)
+
+```bash
+skillstate install [--dry-run]
+```
+
+Writes the self-contained `.cjs` hook scripts into `~/.codex/hooks/skillstate/`,
+merges the skillstate hook groups into `~/.codex/hooks.json`, and appends the
+`[mcp_servers.skillstate]` TOML table (`command = "npx"`,
+`args = ["-y", "@skillstate/mcp@^3"]`) to `~/.codex/config.toml`. Records the
+machine manifest at `~/.skillstate/install-manifest.json`. Idempotent:
+re-merging hooks is a no-op and the TOML table is appended only when absent.
+Every script resolves the per-project state from the session cwd, so one
+machine install serves every project. For opencode/claude it prints that
+nothing machine-wide is needed — their glue is project-local
+(`skillstate init`).
+
+### `skillstate uninstall` — manifest-driven rollback
+
+```bash
+skillstate uninstall [--state-dir <path>] [--remove-state] [--machine] [--dry-run]
+```
+
+Without `--machine`: reads `.skillstate/install-manifest.json` (default
+state dir `./.skillstate`, override with `--state-dir <path>`) and rolls
+back exactly what it records — the shared SKILL.md, the OpenCode plugin +
+MCP splices (an init-created config that reduces to `{}` is deleted), the
+Claude hook groups (surgically; foreign hooks survive), hook script dir,
+and the `.mcp.json` entry (a file that only carried the skillstate entry is
+deleted). Keeps the state directory unless `--remove-state` is passed.
+
+With `--machine`: reads `~/.skillstate/install-manifest.json` and rolls the
+Codex machine glue back — hook groups removed surgically from
+`~/.codex/hooks.json`, the script directory deleted, the
+`[mcp_servers.skillstate]` table dropped from `~/.codex/config.toml`, and
+the manifest removed.
 
 ### Which spec does init install?
 
@@ -93,23 +151,24 @@ spec. `skillstate uninstall` (`--state-dir <dir>`, `--remove-state`,
   `next_steps`, `artifacts`, `blockers`, `notes`). No domain assumptions.
 - **`--spec <path>`** — your own task spec (JSON: `id`, `name`, `version`,
   `instructions`, `schema`). Projects differ; bring yours.
-- **`--example ctf`** — the paper's InterCode CTF demo, available explicitly.
 
 ### What gets committed vs ignored
 
 | Path | Git | Why |
 | --- | --- | --- |
-| `.skillstate/` (state file + `install-manifest.json`) | **ignored** | runtime state; the manifest records absolute host paths |
-| `.skillstate.json` (default state file) | **ignored** | runtime state envelope, rewritten every step |
+| `.claude/skills/skillstate/SKILL.md` | **committed** | host-neutral skill shared by OpenCode + Claude Code |
+| `.claude/hooks/skillstate/*.cjs` | **committed** | self-contained Claude hook scripts (inert without state) |
+| `.claude/settings.json` | **committed** | merged hook groups (`$CLAUDE_PROJECT_DIR`-anchored) |
+| `opencode.json(c)` | **committed** | merged `plugin` + `mcp.skillstate` entries |
+| `.mcp.json` | **committed** | merged `mcpServers.skillstate` stdio entry |
+| `skill-spec.json` | **committed** | declarative task spec (instructions + schema) shared by the whole team; `init` never touches `.gitignore` |
+| `.skillstate/` (state envelope, `install-manifest.json`, session sidecars, `agents/`) | **ignored** | per-session runtime state |
 | `skillstate-report.json` | **ignored** | per-run report, overwritten on every `run` |
-| `skill-spec.json` | **your choice** | declarative task spec (instructions + schema) — commit it to share the task config; `init` never touches `.gitignore` |
 
-The host-side files — the plugin in `~/.config/opencode/plugins/`, the MCP
-entry in `opencode.jsonc` / `.mcp.json` / `~/.codex/config.toml`, the Codex
-hooks in `~/.codex/hooks.json` + `~/.codex/hooks/skillstate/`, the Claude
-hooks in `~/.claude/settings.json` + `~/.claude/hooks/skillstate/`, and
-`SKILL.md` in the host skills directory — live in your home directory or the
-project root, outside any git repo.
+The only machine-level files live under your home directory, outside any git
+repo: the Codex glue (`~/.codex/hooks/skillstate/`, `~/.codex/hooks.json`,
+`~/.codex/config.toml`) installed by `skillstate install`, and the machine
+manifest `~/.skillstate/install-manifest.json`.
 
 Programmatically:
 
@@ -144,17 +203,30 @@ Root path `@skillstate/cli` exports the command layer and the dashboard.
 
 **Host install (`install.ts`):**
 
-- `autoInstall({ cwd, home, flags }): Promise<number>` — one-shot host install.
-- `uninstall({ cwd, flags }): Promise<number>` — manifest-driven rollback.
-- `detectHost(home): HostId | null` — `opencode | claude | codex` detection.
-- `parseInitArgs(args): InitFlags`, `parseUninstallArgs(args): UninstallFlags`.
-- `buildSkillMd(statePathRel, spec, host?): string`,
-  `buildMcpEntry(): Record<string, unknown>` (OpenCode shape),
+- `autoInstall({ cwd, home, flags, hosts?, spec? }): Promise<number>` —
+  one-shot project wiring for every detected host (the exit-code API:
+  0 ok, 1 no host detected).
+- `installMachine({ home, flags }): Promise<number>` — machine-level Codex
+  glue (`skillstate install`); always returns 0.
+- `uninstall({ cwd, home, flags }): Promise<number>` — manifest-driven
+  rollback of the project glue, or of the machine glue with
+  `flags.machine` (0 ok, 1 no/corrupt manifest).
+- `detectHosts(home): HostId[]` — all detected hosts in fixed order
+  `opencode | claude | codex` (empty when none).
+- `parseInitArgs(args): InitFlags` (`--spec <path>`, `--dry-run`),
+  `parseInstallArgs(args): InstallFlags` (`--dry-run`),
+  `parseUninstallArgs(args): UninstallFlags` (`--state-dir <path>`,
+  `--remove-state`, `--machine`, `--dry-run`).
+- `resolveInitSpec(cwd, flags): ProceduralSpec` — `--spec` file (validated)
+  or the neutral generic default.
+- `buildSkillMd(spec): string` — the host-neutral SKILL.md body,
+  `buildMcpEntry(): Record<string, unknown>` (OpenCode `local` shape),
   `buildClaudeMcpEntry(): Record<string, unknown>` (stdio shape) — the MCP
-  entries never embed an environment; the server resolves the state from
-  its own cwd.
+  entries reference `npx -y @skillstate/mcp@^3` and never embed an
+  environment; the server resolves the state from its own cwd.
 - `addSkillstateMcp(configText, entry)` / `removeSkillstateMcp(configText)` — JSONC surgery.
-- `resolveMcpCommand()`, `defaultHome()`, `HelpRequestedInitError`, `InstallManifest`.
+- `defaultHome()`, `HelpRequestedInitError`, `InstallManifest` (v2,
+  multi-host), `MachineInstallManifest` (Codex machine record).
 
 **JSONC (`jsonc.ts`):**
 
@@ -171,7 +243,7 @@ Root path `@skillstate/cli` exports the command layer and the dashboard.
 - Types: `DashboardMetrics`, `BaselineComparison`, `SessionInfo`,
   `BudgetProgress`, `ReportInput`, `DashboardInput`.
 
-**Bin:** `skillstate` — `init | run | report`.
+**Bin:** `skillstate` — `init | install | uninstall | run | report`.
 
 ## Notes
 

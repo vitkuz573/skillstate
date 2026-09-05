@@ -13,7 +13,6 @@ import {
   resolveStateForCwd,
 } from '@skillstate/codex';
 import { resolveStatePath, HISTORY_UNRELIABLE_NOTE } from '@skillstate/core';
-import type { ProceduralSpec } from '@skillstate/core';
 
 const nodePath = process.execPath;
 
@@ -32,20 +31,6 @@ afterEach(() => {
   tmpDirs = [];
 });
 
-function makeSpec(overrides?: Partial<ProceduralSpec>): ProceduralSpec {
-  return {
-    id: 'test-skill',
-    name: 'Test Skill',
-    instructions: 'Do test things carefully.',
-    schema: {
-      progress: { type: 'number', default: 0, description: 'Current progress' },
-      notes: { type: 'string', default: '', description: 'Accumulated notes' },
-    },
-    version: '1.0.0',
-    ...overrides,
-  };
-}
-
 /** Run a generated hook script with the given stdin payload. */
 function runHook(script: string, stdin: unknown): { stdout: string; state: Record<string, unknown>; statePath: string } {
   const dir = makeTmp();
@@ -54,6 +39,10 @@ function runHook(script: string, stdin: unknown): { stdout: string; state: Recor
   const cwd = path.join(dir, 'project');
   fs.mkdirSync(cwd, { recursive: true });
   const statePath = path.join(cwd, '.skillstate', 'skillstate.json');
+  // Hooks are INERT without state and never create the file themselves —
+  // the state always pre-exists ({} when no initial state is needed).
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state: {} }, null, 2)}\n`);
   const stdout = execFileSync(nodePath, [scriptPath], {
     input: JSON.stringify(stdin),
     encoding: 'utf-8',
@@ -287,9 +276,9 @@ describe('CodexAdapter.generateHookScript — injection events', () => {
     }
   });
 
-  it('falls back to process.cwd() and to {} when the state file is missing', () => {
+  it('is INERT without state: emits {} (no hookSpecificOutput, no additionalContext)', () => {
     const dir = makeTmp();
-    const cwd = path.join(dir, 'empty-project');
+    const cwd = path.join(dir, 'fresh-clone');
     fs.mkdirSync(cwd, { recursive: true });
     const scriptPath = writeScript(dir, adapter.generateHookScript('user-prompt-submit'));
     const emitted = execFileSync(nodePath, [scriptPath], {
@@ -297,8 +286,26 @@ describe('CodexAdapter.generateHookScript — injection events', () => {
       encoding: 'utf-8',
       cwd,
     }).toString();
-    const parsed = JSON.parse(emitted) as any;
-    expect(parsed.hookSpecificOutput.additionalContext).toContain('Current skill state (JSON): {}');
+    expect(JSON.parse(emitted)).toEqual({});
+  });
+
+  it('session-start-compact is INERT without state (interrupted-session meta check skipped)', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'fresh-clone');
+    // A session-meta sidecar implies state — it must be ignored when the
+    // state file itself is missing.
+    fs.mkdirSync(path.join(cwd, '.skillstate'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, '.skillstate', '.session-meta.json'),
+      JSON.stringify({ status: 'interrupted' }),
+    );
+    const scriptPath = writeScript(dir, adapter.generateHookScript('session-start-compact'));
+    const emitted = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({ cwd, source: 'compact' }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    expect(JSON.parse(emitted)).toEqual({});
   });
 
   it('injects the AGENT-SCOPED state from input.session_id (8-char prefix)', () => {
@@ -330,13 +337,21 @@ describe('CodexAdapter.generateHookScript — injection events', () => {
   it('uses the global bucket when the hook cwd equals the process home', () => {
     const dir = makeTmp();
     const fakeHome = path.join(dir, 'home');
-    fs.mkdirSync(fakeHome, { recursive: true });
+    const globalState = path.join(fakeHome, '.skillstate', 'global', 'skillstate.json');
+    fs.mkdirSync(path.dirname(globalState), { recursive: true });
+    fs.writeFileSync(
+      globalState,
+      `${JSON.stringify({ version: 1, state: { global: true } }, null, 2)}\n`,
+    );
     const scriptPath = writeScript(dir, adapter.generateHookScript('user-prompt-submit'));
     const emitted = execFileSync(nodePath, [scriptPath], {
       input: JSON.stringify({ cwd: fakeHome }),
       encoding: 'utf-8',
+      // os.homedir() follows $HOME — cwd === home resolves the global bucket.
+      env: { ...process.env, HOME: fakeHome },
     }).toString();
     expect(JSON.parse(emitted).hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
+    expect(JSON.parse(emitted).hookSpecificOutput.additionalContext).toContain('"global":true');
   });
 
   it('tolerates corrupt state files and stdin that is not JSON', () => {
@@ -408,7 +423,7 @@ describe('CodexAdapter.generateHookScript — post-tool-use', () => {
       tool_response: 'plain ls output\nfile1 file2',
     });
     expect(JSON.parse(result.stdout)).toEqual({});
-    expect(result.state).toEqual({});
+    expect(result.state).toEqual({ version: 1, state: {} });
   });
 
   it('outputs a systemMessage for an invalid fenced patch and for a non-object state_patch', () => {
@@ -517,37 +532,24 @@ function runHookWithState(
   return { stdout, state };
 }
 
-describe('CodexAdapter.generateSkillMd', () => {
+describe('CodexAdapter.generateHookScript — post-tool-use inert without state', () => {
   const adapter = new CodexAdapter();
 
-  it('renders frontmatter with name/description/version and the state path', () => {
-    const md = adapter.generateSkillMd(makeSpec(), './.skillstate/skillstate.json');
-    expect(md.startsWith('---\n')).toBe(true);
-    expect(md).toContain('name: "Test Skill"');
-    expect(md).toContain('description: "Do test things carefully."');
-    expect(md).toContain('version: 1.0.0');
-    expect(md).toContain('state_path: ./.skillstate/skillstate.json');
-  });
-
-  it('defaults the state path and documents the global bucket', () => {
-    const md = adapter.generateSkillMd(makeSpec());
-    expect(md).toContain('state_path: ./.skillstate/skillstate.json');
-    expect(md).toContain('~/.skillstate/global/skillstate.json');
-  });
-
-  it('instructs MCP state.get/state.patch and the hook-injected state contract', () => {
-    const md = adapter.generateSkillMd(makeSpec());
-    expect(md).toContain('state.get');
-    expect(md).toContain('state.patch');
-    expect(md).toContain('not reliable');
-    expect(md).toContain('UserPromptSubmit');
-    expect(md).toContain('SessionStart');
-    expect(md).toContain('PostToolUse');
-    expect(md).toContain('null');
-  });
-
-  it('is deterministic', () => {
-    expect(adapter.generateSkillMd(makeSpec())).toBe(adapter.generateSkillMd(makeSpec()));
+  it('is INERT without state: emits {} and creates NOTHING (hooks never create state)', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'fresh-clone');
+    fs.mkdirSync(cwd, { recursive: true });
+    const scriptPath = writeScript(dir, adapter.generateHookScript('post-tool-use'));
+    const stdout = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({
+        cwd,
+        tool_response: '```json\n{"state_patch":{"progress":1},"action":"go"}\n```',
+      }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    expect(JSON.parse(stdout)).toEqual({});
+    expect(fs.existsSync(path.join(cwd, '.skillstate'))).toBe(false);
   });
 });
 
@@ -581,14 +583,6 @@ describe('CodexAdapter save helpers — atomic persistence', () => {
     ]);
   });
 
-  it('saveSkillMd writes the SKILL.md and returns the dest', async () => {
-    const dir = makeTmp();
-    const dest = path.join(dir, 'SKILL.md');
-    const returned = await adapter.saveSkillMd(dest, makeSpec(), './.skillstate/skillstate.json');
-    expect(returned).toBe(dest);
-    expect(fs.readFileSync(dest, 'utf-8')).toContain('# Test Skill');
-  });
-
   it('save helpers resolve {root, name} refs and reject traversal', async () => {
     const dir = makeTmp();
     const dest = await adapter.saveHooksConfig(
@@ -600,9 +594,6 @@ describe('CodexAdapter save helpers — atomic persistence', () => {
     expect(() =>
       adapter.generateHookScript('user-prompt-submit', { root: dir, name: '../evil.json' }),
     ).toThrow('Path traversal blocked');
-    await expect(
-      adapter.saveSkillMd({ root: dir, name: '../evil.md' }, makeSpec()),
-    ).rejects.toThrow('Path traversal blocked');
     await expect(
       adapter.saveHookScript('post-tool-use', { root: dir, name: '../evil.cjs' }),
     ).rejects.toThrow('Path traversal blocked');

@@ -271,45 +271,60 @@ describe('loadResumeState', () => {
 });
 
 describe('main init', () => {
-  it('creates config + spec from a clean directory', async () => {
+  it('creates spec + project glue but NO skillstate.json config from a clean directory', async () => {
     const dir = makeTmp();
     const code = await main(['init'], dir);
     expect(code).toBe(0);
-    expect(fs.existsSync(path.join(dir, CONFIG_FILE_NAME))).toBe(true);
+    expect(fs.existsSync(path.join(dir, CONFIG_FILE_NAME))).toBe(false);
     expect(fs.existsSync(path.join(dir, 'skill-spec.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, '.skillstate', 'install-manifest.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'opencode.json'))).toBe(true);
   });
 
-  it('reports existing files without overwriting', async () => {
+  it('reports an existing spec without overwriting', async () => {
     const dir = makeTmp();
     await main(['init'], dir);
-    const before = fs.readFileSync(path.join(dir, CONFIG_FILE_NAME), 'utf-8');
     const specBefore = fs.readFileSync(path.join(dir, 'skill-spec.json'), 'utf-8');
     const code = await main(['init'], dir);
     expect(code).toBe(0);
-    expect(fs.readFileSync(path.join(dir, CONFIG_FILE_NAME), 'utf-8')).toBe(before);
     expect(fs.readFileSync(path.join(dir, 'skill-spec.json'), 'utf-8')).toBe(specBefore);
     expect(logSpy.mock.calls.join('\n')).toContain('skill-spec.json already exists');
   });
 
-  it('creates a missing spec when config already exists', async () => {
+  it('keeps a pre-existing config file untouched (init no longer writes it)', async () => {
     const dir = makeTmp();
-    writeJson(path.join(dir, CONFIG_FILE_NAME), { maxSteps: 5 });
+    fs.writeFileSync(path.join(dir, CONFIG_FILE_NAME), '{"maxSteps": 5}', 'utf-8');
     const code = await main(['init'], dir);
     expect(code).toBe(0);
-    expect(fs.existsSync(path.join(dir, 'skill-spec.json'))).toBe(true);
-  });
-
-  it('creates a missing config when spec already exists', async () => {
-    const dir = makeTmp();
-    writeJson(path.join(dir, 'skill-spec.json'), INTERCODE_CTF_SPEC);
-    const code = await main(['init'], dir);
-    expect(code).toBe(0);
-    expect(fs.existsSync(path.join(dir, CONFIG_FILE_NAME))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, CONFIG_FILE_NAME), 'utf-8')).toBe('{"maxSteps": 5}');
+    expect(logSpy.mock.calls.join('\n')).not.toContain('Created skillstate.json');
   });
 
   it('rejects init flags with usage (exit 2)', async () => {
     const code = await main(['init', '--bogus'], makeTmp());
     expect(code).toBe(2);
+  });
+});
+
+describe('main install', () => {
+  it('wires the machine-level codex glue with a temp HOME (exit 0, idempotent)', async () => {
+    const dir = makeTmp();
+    fs.mkdirSync(path.join(fakeHome, '.codex'), { recursive: true });
+    expect(await main(['install'], dir)).toBe(0);
+    expect(fs.existsSync(path.join(fakeHome, '.codex', 'hooks.json'))).toBe(true);
+    expect(fs.existsSync(path.join(fakeHome, '.codex', 'hooks', 'skillstate', 'post-tool-use.cjs'))).toBe(true);
+    expect(fs.existsSync(path.join(fakeHome, '.codex', 'config.toml'))).toBe(true);
+    expect(fs.existsSync(path.join(fakeHome, '.skillstate', 'install-manifest.json'))).toBe(true);
+    logSpy.mockClear();
+    expect(await main(['install'], dir)).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('already registered');
+  });
+
+  it('maps invalid install flags to exit 2 and help to exit 0', async () => {
+    expect(await main(['install', '--bogus'], makeTmp())).toBe(2);
+    logSpy.mockClear();
+    expect(await main(['install', '--help'], makeTmp())).toBe(0);
+    expect(logSpy.mock.calls.join('\n')).toContain('Usage:');
   });
 });
 
@@ -555,7 +570,8 @@ describe('bin/skillstate.js — init+run+report from a clean directory', () => {
       });
 
     run(['init']);
-    expect(fs.existsSync(path.join(dir, CONFIG_FILE_NAME))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'skill-spec.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, CONFIG_FILE_NAME))).toBe(false);
 
     run(['run'], { SKILLSTATE_MAX_STEPS: '3' });
     expect(fs.existsSync(path.join(dir, '.skillstate.json'))).toBe(true);

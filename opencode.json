@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "skillstate": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@skillstate/mcp@^3"
+      ],
+      "enabled": true
+    }
+  },
+  "plugin": ["@skillstate/opencode"]
+}

@@ -23,6 +23,13 @@
  * with fresh state injection. The programmatic O(1) path lives in
  * `fork-trim.ts` (codex app-server thread/fork + thread/rollback).
  *
+ * PROJECT-LOCAL / INERT WITHOUT STATE: every generated script resolves the
+ * state from the session cwd at runtime and is INERT when the cwd has no
+ * skillstate state file — inject hooks emit `{}` (no additionalContext,
+ * nothing added as developer context) and `post-tool-use` writes nothing
+ * (hooks NEVER create state files). A fresh clone behaves like a vanilla
+ * Codex install, so the one global script dir serves every project.
+ *
  * @non-paper — no adapters exist in arXiv 2608.26263v3.
  */
 import * as path from 'node:path';
@@ -34,9 +41,8 @@ import {
   resolveHostStateForCwd,
   resolveTarget,
   saveGenerated,
-  skillMdBody,
 } from '@skillstate/core';
-import type { ProceduralSpec, StatePathRef } from '@skillstate/core';
+import type { StatePathRef } from '@skillstate/core';
 
 /** Codex hook events this adapter generates scripts for (script/CLI names). */
 export type CodexHookEvent =
@@ -192,6 +198,12 @@ export class CodexAdapter {
    *   and writes the state file (under the built-in cross-process lock);
    *   stdout is `{}` or a `systemMessage` when the patch is invalid.
    *
+   * INERT WITHOUT STATE: all three scripts resolve the per-project state
+   * path first and, when the state FILE does not exist, are no-ops — the
+   * inject scripts emit `{}` (no `hookSpecificOutput`, the interrupted-
+   * session meta check is skipped since it implies state) and
+   * `post-tool-use` writes nothing. Hooks NEVER create state files.
+   *
    * AGENT-SCOPED STATE: the hook stdin's `session_id` scopes the state to
    * `<cwd>/.skillstate/agents/<session-prefix>/skillstate.json`, so
    * parallel Codex sessions never last-writer-win over each other.
@@ -230,6 +242,11 @@ export class CodexAdapter {
    * current state JSON read from the SESSION cwd. Brand specifics stay in
    * the adapter (comment lines only); the `contextSuffix` is the shared
    * {@link HISTORY_UNRELIABLE_NOTE} from `@skillstate/core`.
+   *
+   * INERT WITHOUT STATE: after resolving `statePath` the script emits `{}`
+   * (no `hookSpecificOutput`, nothing added as developer context) when the
+   * state FILE does not exist — the interrupted-session meta check is
+   * skipped too, since a session-meta sidecar implies state.
    */
   private buildInjectScriptTemplate(options: {
     header: string;
@@ -241,7 +258,8 @@ export class CodexAdapter {
     // this session was killed before it could finalize), the hook appends
     // the shared INTERRUPTED_SESSION_NOTE — with the preserved state path
     // substituted — so the model reviews progress/blockers first. A fresh
-    // MCP launch overwrites the status back to `running`.
+    // MCP launch overwrites the status back to `running`. The check only
+    // runs when state exists (no state → inert, no sidecar read).
     const interruptedCheck = options.hookEventName === 'SessionStart';
     return [
       '#!/usr/bin/env node',
@@ -249,6 +267,8 @@ export class CodexAdapter {
       '// Self-contained CommonJS: reads one hook JSON document on stdin,',
       '// resolves the state from the SESSION cwd, and emits',
       '// { hookSpecificOutput: { hookEventName, additionalContext } }.',
+      '// INERT without state: no state file → stdout is "{}" (no context',
+      '// is added; hooks never create state files).',
       options.header,
       "'use strict';",
       'const fs = require("fs");',
@@ -278,6 +298,10 @@ export class CodexAdapter {
       '    path.resolve(os.homedir()),',
       '    agentId,',
       '  );',
+      '  if (!stateFileExists(statePath, fs)) {',
+      '    process.stdout.write("{}");',
+      '    return;',
+      '  }',
       '  const state = readStateEnvelope(statePath, (p) => fs.readFileSync(p, "utf-8"));',
       '  let contextSuffix = ' + JSON.stringify(options.contextSuffix) + ';',
       ...(interruptedCheck
@@ -304,24 +328,6 @@ export class CodexAdapter {
       '});',
       '',
     ].join('\n');
-  }
-
-  /**
-   * Generate a SKILL.md for Codex's skill directory
-   * (`~/.codex/skills/<name>/SKILL.md`). The body instructs the agent to
-   * treat the hook-injected state as authoritative (history is not
-   * reliable), to orient via `state.summary` (full dump via `state.get`),
-   * and to persist via `state.patch` — the PostToolUse hook also merges any
-   * fenced ```json `state_patch` block printed by a Bash tool call.
-   */
-  generateSkillMd(spec: ProceduralSpec, statePath?: string): string {
-    return skillMdBody({
-      hostLabel: 'Codex',
-      injectionPhrase: 'provided as developer context',
-      hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
-      spec,
-      statePath,
-    });
   }
 
   /**
@@ -377,23 +383,16 @@ export class CodexAdapter {
     return saveGenerated(target, this.generateHookScript(event, statePath));
   }
 
-  /**
-   * Generate a SKILL.md and persist it via the shared `saveGenerated`.
-   * Returns the absolute destination path.
-   */
-  async saveSkillMd(
-    target: string | StatePathRef,
-    spec: ProceduralSpec,
-    statePath?: string,
-  ): Promise<string> {
-    return saveGenerated(target, this.generateSkillMd(spec, statePath));
-  }
-
   /* ------------------------------------------------------------------ */
   /*  Internal helpers                                                   */
   /* ------------------------------------------------------------------ */
 
-  /** PostToolUse script: extract state_patch, ⊕ merge, persist. */
+  /**
+   * PostToolUse script: extract state_patch, ⊕ merge, persist.
+   *
+   * INERT WITHOUT STATE: when the state file does not exist the hook
+   * writes nothing and emits `{}` — hooks NEVER create state files.
+   */
   private buildPostToolUseScript(header: string): string {
     const fence = '```';
     return [
@@ -403,6 +402,8 @@ export class CodexAdapter {
       '// extracts state_patch from the tool_response (fenced ```json block or',
       '// raw JSON), applies the null-deletion merge and writes the state file.',
       '// stdout is "{}" or a systemMessage when the patch is invalid.',
+      '// INERT without state: no state file → stdout is "{}", nothing is',
+      '// written (hooks never create state files).',
       header,
       "'use strict';",
       'const fs = require("fs");',
@@ -429,6 +430,10 @@ export class CodexAdapter {
       '      path.resolve(os.homedir()),',
       '      resolveAgentIdFromSession(input.session_id),',
       '    );',
+      '    if (!stateFileExists(statePath, fs)) {',
+      '      process.stdout.write(JSON.stringify(output));',
+      '      return;',
+      '    }',
       '    const response = input.tool_response;',
       '    let result;',
       '    if (isPlainObject(response) && isPlainObject(response.state_patch)) {',

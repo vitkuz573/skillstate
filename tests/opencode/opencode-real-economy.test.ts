@@ -1,48 +1,33 @@
-import { describe, it, expect } from 'vitest';
-import { OpenCodeAdapter } from '@skillstate/opencode';
+import { describe, it, expect, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createSkillStatePlugin } from '@skillstate/opencode';
 
-function makeLoader(maxHistory?: number): string {
-  const adapter = new OpenCodeAdapter();
-  return maxHistory === undefined
-    ? adapter.generatePluginCode()
-    : adapter.generatePluginCode({ maxHistoryMessages: maxHistory });
+let tmpDirs: string[] = [];
+
+function makeTmp(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-economy-'));
+  tmpDirs.push(dir);
+  return dir;
 }
 
-// ─── thin loader: hook delegation to the static plugin ──────────────────────
+const lastCwd = process.cwd();
 
-describe('OpenCode generatePluginCode (thin loader): hook contract', () => {
-  it('imports the static plugin from @skillstate/opencode', () => {
-    const loader = makeLoader();
-    expect(loader).toContain(
-      "import { createSkillStatePlugin } from '@skillstate/opencode';",
-    );
-    expect(loader).toContain('export default createSkillStatePlugin({');
-  });
-
-  it('has maxHistoryMessages from options', () => {
-    const loader = makeLoader(5);
-    expect(loader).toContain('maxHistoryMessages: 5');
-  });
-
-  it('defaults maxHistoryMessages to 3', () => {
-    const loader = makeLoader();
-    expect(loader).toContain('maxHistoryMessages: 3');
-  });
-
-  it('contains no duplicated plugin logic', () => {
-    const loader = makeLoader();
-    expect(loader).not.toContain('readSkillState');
-    expect(loader).not.toContain('experimental.chat.messages.transform');
-    expect(loader).not.toContain('writeFileSync');
-  });
-
-  it('does NOT contain the old additive-only tool.execute.before', () => {
-    const loader = makeLoader();
-    // The old approach used tool.execute.before; the new uses messages.transform
-    // There should be no tool.execute.before in the generated loader
-    expect(loader).not.toContain('"tool.execute.before"');
-  });
+afterEach(() => {
+  for (const dir of tmpDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  tmpDirs = [];
+  process.chdir(lastCwd);
 });
+
+/**
+ * PROJECT-LOCAL PLUGIN LOADING — there is no generated loader to inspect
+ * (`generatePluginCode` was removed): opencode loads the npm package
+ * directly, so the "hook contract" below is verified against the REAL
+ * plugin (`createSkillStatePlugin`) instead of generated source text.
+ */
 
 // ─── messages.transform: O(1) budget simulation ─────────────────────────────
 
@@ -115,34 +100,44 @@ describe('OpenCode messages.transform: O(1) message count', () => {
   });
 });
 
-// ─── generateSkillMd: updated instructions ──────────────────────────────────
+// ─── real plugin economy: the actual hook caps the prompt ───────────────────
 
-describe('OpenCode generateSkillMd: state persistence instructions', () => {
-  it('tells the agent history is not reliable (trimmed by the plugin)', () => {
-    const adapter = new OpenCodeAdapter();
-    const md = adapter.generateSkillMd({
-      id: 'test',
-      name: 'Test',
-      instructions: 'Do things.',
-      schema: {},
-      version: '1.0.0',
-    });
-    expect(md).toContain('not reliable');
-    expect(md).toContain('messages.transform');
-    expect(md).toContain('session.compacting');
+describe('OpenCode real plugin: O(1) prompt footprint on a real project', () => {
+  function envelope(role: string, text: string) {
+    return {
+      info: { id: `id-${role}-${text}`, sessionID: 's', role },
+      parts: [{ id: `part-${role}-${text}`, sessionID: 's', type: 'text', text }],
+    };
+  }
+
+  it('a 40-message history collapses to system + maxHistory + state (with state present)', async () => {
+    const project = makeTmp();
+    process.chdir(project);
+    const statePath = path.join(project, '.skillstate', 'skillstate.json');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ version: 1, state: { progress: 1 } }));
+
+    const plugin = createSkillStatePlugin({ maxHistoryMessages: 3 });
+    const hooks = await plugin({});
+    const messages = [envelope('system', 'sys')];
+    for (let i = 0; i < 20; i++) {
+      messages.push(envelope('user', `u${i}`));
+      messages.push(envelope('assistant', `a${i}`));
+    }
+    await hooks['experimental.chat.messages.transform']!({}, { messages });
+    expect(messages).toHaveLength(1 + 3 + 1);
+    expect(messages[messages.length - 1]!.parts[0]!.text).toContain('"progress":1');
   });
 
-  it('mentions reasoning is discarded', () => {
-    const adapter = new OpenCodeAdapter();
-    const md = adapter.generateSkillMd({
-      id: 'test',
-      name: 'Test',
-      instructions: 'Do things.',
-      schema: {},
-      version: '1.0.0',
-    });
-    expect(md).toContain('state_patch');
-    expect(md).toContain('state.finalize');
-    expect(md).toContain('state.summary');
+  it('without state the hook is inert — the history is passed through untouched', async () => {
+    const project = makeTmp();
+    process.chdir(project);
+    const plugin = createSkillStatePlugin({ maxHistoryMessages: 3 });
+    const hooks = await plugin({});
+    const messages = [envelope('system', 'sys'), envelope('user', 'u0')];
+    await hooks['experimental.chat.messages.transform']!({}, { messages });
+    expect(messages).toHaveLength(2);
+    expect(messages[0]!.parts[0]!.text).toBe('sys');
+    expect(messages[1]!.parts[0]!.text).toBe('u0');
   });
 });
