@@ -35,6 +35,9 @@ bin that launches the server directly.
 
 ## Quick start
 
+> New to the server? See [`QUICKSTART.md`](QUICKSTART.md) — a verified
+> launch-and-drive tour (handshake, spec selection, session lifecycle).
+
 ```ts
 import { McpAdapter, McpServer, launch } from '@skillstate/mcp';
 import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';

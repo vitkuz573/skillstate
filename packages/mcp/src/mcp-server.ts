@@ -68,6 +68,9 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   '2024-11-05',
   '2025-03-26',
   '2025-06-18',
+  // OpenCode 1.17 requests exactly this revision (86 occurrences in its
+  // binary) — without it the client rejects our initialize answer.
+  '2025-11-25',
   '2026-07-28',
 ];
 
