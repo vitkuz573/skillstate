@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/cli",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "skillstate CLI — init | run | report.",
   "type": "module",
   "main": "dist/index.js",
@@ -25,8 +25,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@skillstate/core": "^2.0.0",
     "@skillstate/codex": "^2.0.0",
+    "@skillstate/core": "^2.0.0",
     "@skillstate/mcp": "^2.0.0",
     "@skillstate/opencode": "^2.0.0"
   }

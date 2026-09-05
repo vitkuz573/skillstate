@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/claude",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Claude Code platform adapter for the skillstate runtime.",
   "type": "module",
   "main": "dist/index.js",
