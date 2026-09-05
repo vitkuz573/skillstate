@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   HISTORY_UNRELIABLE_NOTE,
+  INTERRUPTED_SESSION_NOTE,
   REASONING_DISCARDED_NOTE,
   STATE_PATCH_CONTRACT,
   STATE_PATCH_CONTRACT_HEADER,
@@ -76,6 +77,18 @@ describe('HISTORY_UNRELIABLE_NOTE (A1, one text for every host)', () => {
   });
 });
 
+describe('INTERRUPTED_SESSION_NOTE (session lifecycle, one text for every host)', () => {
+  it('names the interruption, the preserved state path placeholder, and the review action', () => {
+    expect(INTERRUPTED_SESSION_NOTE.startsWith('\nPrevious session was interrupted;')).toBe(true);
+    expect(INTERRUPTED_SESSION_NOTE).toContain('state preserved at <path>');
+    expect(INTERRUPTED_SESSION_NOTE).toContain('review progress/blockers before continuing');
+  });
+
+  it('carries a single <path> placeholder for hook-side substitution', () => {
+    expect(INTERRUPTED_SESSION_NOTE.split('<path>').length - 1).toBe(1);
+  });
+});
+
 describe('describeSchema', () => {
   it('renders one bullet per field with type and description', () => {
     expect(describeSchema(schema)).toBe(
@@ -139,6 +152,8 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
       expect(body).toContain('state.patch');
       expect(body).toContain('state.validate');
       expect(body).toContain('state.diff');
+      expect(body).toContain('state.finalize {status:"completed"} so the');
+      expect(body).toContain('orchestrator knows');
       expect(body).toContain('history is not reliable');
       expect(body).toContain('UserPromptSubmit');
       expect(body).toContain('^compact$');

@@ -5,7 +5,7 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-969%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-1165%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -185,7 +185,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | **Claude Code** | `UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)` hook scripts + `~/.claude/settings.json` merge + stdio `.mcp.json` + SKILL.md | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
 | **OpenCode** | `messages.transform` / `tool.execute.after` plugin + SKILL.md | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
 | **Codex** | `hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
-| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
+| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
 
 ## Multi-agent state (release 2.2.0)
 
@@ -221,6 +221,57 @@ back explicitly:
   into the main state (⊕ merge; conflicting scalars follow
   `keep: 'main' \| 'sub'`, default `'main'`; the sub copy is kept and
   marked `mergedAt`).
+
+## Session lifecycle (release 2.3.0)
+
+The state envelope belongs to the procedure (paper §3.2) — the agent's
+data, nothing else. The session lifecycle is ORCHESTRATION metadata and
+lives in a separate sidecar next to every state file:
+`<stateDir>/.session-meta.json` (agent scopes keep their own:
+`agents/<id>/.session-meta.json`), written with atomic temp-rename under
+its own `withStateLock` (never the state lock):
+
+```json
+{
+  "status": "running",
+  "startedAt": "2026-09-05T09:00:00.000Z",
+  "lastActivityAt": "2026-09-05T09:04:12.000Z",
+  "agentId": "",
+  "protocolVersion": "2026-07-28"
+}
+```
+
+- **Statuses.** `running` — a live session (MCP `launch()` stamps it at
+  start); `interrupted` — SIGINT/SIGTERM killed the server before the
+  agent could finish; `completed` / `failed` — the agent called
+  `state.finalize {status}` (its own "I am done" signal, optional
+  free-text `result`); `merged` — the orchestrator folded the sub-agent
+  copy into the main state (`agent.merge`).
+- **Activity.** every MCP state write (`state.patch` / `state.rollback` /
+  `state.checkpoint` / `agent.merge`) refreshes `lastActivityAt`,
+  debounced to at most one sidecar write per 5 s.
+- **Staleness.** `agent.list` and `state.summary` report
+  `staleness: 'active' | 'stale' | 'orphan'`:
+  `active` — running with fresh activity (or a terminal status, whose
+  `status` field already says the outcome); `stale` — status `running`
+  but no writes for 5 min (`STALE_MS` in `@skillstate/core` — the
+  provider process died without a signal); `orphan` — no (or corrupt)
+  sidecar next to the state file. `agent.list` entries add `ageMs` for
+  running sessions, so the main agent tells "finished" from "died
+  mid-run" at a glance.
+- **Interrupt flush.** `launch()` wires the `installShutdown` seam from
+  `@skillstate/core`: SIGINT/SIGTERM → flush `status: 'interrupted'` +
+  re-pin the diff baseline to the surviving state → exit 130. Terminal
+  statuses recorded by the agent itself are never clobbered (hosts
+  SIGTERM their MCP servers after a clean finalize too). Pass
+  `installInterruptHandler: false` when embedding the server into a
+  process you own.
+- **Interrupted note.** the Claude Code / Codex `SessionStart` hook
+  scripts read the sidecar and, when the previous run was interrupted,
+  append to the injected context: "Previous session was interrupted;
+  state preserved at `<path>`; review progress/blockers before
+  continuing." (`INTERRUPTED_SESSION_NOTE` in `@skillstate/core`). A new
+  launch overwrites the status back to `running`.
 
 ### Claude Code
 
@@ -367,7 +418,8 @@ stdio server; state always resolves per session from the server's own cwd
 The `skillstate-mcp` bin launches it directly. Tools: `state.get`,
 `state.patch` (validates; the single write op), `state.validate`,
 `state.diff`, `state.checkpoint`, `state.rollback`, `state.summary`,
-`state.metrics`, `spec.get`, `spec.next`. State is redacted on every read;
+`state.metrics`, `state.finalize` (session "I am done" marker),
+`spec.get`, `spec.next`. State is redacted on every read;
 the transport is newline-delimited JSON-RPC (protocol `2026-07-28`).
 
 ### Integrate into your OpenCode host
@@ -552,7 +604,8 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
 - [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into `~/.claude/settings.json`; stdio `.mcp.json` + `SKILL.md` installed by `skillstate init`
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML + `SKILL.md` inject and persist state; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
-- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
+- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
+- [x] Session lifecycle (`@non-paper`): `<stateDir>/.session-meta.json` sidecar (statuses `running`/`interrupted`/`completed`/`failed`/`merged`, debounced `lastActivityAt`, `STALE_MS` staleness in `agent.list`/`state.summary`), `state.finalize` marker, SIGINT/SIGTERM interrupt flush via `installShutdown`, and the `SessionStart` interrupted-session note in the claude/codex hooks
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming
 - [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 
@@ -560,7 +613,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 
 ```bash
 npm ci
-npm test                # 969 tests
+npm test                # 1165 tests
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc -b
 npm run build           # tsc -b — emits each packages/*/dist/

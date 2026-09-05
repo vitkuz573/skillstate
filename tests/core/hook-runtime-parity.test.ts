@@ -23,6 +23,7 @@ import {
   lockStateWrite,
   mergePatch,
   readResponseText,
+  readSessionMetaStatus,
   readStateEnvelope,
   resolveAgentIdFromSession,
   resolveStatePathForCwd,
@@ -57,6 +58,7 @@ const SNIPPET_MARKERS = [
   'function findRawPatch(',
   'function sleepSync(',
   'function lockStateWrite(',
+  'function readSessionMetaStatus(',
 ];
 
 // ─── (1) containment: every generated script embeds the shared snippet ──────
@@ -105,6 +107,7 @@ function evalSnippet(script: string): Record<string, (...args: never[]) => unkno
     'findRawPatch',
     'sleepSync',
     'lockStateWrite',
+    'readSessionMetaStatus',
   ];
   const out: Record<string, (...args: never[]) => unknown> = {};
   for (const name of names) {
@@ -393,6 +396,37 @@ describe('snippet-vs-original parity', () => {
       (r) => readResponseText(r),
       [42],
     ],
+    // readSessionMetaStatus — valid / missing / corrupt / other shapes
+    [
+      'session meta: interrupted status',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => '{"status":"interrupted"}'],
+    ],
+    [
+      'session meta: running status',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => '{"status":"running","lastActivityAt":"2026-09-05"}'],
+    ],
+    [
+      'session meta: corrupt JSON',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => '{corrupt'],
+    ],
+    [
+      'session meta: missing file (readFile throws)',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => { throw new Error('ENOENT'); }],
+    ],
+    [
+      'session meta: non-object payload',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => '[1]'],
+    ],
+    [
+      'session meta: non-string status',
+      (p, readFile) => readSessionMetaStatus(p as string, readFile as (p: string) => string),
+      ['/x/.session-meta.json', () => '{"status":7}'],
+    ],
   ];
 
   for (const [label, invoke, args] of cases) {
@@ -614,6 +648,7 @@ const FN_NAMES = [
   'findFencedPatch',
   'findRawPatch',
   'readResponseText',
+  'readSessionMetaStatus',
   'sanitizeAgentId',
   'sleepSync',
   'lockStateWrite',

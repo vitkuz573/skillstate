@@ -33,4 +33,6 @@ export * from './adapter-shared.js';
 // @non-paper Wave-5 deduplicated prompt texts (shared adapter vocabulary).
 export * from './prompt-contract.js';
 export * from './shutdown.js';
+// @non-paper release-2.3.0 session lifecycle marker (orchestration meta).
+export * from './session-meta.js';
 export * from './schemas/index.js';

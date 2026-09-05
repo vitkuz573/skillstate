@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -107,6 +107,11 @@ function persistedState(server: McpServer): AnyRecord {
   return ((doc['state'] as AnyRecord | undefined) ?? doc) as AnyRecord;
 }
 
+/** Fresh in-memory stdio pair for `launch({ input, output })` tests. */
+function streams(): { input: PassThrough; output: PassThrough } {
+  return { input: new PassThrough(), output: new PassThrough() };
+}
+
 afterEach(() => {
   for (const dir of dirs) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -186,6 +191,7 @@ describe('MCP JSON-RPC handshake', () => {
       'spec.next',
       'state.checkpoint',
       'state.diff',
+      'state.finalize',
       'state.get',
       'state.metrics',
       'state.patch',
@@ -204,6 +210,7 @@ describe('MCP JSON-RPC handshake', () => {
     expect(byName.get('state.checkpoint')).toEqual({ readOnlyHint: false, destructiveHint: false });
     expect(byName.get('state.rollback')).toEqual({ readOnlyHint: false, destructiveHint: true });
     expect(byName.get('agent.merge')).toEqual({ readOnlyHint: false, destructiveHint: false });
+    expect(byName.get('state.finalize')).toEqual({ readOnlyHint: false, destructiveHint: false });
     for (const readOnly of [
       'state.get',
       'state.validate',
@@ -1077,13 +1084,437 @@ describe('MCP lifecycle', () => {
   });
 });
 
+// ─── state.finalize ──────────────────────────────────────────────────────────
+
+describe('MCP state.finalize', () => {
+  it('marks the session completed with finishedAt (agent says "I am done")', async () => {
+    const server = makeServer();
+    const payload = toolJson(
+      (await toolCall(server, 'state.finalize', { status: 'completed' })).result,
+    );
+    expect(payload.status).toBe('completed');
+    expect(typeof payload.finishedAt).toBe('string');
+    expect(payload.sessionMetaPath).toBe(
+      path.join(path.dirname(statePath(server)), '.session-meta.json'),
+    );
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(path.dirname(statePath(server)), '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(meta.status).toBe('completed');
+    expect(typeof meta.finishedAt).toBe('string');
+  });
+
+  it('records a failed status with a result string', async () => {
+    const server = makeServer();
+    const payload = toolJson(
+      (await toolCall(server, 'state.finalize', { status: 'failed', result: 'flag not found' }))
+        .result,
+    );
+    expect(payload.status).toBe('failed');
+    expect(payload.result).toBe('flag not found');
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(path.dirname(statePath(server)), '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(meta.status).toBe('failed');
+    expect(meta.result).toBe('flag not found');
+  });
+
+  it('rejects statuses other than completed/failed before writing anything', async () => {
+    const server = makeServer();
+    for (const bad of [undefined, 'running', 'merged', 42]) {
+      const { result } = await toolCall(
+        server,
+        'state.finalize',
+        bad === undefined ? {} : { status: bad },
+      );
+      expect(result?.isError).toBe(true);
+      expect(toolText(result)).toContain('status must be "completed" or "failed"');
+    }
+    expect(fs.existsSync(path.join(path.dirname(statePath(server)), '.session-meta.json'))).toBe(
+      false,
+    );
+  });
+
+  it('honours { agent } scoping (a sub-agent finalizes its own copy)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { cmd_summary: 'work' } });
+    await toolCall(server, 'state.finalize', { agent: 'w1', status: 'completed', result: 'ok' });
+    const o = (server as unknown as ServerOptionsShape).options;
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(o.root, 'agents', 'w1', '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(meta.status).toBe('completed');
+    expect(meta.result).toBe('ok');
+    // The main session has no sidecar of its own.
+    expect(fs.existsSync(path.join(o.root, '.session-meta.json'))).toBe(false);
+  });
+
+  it('finalize → SIGTERM keeps the completed status (hosts kill servers after finalize)', async () => {
+    const dir = makeTmp();
+    const server = makeServer({ root: dir });
+    await toolCall(server, 'state.finalize', { status: 'completed' });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    server.installInterruptHandler();
+    try {
+      process.emit('SIGTERM', 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(dir, '.session-meta.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(meta.status).toBe('completed');
+    } finally {
+      server.detachInterruptHandler();
+      exitSpy.mockRestore();
+    }
+  });
+});
+
+// ─── session lifecycle: .session-meta.json sidecar ───────────────────────────
+
+describe('MCP session lifecycle', () => {
+  it('state.patch stamps lastActivityAt on the sidecar (first write flushes)', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/a' } });
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(path.dirname(statePath(server)), '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(typeof meta.lastActivityAt).toBe('string');
+    expect(Number.isNaN(Date.parse(meta.lastActivityAt as string))).toBe(false);
+  });
+
+  it('activity stamps are debounced to one write per 5s', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    await toolCall(server, 'state.patch', { patch: { goal: 'first' } });
+    const metaPath = path.join(path.dirname(statePath(server)), '.session-meta.json');
+    const first = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as AnyRecord;
+    // Within the 5s window: a write happens, but the stamp does not move.
+    await toolCall(server, 'state.patch', { patch: { goal: 'second' } });
+    expect(
+      (JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as AnyRecord).lastActivityAt,
+    ).toBe(first.lastActivityAt);
+    // After the window: the stamp moves (the in-memory clock is backdated).
+    const clock = (server as unknown as { lastActivityWrite: Map<string, number> })
+      .lastActivityWrite;
+    const key = [...clock.keys()][0]!;
+    clock.set(key, Date.now() - 10_000);
+    await toolCall(server, 'state.patch', { patch: { goal: 'third' } });
+    const third = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as AnyRecord;
+    expect(third.lastActivityAt).not.toBe(first.lastActivityAt);
+    expect(third.lastActivityAt > (first.lastActivityAt as string)).toBe(true);
+  });
+
+  it('rollback and checkpoint also stamp activity', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.checkpoint', { label: 'ck' });
+    const metaPath = path.join(path.dirname(statePath(server)), '.session-meta.json');
+    expect(fs.existsSync(metaPath)).toBe(true);
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/rolled' } });
+    await toolCall(server, 'state.rollback', {});
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as AnyRecord;
+    expect(typeof meta.lastActivityAt).toBe('string');
+  });
+
+  it('a broken sidecar never fails a state write (swallowed best-effort)', async () => {
+    const server = makeServer();
+    // The sidecar path is a DIRECTORY → every meta write rejects.
+    fs.mkdirSync(path.join(path.dirname(statePath(server)), '.session-meta.json'));
+    const payload = toolJson(
+      (await toolCall(server, 'state.patch', { patch: { working_dir: '/still-writes' } })).result,
+    );
+    expect((payload.state as AnyRecord).working_dir).toBe('/still-writes');
+    // agent.merge keeps the merge result even when the sub sidecar is broken.
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { cmd_summary: 'work' } });
+    fs.rmSync(path.join(path.dirname(statePath(server)), 'agents', 'w1', '.session-meta.json'), {
+      force: true,
+    });
+    fs.mkdirSync(path.join(path.dirname(statePath(server)), 'agents', 'w1', '.session-meta.json'), {
+      recursive: true,
+    });
+    const merged = toolJson((await toolCall(server, 'agent.merge', { agent: 'w1' })).result);
+    expect((merged.state as AnyRecord).cmd_summary).toBe('work');
+  });
+
+  it('agent-scoped writes stamp the AGENT sidecar, not the main one', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { working_dir: '/w1' } });
+    const o = (server as unknown as ServerOptionsShape).options;
+    const agentMeta = JSON.parse(
+      fs.readFileSync(path.join(o.root, 'agents', 'w1', '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(typeof agentMeta.lastActivityAt).toBe('string');
+    expect(fs.existsSync(path.join(o.root, '.session-meta.json'))).toBe(false);
+  });
+
+  it('agent.merge flips the sub sidecar to status merged with mergedAt', async () => {
+    const server = makeServer();
+    await toolCall(server, 'state.patch', { agent: 'w1', patch: { cmd_summary: 'work' } });
+    await toolCall(server, 'agent.merge', { agent: 'w1' });
+    const o = (server as unknown as ServerOptionsShape).options;
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(o.root, 'agents', 'w1', '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(meta.status).toBe('merged');
+    expect(typeof meta.mergedAt).toBe('string');
+  });
+
+  it('state.summary carries the lifecycle status/staleness', async () => {
+    const server = makeServer({ spec: GENERIC_PROCEDURE_SPEC });
+    // No sidecar yet → orphan.
+    let payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    let session = payload.session as AnyRecord;
+    expect(session.status).toBeNull();
+    expect(session.lastActivityAt).toBeNull();
+    expect(session.staleness).toBe('orphan');
+    // A write creates the sidecar → fresh running → active.
+    await toolCall(server, 'state.patch', { patch: { goal: 'work' } });
+    payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    session = payload.session as AnyRecord;
+    expect(session.status).toBeNull(); // activity stamp carries no status
+    expect(session.staleness).toBe('active');
+    // A running status with an ancient lastActivityAt → stale.
+    const metaPath = path.join(path.dirname(statePath(server)), '.session-meta.json');
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        status: 'running',
+        lastActivityAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
+      }),
+    );
+    payload = toolJson((await toolCall(server, 'state.summary', {})).result);
+    session = payload.session as AnyRecord;
+    expect(session.status).toBe('running');
+    expect(session.staleness).toBe('stale');
+  });
+
+  it('agent.list shows lifecycle: orphan / active / stale / completed / merged', async () => {
+    const server = makeServer();
+    const o = (server as unknown as ServerOptionsShape).options;
+    const agentsDir = path.join(o.root, 'agents');
+    // orphan: state file, no sidecar.
+    fs.mkdirSync(path.join(agentsDir, 'w-orphan'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'w-orphan', o.name), JSON.stringify({ version: 1, state: {} }));
+    // active: fresh running sidecar.
+    await toolCall(server, 'state.patch', { agent: 'w-active', patch: { working_dir: '/x' } });
+    fs.writeFileSync(
+      path.join(agentsDir, 'w-active', '.session-meta.json'),
+      JSON.stringify({
+        status: 'running',
+        lastActivityAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    // stale: running but silent for 10 minutes.
+    await toolCall(server, 'state.patch', { agent: 'w-stale', patch: { working_dir: '/x' } });
+    fs.writeFileSync(
+      path.join(agentsDir, 'w-stale', '.session-meta.json'),
+      JSON.stringify({
+        status: 'running',
+        lastActivityAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      }),
+    );
+    // completed via state.finalize.
+    await toolCall(server, 'state.patch', { agent: 'w-done', patch: { working_dir: '/x' } });
+    await toolCall(server, 'state.finalize', { agent: 'w-done', status: 'completed', result: 'ok' });
+    // merged via agent.merge.
+    await toolCall(server, 'state.patch', { agent: 'w-merged', patch: { cmd_summary: 'm' } });
+    await toolCall(server, 'agent.merge', { agent: 'w-merged' });
+
+    const payload = toolJson((await toolCall(server, 'agent.list', {})).result);
+    const byId = new Map(
+      (payload.agents as Array<AnyRecord>).map((a) => [a.id as string, a]),
+    );
+    expect(byId.get('w-orphan')!.staleness).toBe('orphan');
+    expect(byId.get('w-orphan')!.status).toBeNull();
+
+    const active = byId.get('w-active')!;
+    expect(active.status).toBe('running');
+    expect(active.staleness).toBe('active');
+    expect(active.lastActivityAt).toBeTypeOf('string');
+    expect(active.ageMs).toBeLessThan(5000);
+
+    const stale = byId.get('w-stale')!;
+    expect(stale.status).toBe('running');
+    expect(stale.staleness).toBe('stale');
+    expect(stale.ageMs).toBeGreaterThan(5 * 60 * 1000);
+
+    expect(byId.get('w-done')!.status).toBe('completed');
+    expect(byId.get('w-done')!.staleness).toBe('active');
+
+    expect(byId.get('w-merged')!.status).toBe('merged');
+    expect(byId.get('w-merged')!.staleness).toBe('active');
+  });
+
+  it('an agent without lastActivityAt gets no ageMs (null-safe projection)', async () => {
+    const server = makeServer();
+    const o = (server as unknown as ServerOptionsShape).options;
+    const agentsDir = path.join(o.root, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'w-bare'), { recursive: true });
+    fs.writeFileSync(
+      path.join(agentsDir, 'w-bare', '.session-meta.json'),
+      JSON.stringify({ status: 'running' }),
+    );
+    const payload = toolJson((await toolCall(server, 'agent.list', {})).result);
+    const bare = (payload.agents as Array<AnyRecord>)[0]!;
+    expect(bare.status).toBe('running');
+    expect(bare.lastActivityAt).toBeNull();
+    expect(bare.ageMs).toBeUndefined();
+    // staleness still computes (running with no timestamps → stale).
+    expect(bare.staleness).toBe('stale');
+  });
+});
+
+// ─── installInterruptHandler (SIGINT/SIGTERM via @non-paper installShutdown) ─
+
+describe('MCP installInterruptHandler', () => {
+  function nextTick(): Promise<void> {
+    return new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+  }
+
+  it('SIGTERM flushes status interrupted + re-pins the baseline, then exits', async () => {
+    const dir = makeTmp();
+    const server = makeServer({ root: dir });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/before-crash' } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const uninstall = server.installInterruptHandler();
+    try {
+      process.emit('SIGTERM', 'SIGTERM');
+      await nextTick();
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(dir, '.session-meta.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(meta.status).toBe('interrupted');
+      expect(typeof meta.lastActivityAt).toBe('string');
+      // The baseline was re-pinned to the SURVIVING state (the next
+      // process diffs from the post-crash state, not from before it).
+      const baseline = JSON.parse(
+        fs.readFileSync(path.join(dir, '.diff-baseline.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(baseline.working_dir).toBe('/before-crash');
+      expect(exitSpy).toHaveBeenCalledWith(130);
+    } finally {
+      uninstall();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('SIGINT also flushes interrupted', async () => {
+    const dir = makeTmp();
+    const server = makeServer({ root: dir });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/x' } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const uninstall = server.installInterruptHandler();
+    try {
+      process.emit('SIGINT', 'SIGINT');
+      await nextTick();
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(dir, '.session-meta.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(meta.status).toBe('interrupted');
+    } finally {
+      uninstall();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('an existing baseline is re-pinned to the surviving state by the flush', async () => {
+    const dir = makeTmp();
+    const server = makeServer({ root: dir });
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/first' } });
+    await toolCall(server, 'state.diff', {});
+    await toolCall(server, 'state.patch', { patch: { working_dir: '/second' } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const uninstall = server.installInterruptHandler();
+    try {
+      process.emit('SIGTERM', 'SIGTERM');
+      await nextTick();
+      const baseline = JSON.parse(
+        fs.readFileSync(path.join(dir, '.diff-baseline.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(baseline.working_dir).toBe('/second'); // re-pinned to the surviving state
+    } finally {
+      uninstall();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('installing twice returns the same uninstall closure', () => {
+    const server = makeServer();
+    const first = server.installInterruptHandler();
+    const second = server.installInterruptHandler();
+    expect(second).toBe(first);
+    server.detachInterruptHandler();
+    const third = server.installInterruptHandler();
+    expect(third).not.toBe(first);
+    third();
+  });
+
+  it('launch wires the handler unless installInterruptHandler: false', async () => {
+    const dir = makeTmp();
+    const { input, output } = streams();
+    const server = await launch({
+      spec: makeSpec(),
+      root: dir,
+      name: '.skillstate.json',
+      input,
+      output,
+    });
+    try {
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(dir, '.session-meta.json'), 'utf-8'),
+      ) as AnyRecord;
+      expect(meta.status).toBe('running');
+      expect(meta.agentId).toBe('');
+      expect(meta.protocolVersion).toBe('2026-07-28');
+      expect(typeof meta.startedAt).toBe('string');
+      // The handler is detached through the server (tests never emit for it).
+      expect(server.isRunning).toBe(true);
+    } finally {
+      server.detachInterruptHandler();
+    }
+  });
+
+  it('launch stamps the AGENT sidecar for agent-scoped launches', async () => {
+    const dir = makeTmp();
+    const { input, output } = streams();
+    const server = await launch({
+      spec: makeSpec(),
+      root: dir,
+      name: '.skillstate.json',
+      agent: 'env-agent',
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(dir, 'agents', 'env-agent', '.session-meta.json'), 'utf-8'),
+    ) as AnyRecord;
+    expect(meta.status).toBe('running');
+    expect(meta.agentId).toBe('env-agent');
+    expect(fs.existsSync(path.join(dir, '.session-meta.json'))).toBe(false);
+  });
+
+  it('launch survives an unwritable sidecar (best-effort stamp)', async () => {
+    const dir = makeTmp();
+    fs.mkdirSync(path.join(dir, '.session-meta.json'));
+    const { input, output } = streams();
+    const server = await launch({
+      spec: makeSpec(),
+      root: dir,
+      name: '.skillstate.json',
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const parsed = await toolCall(server, 'spec.get', {});
+    expect(toolJson(parsed.result).id).toBe('intercode-ctf');
+  });
+});
+
 // ─── launch ──────────────────────────────────────────────────────────────────
 
 describe('MCP launch', () => {
-  function streams(): { input: PassThrough; output: PassThrough } {
-    return { input: new PassThrough(), output: new PassThrough() };
-  }
-
   it('launch uses an explicit spec', async () => {
     const { input, output } = streams();
     const server = await launch({
@@ -1092,6 +1523,7 @@ describe('MCP launch', () => {
       name: '.skillstate.json',
       input,
       output,
+      installInterruptHandler: false,
     });
     const parsed = await toolCall(server, 'spec.get', {});
     expect(toolJson(parsed.result).id).toBe('custom');
@@ -1103,21 +1535,21 @@ describe('MCP launch', () => {
     const specPath = path.join(dir, 'spec.json');
     fs.writeFileSync(specPath, JSON.stringify(spec));
     const { input, output } = streams();
-    const server = await launch({ specPath, input, output });
+    const server = await launch({ specPath, root: makeTmp(), input, output, installInterruptHandler: false });
     const parsed = await toolCall(server, 'spec.get', {});
     expect(toolJson(parsed.result).id).toBe('from-file');
   });
 
   it('launch defaults to the InterCode CTF spec', async () => {
     const { input, output } = streams();
-    const server = await launch({ input, output });
+    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
     const parsed = await toolCall(server, 'spec.get', {});
     expect(toolJson(parsed.result).id).toBe('intercode-ctf');
   });
 
   it('launch falls back to the default spec for an empty specPath string', async () => {
     const { input, output } = streams();
-    const server = await launch({ specPath: '', input, output });
+    const server = await launch({ specPath: '', root: makeTmp(), input, output, installInterruptHandler: false });
     const parsed = await toolCall(server, 'spec.get', {});
     expect(toolJson(parsed.result).id).toBe('intercode-ctf');
   });
@@ -1130,7 +1562,7 @@ describe('MCP launch', () => {
     try {
       process.env['SKILLSTATE_SPEC_PATH'] = specPath;
       const { input, output } = streams();
-      const server = await launch({ input, output });
+      const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
       const parsed = await toolCall(server, 'spec.get', {});
       expect(toolJson(parsed.result).id).toBe('env-spec');
     } finally {
@@ -1155,7 +1587,7 @@ describe('MCP launch', () => {
     const restore = withCwd(project);
     try {
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output });
+      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
       const envelope = JSON.parse(
         fs.readFileSync(path.join(project, '.skillstate', 'skillstate.json'), 'utf-8'),
@@ -1173,7 +1605,7 @@ describe('MCP launch', () => {
     const restore = withCwd(home);
     try {
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output });
+      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
       const envelope = JSON.parse(
         fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
@@ -1299,7 +1731,7 @@ describe('MCP agent-scoped state', () => {
     process.env['SKILLSTATE_AGENT_ID'] = 'env-agent';
     try {
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output });
+      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/from-env' } });
       const envelope = JSON.parse(
         fs.readFileSync(

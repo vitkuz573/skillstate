@@ -33,14 +33,20 @@ import {
   createInitialState,
   mergeState,
   migrate,
+  readSessionMeta,
   redactSecrets,
   resolveHostStateForCwd,
   resolveStatePath,
   sanitizeAgentId,
+  sessionStaleness,
   validatePatchDeep,
   withStateLock,
+  writeSessionMeta,
   CURRENT_STATE_VERSION,
+  SESSION_META_FILE,
 } from '@skillstate/core';
+import type { SessionMeta } from '@skillstate/core';
+import { installShutdown } from '@skillstate/core';
 import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type {
   ProceduralSpec,
@@ -59,6 +65,12 @@ const SUMMARY_NOTES_MAX_CHARS = 200;
 
 /** How many `next_steps` entries the summary/spec.next projections keep. */
 const SUMMARY_NEXT_PREVIEW = 3;
+
+/**
+ * Session-activity debounce: the `.session-meta.json` `lastActivityAt`
+ * stamp is rewritten at most once per 5s of state writes.
+ */
+const ACTIVITY_DEBOUNCE_MS = 5000;
 
 /** A JSON-RPC request object (id may be a number, string, or null). */
 export interface JsonRpcRequest {
@@ -112,6 +124,14 @@ export interface LaunchArgs {
   tracker?: TokenTracker;
   input?: Readable;
   output?: Writable;
+  /**
+   * Wire the SIGINT/SIGTERM interrupt handler that flushes
+   * `{ status: 'interrupted' }` + the diff baseline before exiting
+   * (default `true`). In-process embedders that own the process and
+   * manage their own teardown pass `false` — the handler exits the
+   * PROCESS, which is wrong for embedded servers.
+   */
+  installInterruptHandler?: boolean;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -336,6 +356,15 @@ export class McpServer {
    */
   /** Writes (patch/rollback) applied per resolved state path this session. */
   private readonly writeSeq = new Map<string, number>();
+  /** Debounce clock for `.session-meta.json` activity stamps (per meta path). */
+  private readonly lastActivityWrite = new Map<string, number>();
+  /** Uninstall closure for the SIGINT/SIGTERM interrupt handler (if wired). */
+  private uninstallShutdown: (() => void) | null = null;
+  /** The `{ source, handler }` pair attached by `start()` (removed by `stop()`). */
+  private attached: {
+    source: Readable;
+    handler: (chunk: Buffer | string) => void;
+  } | null = null;
 
   constructor(private readonly options: McpServerOptions) {
     if (
@@ -345,6 +374,89 @@ export class McpServer {
     ) {
       throw new Error(`Invalid agent id: ${options.agent}`);
     }
+  }
+
+  /**
+   * The state DIRECTORY the server session owns (its sidecars —
+   * `.session-meta.json`, the diff baseline — live next to the default
+   * state file; agent-scoped calls keep their per-agent directories).
+   */
+  private get sessionDir(): string {
+    return path.dirname(this.resolveRef({}).filePath);
+  }
+
+  /**
+   * Stamp the session sidecar for `dir` with `lastActivityAt: now`,
+   * debounced to one write per {@link ACTIVITY_DEBOUNCE_MS} per directory
+   * (state writes stay the hot path). The meta sidecar is best-effort
+   * orchestration metadata: a failed write is swallowed — a broken
+   * sidecar never fails a state write. The write itself runs under the
+   * meta file's own `withStateLock` (never the state lock — no deadlock).
+   */
+  private async touchActivity(dir: string): Promise<void> {
+    const metaPath = path.join(dir, SESSION_META_FILE);
+    const now = Date.now();
+    if (now - (this.lastActivityWrite.get(metaPath) ?? 0) < ACTIVITY_DEBOUNCE_MS) {
+      return;
+    }
+    this.lastActivityWrite.set(metaPath, now);
+    try {
+      await writeSessionMeta(dir, { lastActivityAt: new Date(now).toISOString() });
+    } catch {
+      // Best-effort activity stamp (e.g. the sidecar path is unwritable).
+    }
+  }
+
+  /**
+   * Wire the @non-paper shutdown seam: SIGINT/SIGTERM best-effort flush
+   * the session sidecar to `status: "interrupted"` + re-pin the diff
+   * baseline to the surviving state (the next process starts diffing from
+   * the post-crash state, not from a pre-crash baseline), then exit with
+   * the conventional 130. Terminal statuses (`completed` / `failed` /
+   * `merged`) recorded by the agent itself are never clobbered — hosts
+   * SIGTERM their servers after a clean finalize too. Idempotent; returns
+   * an uninstall closure for embedders/tests.
+   */
+  installInterruptHandler(): () => void {
+    if (this.uninstallShutdown !== null) {
+      return this.uninstallShutdown;
+    }
+    this.uninstallShutdown = installShutdown(async () => {
+      try {
+        const current = readSessionMeta(this.sessionDir);
+        if (
+          current?.status !== 'completed' &&
+          current?.status !== 'failed' &&
+          current?.status !== 'merged'
+        ) {
+          // Hosts SIGTERM their servers after a clean finalize too — never
+          // clobber a terminal status the agent recorded itself.
+          await writeSessionMeta(this.sessionDir, {
+            status: 'interrupted',
+            lastActivityAt: new Date().toISOString(),
+          });
+        }
+      } catch {
+        // Meta flush is best-effort; the baseline flush below still runs.
+      }
+      try {
+        const ref = this.resolveRef({});
+        // Flush the baseline: the surviving state becomes the new "since
+        // your last look" point for the next process (never diff against
+        // a pre-crash baseline).
+        this.writeBaseline(ref.filePath, this.loadState(ref.filePath));
+      } catch {
+        // Baseline flush is best-effort too — teardown must never crash.
+      }
+      process.exit(130);
+    });
+    return this.uninstallShutdown;
+  }
+
+  /** Detach the SIGINT/SIGTERM handler (embedders/tests owning the process). */
+  detachInterruptHandler(): void {
+    this.uninstallShutdown?.();
+    this.uninstallShutdown = null;
   }
 
   /**
@@ -399,16 +511,23 @@ export class McpServer {
     const source = input ?? process.stdin;
     const sink = output ?? process.stdout;
     this.running = true;
-    source.on('data', (chunk: Buffer | string) => {
+    const handler = (chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString();
       void this.pump(text, sink);
-    });
+    };
+    source.on('data', handler);
+    this.attached = { source, handler };
     return this;
   }
 
-  /** Mark the server stopped (idempotent). */
+  /**
+   * Mark the server stopped (idempotent): detaches the input listener
+   * attached by `start()` so embedded servers release their streams.
+   */
   stop(): void {
     this.running = false;
+    this.attached?.source.removeListener('data', this.attached.handler);
+    this.attached = null;
   }
 
   /** Whether the server is currently reading from its input stream. */
@@ -597,6 +716,8 @@ export class McpServer {
         return this.stateSummary(args);
       case 'state.metrics':
         return this.stateMetrics();
+      case 'state.finalize':
+        return this.stateFinalize(args);
       case 'spec.get':
         return this.specGet();
       case 'spec.next':
@@ -650,6 +771,7 @@ export class McpServer {
       }
       return { before, after };
     });
+    await this.touchActivity(path.dirname(filePath));
     const payload = {
       state: after,
       changes: topChanges(before, after),
@@ -725,6 +847,7 @@ export class McpServer {
         checkpoints: listCheckpoints(dir),
       };
     });
+    await this.touchActivity(path.dirname(ref.filePath));
     return this.textResult(redactSecrets(JSON.stringify(payload)));
   }
 
@@ -765,12 +888,14 @@ export class McpServer {
       }
       return { checkpointId, state: record.state };
     });
+    await this.touchActivity(path.dirname(ref.filePath));
     return this.textResult(redactSecrets(JSON.stringify(payload)));
   }
 
   private stateSummary(args: Record<string, unknown>): McpToolResult {
     const filePath = this.resolveStore(args);
     const state = this.loadState(filePath);
+    const meta = readSessionMeta(path.dirname(filePath));
     const payload = {
       ...buildSummary(state),
       session: {
@@ -778,6 +903,9 @@ export class McpServer {
         envelopeVersion: CURRENT_STATE_VERSION,
         protocolVersion: this.protocolVersion,
         seq: this.writeSeq.get(filePath) ?? 0,
+        status: meta?.status ?? null,
+        lastActivityAt: meta?.lastActivityAt ?? null,
+        staleness: sessionStaleness(meta),
       },
     };
     return this.textResult(redactSecrets(JSON.stringify(payload)));
@@ -792,6 +920,38 @@ export class McpServer {
       throw new Error('No steps recorded yet: the token tracker session is empty');
     }
     return this.textResult(redactSecrets(JSON.stringify(tracker.getMetrics())));
+  }
+
+  /**
+   * `state.finalize` — the agent's own "I am done" signal. Writes the
+   * session sidecar `{ status, finishedAt, result }` under the meta lock
+   * and returns the recorded lifecycle so the orchestrator (or a later
+   * `agent.read`/`agent.list`) sees it. `result` is an optional free-text
+   * outcome; invalid statuses are rejected before anything is written.
+   */
+  private async stateFinalize(args: Record<string, unknown>): Promise<McpToolResult> {
+    const status = args['status'];
+    if (status !== 'completed' && status !== 'failed') {
+      throw new Error(
+        `status must be "completed" or "failed", got: ${JSON.stringify(status)}`,
+      );
+    }
+    const result = typeof args['result'] === 'string' ? args['result'] : undefined;
+    const ref = this.resolveRef(args);
+    const meta = await writeSessionMeta(path.dirname(ref.filePath), {
+      status,
+      finishedAt: new Date().toISOString(),
+      ...(result === undefined ? {} : { result }),
+    });
+    const payload: Record<string, unknown> = {
+      status: meta.status,
+      finishedAt: meta.finishedAt,
+      sessionMetaPath: path.join(path.dirname(ref.filePath), SESSION_META_FILE),
+    };
+    if (result !== undefined) {
+      payload['result'] = result;
+    }
+    return this.textResult(redactSecrets(JSON.stringify(payload)));
   }
 
   private specGet(): McpToolResult {
@@ -892,10 +1052,18 @@ export class McpServer {
 
   /**
    * `agent.list`: scan `<root>/agents/` and project each sub-agent state
-   * copy — id, statePath, exists, lastModified, and a LIGHT summary
-   * (top-level keys + size only, no values). Non-directory entries and
-   * ids outside `[A-Za-z0-9_-]{1,64}` are skipped; a missing agents
-   * directory yields an empty list.
+   * copy — id, statePath, exists, lastModified, lifecycle (status,
+   * lastActivityAt, staleness, ageMs) and a LIGHT summary (top-level keys
+   * + size only, no values). Non-directory entries and ids outside
+   * `[A-Za-z0-9_-]{1,64}` are skipped; a missing agents directory yields
+   * an empty list. The lifecycle comes from the agent dir's
+   * `.session-meta.json` sidecar: `orphan` when it is missing/corrupt,
+   * `stale` when a `running` session has not written anything for the
+   * core `STALE_MS` threshold (5 min — the provider died without a
+   * signal), `active` otherwise. A `running` agent reports its `ageMs`
+   * since the last
+   * activity so the main agent can tell "finished" from "died mid-run"
+   * at a glance.
    */
   private agentList(): McpToolResult {
     const agentsDir = path.join(this.options.root, 'agents');
@@ -911,6 +1079,7 @@ export class McpServer {
         continue;
       }
       const statePath = path.join(agentsDir, entry.name, this.options.name);
+      const meta = readSessionMeta(path.join(agentsDir, entry.name));
       let exists = false;
       let lastModified: string | null = null;
       let summary: Record<string, unknown> | undefined;
@@ -922,7 +1091,18 @@ export class McpServer {
       } catch {
         // No state file for this agent yet — listed with exists: false.
       }
-      const agent: Record<string, unknown> = { id: entry.name, statePath, exists, lastModified };
+      const agent: Record<string, unknown> = {
+        id: entry.name,
+        statePath,
+        exists,
+        lastModified,
+        status: meta?.status ?? null,
+        lastActivityAt: meta?.lastActivityAt ?? null,
+        staleness: sessionStaleness(meta),
+      };
+      if (meta?.status === 'running' && typeof meta.lastActivityAt === 'string') {
+        agent['ageMs'] = Date.now() - Date.parse(meta.lastActivityAt);
+      }
       if (summary !== undefined) {
         agent['summary'] = summary;
       }
@@ -979,6 +1159,16 @@ export class McpServer {
       sub['mergedAt'] = new Date().toISOString();
       this.writeState(subPath, sub);
     });
+    // Lifecycle: the sub-agent copy is folded — mark its sidecar `merged`
+    // (best-effort; the merge result above stays authoritative).
+    try {
+      await writeSessionMeta(path.dirname(subPath), {
+        status: 'merged',
+        mergedAt: new Date().toISOString(),
+      });
+    } catch {
+      // A broken sidecar never fails a completed merge.
+    }
     return this.textResult(redactSecrets(JSON.stringify({ agent, keep, state: merged, changes })));
   }
 
@@ -1139,7 +1329,7 @@ export class McpServer {
       {
         name: 'state.summary',
         description:
-          'Compact orientation over the state: goal, progress/next_steps/artifacts/blockers counts, the first 3 next steps, notes (truncated to 200 chars), state size, and session info (statePath, envelope version, protocolVersion, seq = writes applied through this session). Use this instead of state.get for fast context.',
+          'Compact orientation over the state: goal, progress/next_steps/artifacts/blockers counts, the first 3 next steps, notes (truncated to 200 chars), state size, and session info (statePath, envelope version, protocolVersion, seq = writes applied through this session, plus the lifecycle status/staleness from the .session-meta.json sidecar). Use this instead of state.get for fast context.',
         inputSchema: { type: 'object', properties: { ...stateTargetProps } },
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
@@ -1149,6 +1339,25 @@ export class McpServer {
           'Session metrics: accuracy (accepted patches / actionable steps), averagePromptSize (mean prompt chars per call), and totalTokens (cumulative prompt+response chars). Errors when no steps have been recorded.',
         inputSchema: { type: 'object', properties: {} },
         annotations: { readOnlyHint: true, destructiveHint: false },
+      },
+      {
+        name: 'state.finalize',
+        description:
+          "Signal that YOUR task is done: writes the session lifecycle status ('completed' or 'failed', optional free-text result) to the .session-meta.json sidecar so the orchestrator/agent.list sees a finished session instead of a running/interrupted one. Call it once at the very end of the procedure — not mid-run.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            status: {
+              type: 'string',
+              enum: ['completed', 'failed'],
+              description: "'completed' when the procedure finished, 'failed' when it gave up.",
+            },
+            result: { type: 'string', description: 'Optional one-line outcome summary.' },
+            ...stateTargetProps,
+          },
+          required: ['status'],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false },
       },
       {
         name: 'spec.get',
@@ -1167,7 +1376,7 @@ export class McpServer {
       {
         name: 'agent.list',
         description:
-          "List sub-agent state copies: scans <stateDir>/agents/ and returns { agents: [{ id, statePath, exists, summary (top-level keys + size, no values), lastModified }] }. Use it to discover parallel sub-agent sessions (hook session ids) and what they touched.",
+          "List sub-agent state copies: scans <stateDir>/agents/ and returns { agents: [{ id, statePath, exists, status, lastActivityAt, staleness ('active' | 'stale' = running with no writes for 5min | 'orphan' = no sidecar), ageMs (running sessions), summary (top-level keys + size, no values), lastModified }] }. Use it to discover parallel sub-agent sessions (hook session ids), what they touched, and whether they finished (status completed/merged), died (stale/interrupted), or are still alive.",
         inputSchema: { type: 'object', properties: {} },
         annotations: { readOnlyHint: true, destructiveHint: false },
       },
@@ -1185,7 +1394,7 @@ export class McpServer {
       {
         name: 'agent.merge',
         description:
-          "Merge a sub-agent's state copy into the MAIN state (under the cross-process lock): keys only in the sub state are taken, nested plain objects merge recursively, conflicting scalars follow keep: 'main' (default — the main value wins) or 'sub'. Returns { agent, keep, state, changes }. The sub state is NOT deleted — it is marked mergedAt (history).",
+          "Merge a sub-agent's state copy into the MAIN state (under the cross-process lock): keys only in the sub state are taken, nested plain objects merge recursively, conflicting scalars follow keep: 'main' (default — the main value wins) or 'sub'. Returns { agent, keep, state, changes }. The sub state is NOT deleted — it is marked mergedAt (history) and its session sidecar flips to status 'merged'.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -1357,6 +1566,17 @@ export { resolveHostStateForCwd as resolveStatePathForCwd } from '@skillstate/co
  * with the project as cwd therefore get per-project state without any
  * baked path. Explicit `args.root`/`args.name` remain available for
  * in-process embedding. Defaults to the canonical InterCode CTF spec.
+ *
+ * SESSION LIFECYCLE (release 2.3.0): launch stamps the session sidecar
+ * `<stateDir>/.session-meta.json` with `{ status: 'running', startedAt,
+ * agentId, protocolVersion }` — overwriting any previous
+ * `interrupted`/`completed` marker (a new launch means a fresh run) — and
+ * wires the SIGINT/SIGTERM handler that flushes
+ * `{ status: 'interrupted' }` + the diff baseline before exiting. The
+ * agent is expected to call `state.finalize` at the end of its procedure.
+ * In-process embedders that do not own the process can pass
+ * `installInterruptHandler: false` (tests) or call
+ * `server.detachInterruptHandler()` afterwards.
  */
 export async function launch(args?: LaunchArgs): Promise<McpServer> {
   const spec = resolveSpec(args, process.env);
@@ -1367,6 +1587,7 @@ export async function launch(args?: LaunchArgs): Promise<McpServer> {
   const agent =
     args?.agent ??
     (typeof agentEnv === 'string' && agentEnv.length > 0 ? agentEnv : '');
+  const sanitizedAgent = agent.length > 0 ? sanitizeAgentId(agent) : '';
   const server = new McpServer({
     spec,
     root,
@@ -1374,5 +1595,26 @@ export async function launch(args?: LaunchArgs): Promise<McpServer> {
     agent,
     tracker: args?.tracker,
   });
+  // Lifecycle: a live launch means this session is running NOW. The
+  // sidecar lives next to the DEFAULT state file (the agent's own
+  // directory when the launch is agent-scoped). Written through the core
+  // meta API (merge under the meta lock, atomic write).
+  try {
+    const defaultFilePath =
+      sanitizedAgent.length > 0
+        ? resolveStatePath(root, path.join('agents', sanitizedAgent, name))
+        : resolveStatePath(root, name);
+    await writeSessionMeta(path.dirname(defaultFilePath), {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      agentId: sanitizedAgent,
+      protocolVersion: PROTOCOL_VERSION,
+    });
+  } catch {
+    // Best-effort stamp: an unwritable sidecar must not block the server.
+  }
+  if (args?.installInterruptHandler !== false) {
+    server.installInterruptHandler();
+  }
   return server.start(args?.input, args?.output);
 }

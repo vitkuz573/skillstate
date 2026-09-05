@@ -340,6 +340,29 @@ export function findRawPatch(text: string): PatchLookup {
 }
 
 /**
+ * Read the session-meta sidecar's status (`<dir>/.session-meta.json`,
+ * sibling of the state file). Plain JS — inlined into the generated
+ * SessionStart hooks via `fn.toString()`. Returns the `status` string for
+ * a readable object-shaped sidecar, else `null` (missing/corrupt/other
+ * shape — no lifecycle marker). The `readFile` dependency is injected at
+ * the call site (real `node:fs` in hooks, mocks in tests).
+ */
+export function readSessionMetaStatus(
+  metaPath: string,
+  readFile: (p: string) => string,
+): string | null {
+  try {
+    const parsed = JSON.parse(readFile(metaPath));
+    if (isPlainObject(parsed) && typeof parsed.status === 'string') {
+      return parsed.status;
+    }
+  } catch (error) {
+    // Missing or corrupt sidecar — no lifecycle marker.
+  }
+  return null;
+}
+
+/**
  * Assemble the CJS snippet embedded into every generated hook script:
  * all sibling functions of this module, source-verbatim via
  * `fn.toString()`. The adapters splice this block after their `require`
@@ -360,6 +383,7 @@ export function hookRuntimeSnippet(): string {
     findRawPatch,
     sleepSync,
     lockStateWrite,
+    readSessionMetaStatus,
   ]
     .map((fn) => fn.toString())
     .join('\n\n');

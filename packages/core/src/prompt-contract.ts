@@ -66,6 +66,17 @@ export const HISTORY_UNRELIABLE_NOTE =
   '\nHistory is not reliable. Persist anything you need via the skillstate MCP tools (state.summary / state.patch) or a fenced ```json state_patch block.';
 
 /**
+ * The interrupted-session hint injected by the SessionStart hooks
+ * (claude + codex alike) when the session-meta sidecar carries
+ * `status: "interrupted"` — a previous run of this session was killed
+ * (SIGINT/SIGTERM) mid-procedure. The hook appends the preserved state
+ * path so the agent can review progress/blockers before continuing.
+ * A fresh launch overwrites the status back to `running`.
+ */
+export const INTERRUPTED_SESSION_NOTE =
+  '\nPrevious session was interrupted; state preserved at <path>; review progress/blockers before continuing.';
+
+/**
  * Render a state schema as the shared `## Schema` markdown block used by
  * every prompt formatter and adapter `injectState`. Fields without a
  * description fall back to "no description".
@@ -156,6 +167,8 @@ export function skillMdBody(options: SkillMdBodyOptions): string {
     '- Put anything you need to survive into `state_patch`; never rely on',
     '  the conversation remembering it.',
     '- `action` names what you will do next (e.g. "continue", "done").',
+    '- When the task is done, call state.finalize {status:"completed"} so the',
+    '  orchestrator knows (state.finalize {status:"failed"} on failure).',
     '',
   ].join('\n');
 }

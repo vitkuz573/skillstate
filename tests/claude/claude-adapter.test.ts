@@ -208,6 +208,82 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
     expect(parsed.hookSpecificOutput.additionalContext).toContain('"progress":3');
   });
 
+  it('session-start-compact appends the interrupted-session note when the sidecar says interrupted', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'project');
+    fs.mkdirSync(cwd, { recursive: true });
+    const statePath = path.join(cwd, '.skillstate', 'skillstate.json');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state: { progress: 7 } }, null, 2)}\n`);
+    fs.writeFileSync(
+      path.join(cwd, '.skillstate', '.session-meta.json'),
+      JSON.stringify({ status: 'interrupted', lastActivityAt: new Date().toISOString() }),
+    );
+
+    const scriptPath = writeScript(dir, adapter.generateHookScript('session-start-compact'));
+    const emitted = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({ cwd, source: 'compact' }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    const parsed = JSON.parse(emitted) as any;
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(
+      'Previous session was interrupted; state preserved at',
+    );
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(statePath);
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(
+      'review progress/blockers before continuing.',
+    );
+  });
+
+  it('session-start-compact stays silent when the sidecar is completed/running/missing/corrupt', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'project');
+    fs.mkdirSync(cwd, { recursive: true });
+    const statePath = path.join(cwd, '.skillstate', 'skillstate.json');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state: {} }, null, 2)}\n`);
+    const scriptPath = writeScript(dir, adapter.generateHookScript('session-start-compact'));
+    const input = JSON.stringify({ cwd, source: 'compact' });
+    for (const meta of [
+      JSON.stringify({ status: 'completed' }),
+      JSON.stringify({ status: 'running' }),
+      '{corrupt',
+    ]) {
+      fs.writeFileSync(path.join(cwd, '.skillstate', '.session-meta.json'), meta);
+      const emitted = execFileSync(nodePath, [scriptPath], {
+        input,
+        encoding: 'utf-8',
+        cwd,
+      }).toString();
+      expect((JSON.parse(emitted) as any).hookSpecificOutput.additionalContext).not.toContain(
+        'Previous session was interrupted',
+      );
+    }
+  });
+
+  it('user-prompt-submit never appends the interrupted note (no SessionStart boundary)', () => {
+    const dir = makeTmp();
+    const cwd = path.join(dir, 'project');
+    fs.mkdirSync(cwd, { recursive: true });
+    const statePath = path.join(cwd, '.skillstate', 'skillstate.json');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify({ version: 1, state: {} }, null, 2)}\n`);
+    fs.writeFileSync(
+      path.join(cwd, '.skillstate', '.session-meta.json'),
+      JSON.stringify({ status: 'interrupted' }),
+    );
+    const scriptPath = writeScript(dir, adapter.generateHookScript('user-prompt-submit'));
+    const emitted = execFileSync(nodePath, [scriptPath], {
+      input: JSON.stringify({ cwd }),
+      encoding: 'utf-8',
+      cwd,
+    }).toString();
+    expect((JSON.parse(emitted) as any).hookSpecificOutput.additionalContext).not.toContain(
+      'Previous session was interrupted',
+    );
+  });
+
   it('falls back to process.cwd() and to {} when the state file is missing', () => {
     const dir = makeTmp();
     const cwd = path.join(dir, 'empty-project');
@@ -276,7 +352,8 @@ describe('ClaudeAdapter.generateHookScript — injection events', () => {
   it('documents the statePath argument in the header but never bakes it in', () => {
     const script = adapter.generateHookScript('user-prompt-submit', '/tmp/explicit-state.json');
     expect(script).toContain('/tmp/explicit-state.json');
-    expect(script).toContain('resolveStatePathForCwd(path.resolve(cwd)');
+    expect(script).toContain('resolveStatePathForCwd(');
+    expect(script).toContain('path.resolve(cwd)');
   });
 
   it('rejects traversal statePath refs', () => {

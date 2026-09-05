@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
 [![node](https://img.shields.io/node/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
-[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
+[![Tests](https://img.shields.io/badge/tests-1165%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
@@ -96,7 +96,7 @@ opencode debug config   # mcp.skillstate appears in the resolved config
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
-# -> protocolVersion "2026-07-28" + 13 tools
+# -> protocolVersion "2026-07-28" + 14 tools
 ```
 
 ## API / Exports
@@ -128,7 +128,8 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
 (dry-run), `state.diff` (changes since the last call, `{ full: true }` for
 before/after), `state.checkpoint` (named sidecar snapshot),
 `state.rollback` (restore from a checkpoint), `state.summary` (compact
-orientation + session info), `state.metrics`, `spec.get` (with a ready-made
+orientation + session info), `state.metrics`, `state.finalize` (the agent's
+"I am done" lifecycle marker), `spec.get` (with a ready-made
 valid `example_state_patch`), `spec.next` (goal/next/blockers guidance),
 plus the AGENT tools `agent.list` / `agent.read` / `agent.merge`.
 `state.merge` and `state.reset` are gone — `state.patch` validates, and
@@ -146,13 +147,43 @@ state writes. The `state.diff` baseline is persisted to
 `<stateDir>/.diff-baseline.json` (atomic, under the lock) — the
 "since your last look" semantics is now consistent across processes.
 The agent tools: `agent.list` scans `<stateDir>/agents/` and returns
-`{ agents: [{ id, statePath, exists, summary, lastModified }] }` (light
-summary: keys + size, no values); `agent.read` returns a sub-agent's state
-read-only; `agent.merge` folds a sub-agent copy into the main state under
-the lock — keys only in the sub state are taken, nested objects merge
-recursively, conflicting scalars follow `keep: 'main'` (default) or
-`'sub'` (schema defaults count as "never set"), and the sub copy is NOT
-deleted — it is marked `mergedAt` (history).
+`{ agents: [{ id, statePath, exists, status, lastActivityAt, staleness,
+ageMs, summary, lastModified }] }` (light summary: keys + size, no values);
+`agent.read` returns a sub-agent's state read-only; `agent.merge` folds a
+sub-agent copy into the main state under the lock — keys only in the sub
+state are taken, nested objects merge recursively, conflicting scalars
+follow `keep: 'main'` (default) or `'sub'` (schema defaults count as
+"never set"), and the sub copy is NOT deleted — it is marked `mergedAt`
+(history) and its session sidecar flips to `status: 'merged'`.
+
+**Session lifecycle (2.3.0).** The state envelope belongs to the
+procedure; the session lifecycle lives in a separate sidecar next to
+every state file — `<stateDir>/.session-meta.json` (agent scopes:
+`agents/<id>/.session-meta.json`), written atomically under its own
+`withStateLock`:
+
+- `launch()` stamps `{ status: 'running', startedAt, agentId,
+  protocolVersion }` — a new launch overwrites any previous
+  `interrupted`/`completed` marker (a fresh run has begun).
+- Every state write (`state.patch` / `state.rollback` /
+  `state.checkpoint` / `agent.merge`) refreshes `lastActivityAt`,
+  debounced to at most one sidecar write per 5 s; a broken sidecar never
+  fails a state write.
+- `state.finalize { status: 'completed' | 'failed', result? }` is the
+  agent's own "I am done" signal — it writes `{ status, finishedAt,
+  result }` so `agent.list`/`state.summary` show a finished session
+  instead of a running/interrupted one.
+- SIGINT/SIGTERM flush `status: 'interrupted'` + re-pin the diff baseline
+  to the surviving state, then exit 130 (`installShutdown` from
+  `@skillstate/core`; terminal statuses recorded by the agent are never
+  clobbered). Embedders that own the process pass
+  `installInterruptHandler: false`.
+- Staleness (`STALE_MS` = 5 min in `@skillstate/core`):
+  `active` — fresh running session or a terminal status; `stale` —
+  `running` with no writes for 5 min (the provider died without a
+  signal); `orphan` — no (or corrupt) sidecar. `agent.list` adds `ageMs`
+  for running sessions; `state.summary` adds `status`/`lastActivityAt`/
+  `staleness` to its `session` object.
 
 **Resources (`resources/read`):** `skillstate://state` (the full
 `{ version, state }` envelope), `skillstate://spec`, and
