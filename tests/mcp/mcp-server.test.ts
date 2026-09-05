@@ -123,7 +123,27 @@ afterEach(() => {
 // ─── JSON-RPC handshake ──────────────────────────────────────────────────────
 
 describe('MCP JSON-RPC handshake', () => {
-  it('initialize always answers protocolVersion 2026-07-28 (older client)', async () => {
+  it('initialize echoes each supported client revision', async () => {
+    const server = makeServer();
+    for (const clientVersion of [
+      '2026-07-28',
+      '2025-06-18',
+      '2025-03-26',
+      '2024-11-05',
+    ]) {
+      const parsed = await parseResult(
+        call(server, 'initialize', {
+          protocolVersion: clientVersion,
+          capabilities: {},
+          clientInfo: { name: 'test', version: '1.0' },
+        }),
+      );
+      expect(parsed.id).toBe(1);
+      expect(parsed.result?.protocolVersion).toBe(clientVersion);
+    }
+  });
+
+  it('initialize echoes serverInfo on negotiation', async () => {
     const server = makeServer();
     const parsed = await parseResult(
       call(server, 'initialize', {
@@ -132,17 +152,15 @@ describe('MCP JSON-RPC handshake', () => {
         clientInfo: { name: 'test', version: '1.0' },
       }),
     );
-    expect(parsed.id).toBe(1);
-    expect(parsed.result?.protocolVersion).toBe('2026-07-28');
     expect(parsed.result?.serverInfo).toEqual({ name: 'skillstate', version: '1.0.0' });
   });
 
-  it('initialize answers 2026-07-28 for exact, newer, and unknown client versions', async () => {
+  it('initialize falls back to 2026-07-28 for newer, unknown, missing, and non-string versions', async () => {
     const server = makeServer();
-    for (const clientVersion of ['2026-07-28', '2030-01-01', 'garbage-version']) {
+    for (const requested of ['2030-01-01', 'garbage-version', 42, undefined]) {
       const parsed = await parseResult(
         call(server, 'initialize', {
-          protocolVersion: clientVersion,
+          ...(requested === undefined ? {} : { protocolVersion: requested }),
           capabilities: {},
           clientInfo: { name: 't', version: '0' },
         }),

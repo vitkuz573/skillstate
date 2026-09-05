@@ -1,8 +1,9 @@
 /**
  * @non-paper MCP server — no MCP exists in arXiv 2608.26263v3.
  *
- * A zero-dependency Model Context Protocol server (protocol revision
- * `2026-07-28`) over stdio: newline-delimited JSON-RPC 2.0 in, one
+ * A zero-dependency Model Context Protocol server (negotiates protocol
+ * revisions `2024-11-05` … `2026-07-28` on `initialize`) over stdio:
+ * newline-delimited JSON-RPC 2.0 in, one
  * newline-terminated JSON-RPC response per message out. It exposes the
  * skillstate runtime as MCP tools and resources and reuses the
  * paper-exact core directly:
@@ -57,8 +58,22 @@ import type {
   TokenTracker,
 } from '@skillstate/core';
 
-/** The single MCP protocol revision this server speaks (initialize answer). */
-export const PROTOCOL_VERSION = '2026-07-28';
+/**
+ * MCP protocol revisions this server speaks, oldest first. `initialize`
+ * echoes the client's requested revision when it is listed here and falls
+ * back to `PROTOCOL_VERSION` (the newest) otherwise — the negotiation
+ * shape recommended by the MCP spec.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
+  '2024-11-05',
+  '2025-03-26',
+  '2025-06-18',
+  '2026-07-28',
+];
+
+/** The newest supported revision — the `initialize` fallback answer. */
+export const PROTOCOL_VERSION: string =
+  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
 
 /** `notes` is truncated to this many chars in summary projections. */
 const SUMMARY_NOTES_MAX_CHARS = 200;
@@ -327,11 +342,27 @@ function sanitizeLabel(raw: string): string {
 }
 
 /**
+ * Protocol-version negotiation for `initialize`: echo the client's
+ * requested revision when this server supports it, else answer with the
+ * newest supported revision (`PROTOCOL_VERSION`) — the client then decides
+ * whether it can work with it (per the MCP spec). Missing, non-string, or
+ * empty `protocolVersion` params are treated as unknown → newest.
+ */
+export function negotiateProtocolVersion(requested: unknown): string {
+  return (
+    typeof requested === 'string' &&
+    SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+      ? requested
+      : PROTOCOL_VERSION
+  );
+}
+
+/**
  * The `skillstate` MCP server: a JSON-RPC 2.0 over stdio server exposing
  * the skillstate runtime as MCP tools and resources.
  */
 export class McpServer {
-  /** Protocol revision advertised on `initialize` — always exactly this. */
+  /** Newest supported revision — the fallback `initialize` answer. */
   readonly protocolVersion = PROTOCOL_VERSION;
   /** Advertised server capabilities. */
   readonly capabilities = {
@@ -595,12 +626,15 @@ export class McpServer {
     params: unknown,
   ): Promise<string> {
     switch (method) {
-      case 'initialize':
+      case 'initialize': {
+        const requested =
+          isPlainObject(params) ? params['protocolVersion'] : undefined;
         return this.successResponse(id, {
-          protocolVersion: this.protocolVersion,
+          protocolVersion: negotiateProtocolVersion(requested),
           capabilities: this.capabilities,
           serverInfo: this.serverInfo,
         });
+      }
       case 'ping':
         return this.successResponse(id, {});
       case 'tools/list':

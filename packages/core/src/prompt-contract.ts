@@ -25,7 +25,7 @@ export const STATE_PATCH_CONTRACT_HEADER =
 export const STATE_PATCH_EXAMPLE_JSON = [
   '```json',
   '{',
-  '  "state_patch": { "key": "new_value", "obsolete_key": null },',
+  '  "state_patch": { "goal": "What this procedure achieves", "obsolete_step": null },',
   '  "action": "your_action_here"',
   '}',
   '```',

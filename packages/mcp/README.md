@@ -101,9 +101,10 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## API / Exports
 
-Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
-`PROTOCOL_VERSION` (plus the types `McpServerOptions`, `LaunchArgs`,
-`JsonRpcRequest`, `McpToolResult`, `ToolAnnotations`, and `McpConfigOptions`).
+Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`,
+`PROTOCOL_VERSION`, and `SUPPORTED_PROTOCOL_VERSIONS` (plus the types
+`McpServerOptions`, `LaunchArgs`, `JsonRpcRequest`, `McpToolResult`,
+`ToolAnnotations`, and `McpConfigOptions`).
 
 - `new McpAdapter()` — `name = 'mcp'`.
   - `generateMcpConfig(target, options?): string` — a deterministic,
@@ -112,9 +113,11 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`, and
     the state from its own cwd.
   - `saveMcpConfig(target, options?): Promise<string>` — atomic write.
 - `new McpServer(options: McpServerOptions)` — `{ spec, root, name, agent?, tracker? }`.
-  - `protocolVersion` is always `'2026-07-28'`; `initialize` answers exactly
-    that regardless of what the client requested (per the MCP spec the client
-    decides whether it can work with the server's revision).
+  - `protocolVersion` is the newest supported revision (`'2026-07-28'`).
+    `initialize` echoes the client's requested revision when it is one of
+    `SUPPORTED_PROTOCOL_VERSIONS` (`2024-11-05` … `2026-07-28`) and answers
+    with the newest otherwise — the client decides whether it can work with
+    the negotiated revision (per the MCP spec).
   - `handleLine(line): Promise<string | null>` — process one already-framed
     JSON-RPC message.
   - `feed(chunk): Promise<string[]>` — consume streamed stdin
