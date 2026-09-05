@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/bench",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Deterministic local benchmark harness for the skillstate runtime (entry only).",
   "type": "module",
   "main": "dist/index.js",
@@ -21,6 +21,6 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@skillstate/core": "^2.2.1"
+    "@skillstate/core": "^2.2.2"
   }
 }
