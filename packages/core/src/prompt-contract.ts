@@ -163,8 +163,11 @@ export function skillMdBody(options: SkillMdBodyOptions): string {
   }
   body.push(
     '',
-    'Sub-agents automatically get isolated state copies (agents/<session-id>);',
-    'merge them with `agent.merge` when their task completes.',
+    'One state file per session: the injected state and the skillstate MCP',
+    'tools address THE SAME file — never reconstruct or duplicate it.',
+    'Sub-agent sessions (spawned tasks) automatically get isolated copies',
+    'under agents/<parent>-<session>/ — merge them with `agent.merge` when',
+    'their task completes.',
     '',
     'The injected state is authoritative — history is not reliable. Never',
     'reconstruct execution context from the conversation.',

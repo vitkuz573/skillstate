@@ -1,0 +1,38 @@
+{
+  "id": "generic-procedure",
+  "name": "State-based Execution",
+  "version": "1.0.0",
+  "instructions": "You are operating in state-based execution mode on an arbitrary task.\n\nYour execution state is persisted externally and restored between\nsteps. Conversation history is trimmed automatically: never rely on\nit to carry information. Anything you need later MUST go into\nstate_patch this step.\n\nProcess for every step:\n1. Read the current state and the latest observation.\n2. Reason about the single next action that makes the most progress\n   toward the goal.\n3. Emit a JSON block with exactly two keys:\n   { \"state_patch\": { ... }, \"action\": \"<what you are doing next>\" }\n\nState discipline:\n- Keep `goal` accurate; refine it as understanding improves.\n- Move finished work into `progress`; keep `next_steps` current.\n- Record produced or modified files in `artifacts`.\n- Track unknowns and obstacles in `blockers` instead of memory.\n- Use `notes` for anything else worth persisting.\n- Set a key to null in state_patch to delete it.\n\nIterate observation -> reasoning -> state_patch -> action until the\ngoal is achieved and `progress` reflects it.",
+  "schema": {
+    "goal": {
+      "type": "string",
+      "default": "",
+      "description": "What the current procedure is trying to achieve"
+    },
+    "progress": {
+      "type": "array",
+      "default": [],
+      "description": "Completed steps or milestones"
+    },
+    "next_steps": {
+      "type": "array",
+      "default": [],
+      "description": "Planned next actions"
+    },
+    "artifacts": {
+      "type": "array",
+      "default": [],
+      "description": "Files or paths produced or modified so far"
+    },
+    "blockers": {
+      "type": "array",
+      "default": [],
+      "description": "Current obstacles or unknowns"
+    },
+    "notes": {
+      "type": "string",
+      "default": "",
+      "description": "Free-form working notes persisted between steps"
+    }
+  }
+}

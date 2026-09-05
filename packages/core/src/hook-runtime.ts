@@ -46,11 +46,15 @@ export function sanitizeAgentId(agentId: string): string {
  * Agent id from a host session id (Claude Code / Codex hook stdin carry
  * `session_id`; opencode hooks carry `sessionID`): the short prefix — the
  * first 8 characters — keeps agent directories bounded while remaining
- * unique enough per session. Non-string/empty input yields `''`.
+ * unique enough per session. The prefix is sanitized through
+ * {@link sanitizeAgentId} so a hostile or garbage session id can never
+ * craft a traversal-prone directory name (the sanitizer collapses `///`,
+ * whitespace, and other junk into `-`/empty; empty resolves to `''` =
+ * "no agent"). Non-string/empty input yields `''`.
  */
 export function resolveAgentIdFromSession(sessionId: unknown): string {
   if (typeof sessionId !== 'string' || sessionId.length === 0) return '';
-  return sessionId.slice(0, 8);
+  return sanitizeAgentId(sessionId.slice(0, 8));
 }
 
 /**

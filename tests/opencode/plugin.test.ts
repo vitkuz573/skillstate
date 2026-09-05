@@ -10,8 +10,11 @@ import {
   mergeSkillState,
   pluginAgentId,
   readSkillState,
+  registerSessionParent,
+  resetSessionParents,
   resolveStatePathForCwd,
   saveSkillState,
+  scopedAgentId,
 } from '@skillstate/opencode';
 import type { OpenCodeMessage, SkillStateHooks } from '@skillstate/opencode';
 
@@ -265,12 +268,92 @@ describe('pluginAgentId', () => {
   });
 });
 
+// ─── sub-agent session registry (event hook → parent scoping) ───────────────
+
+describe('registerSessionParent / scopedAgentId', () => {
+  afterEach(() => resetSessionParents());
+
+  it('a session with parentID resolves to <parent>-<session> scope', () => {
+    registerSessionParent('ses_sub_111', 'ses_par_222');
+    expect(scopedAgentId('ses_sub_')).toBe('ses_par_-ses_sub_');
+    expect(pluginAgentId({ sessionID: 'ses_sub_111' })).toBe('ses_par_-ses_sub_');
+  });
+
+  it('a main session (no parentID) keeps its own scope', () => {
+    registerSessionParent('ses_main_11', '');
+    expect(scopedAgentId('ses_main')).toBe('ses_main');
+    expect(pluginAgentId({ sessionID: 'ses_main_11' })).toBe('ses_main');
+  });
+
+  it('clears a stale registration when the parent is re-registered as empty', () => {
+    registerSessionParent('ses_x_1111', 'ses_p_1111');
+    expect(scopedAgentId('ses_x_11')).toBe('ses_p_11-ses_x_11');
+    registerSessionParent('ses_x_1111', '');
+    expect(scopedAgentId('ses_x_11')).toBe('ses_x_11');
+  });
+
+  it('ignores garbage ids and self-parenting', () => {
+    registerSessionParent('', 'ses_p_1111');
+    registerSessionParent(42, 'ses_p_1111');
+    registerSessionParent('ses_self_1', 'ses_self_1');
+    // Garbage that survives the first guard but sanitizes to '' hits the
+    // second return (L188) — e.g. a hostile "///" session id.
+    registerSessionParent('///', 'ses_p_1111');
+    registerSessionParent('***', 'ses_p_1111');
+    expect(scopedAgentId('ses_self_1')).toBe('ses_self_1');
+    expect(pluginAgentId({ sessionID: '///' })).toBe(PLUGIN_DEFAULT_AGENT_ID);
+    expect(pluginAgentId({ sessionID: '***' })).toBe(PLUGIN_DEFAULT_AGENT_ID);
+  });
+
+  it('two sub-agents of one parent get distinct scopes', () => {
+    registerSessionParent('ses_a_1111', 'ses_p_1111');
+    registerSessionParent('ses_b_2222', 'ses_p_1111');
+    expect(scopedAgentId('ses_a_11')).toBe('ses_p_11-ses_a_11');
+    expect(scopedAgentId('ses_b_22')).toBe('ses_p_11-ses_b_22');
+  });
+});
+
+describe('plugin event hook — session registry from the host bus', () => {
+  afterEach(() => resetSessionParents());
+
+  function eventOf(type: string, id: string, parentID?: string): { event: unknown } {
+    return {
+      event: {
+        type,
+        properties: { info: { id, ...(parentID === undefined ? {} : { parentID }) } },
+      },
+    };
+  }
+
+  it('registers sub-agents from session.created/updated and scopes them', async () => {
+    const hooks = await hooksFor();
+    await hooks['event']!(eventOf('session.created', 'ses_sub_999', 'ses_par_888'));
+    await hooks['event']!(eventOf('session.updated', 'ses_sub_999', 'ses_par_888'));
+    expect(pluginAgentId({ sessionID: 'ses_sub_999' })).toBe('ses_par_-ses_sub_');
+  });
+
+  it('ignores non-session events and malformed payloads', async () => {
+    const hooks = await hooksFor();
+    await hooks['event']!({ event: { type: 'message.updated', properties: {} } });
+    await hooks['event']!({ event: { type: 'session.created', properties: { info: null } } });
+    await hooks['event']!({ event: null });
+    expect(pluginAgentId({ sessionID: 'ses_ok_12345' })).toBe('ses_ok_1');
+  });
+
+  it('a parentless main session never leaves the root state file', async () => {
+    const hooks = await hooksFor();
+    await hooks['event']!(eventOf('session.created', 'ses_main_11'));
+    expect(pluginAgentId({ sessionID: 'ses_main_11' })).toBe('ses_main');
+  });
+});
+
 // ─── experimental.chat.messages.transform ───────────────────────────────────
 
 describe('createSkillStatePlugin — experimental.chat.messages.transform', () => {
-  it('exposes all three hooks', async () => {
+  it('exposes all four hooks', async () => {
     const hooks = await hooksFor();
     expect(Object.keys(hooks).sort()).toEqual([
+      'event',
       'experimental.chat.messages.transform',
       'experimental.session.compacting',
       'tool.execute.after',

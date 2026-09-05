@@ -39,6 +39,11 @@ export interface ToolExecuteAfterOutput {
 
 /** OpenCode hooks used by the skillstate plugin. */
 export interface SkillStateHooks {
+  /**
+   * Host event bus (`session.created`/`session.updated` carry the full
+   * Session, including `parentID`) — feeds the sub-agent registry.
+   */
+  event?: (input: { event: unknown }) => Promise<void>;
   'experimental.chat.messages.transform'?: (
     input: Record<string, never>,
     output: MessagesTransformOutput,

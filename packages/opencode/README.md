@@ -138,12 +138,16 @@ Root path `@skillstate/opencode` exports the adapter and the static plugin:
 - `createSkillStatePlugin({ maxHistoryMessages? })` — the static plugin
   factory (single source of truth for the hook logic); state is resolved from
   the session cwd on every hook call via
-  `resolveStatePathForCwd(process.cwd(), os.homedir())` —
-  `<cwd>/.skillstate/skillstate.json`, or the global bucket
-  `<home>/.skillstate/global/skillstate.json` when the session runs from
-  `$HOME`. Re-exported from `@skillstate/opencode/plugin` as well.
-- `resolveStatePathForCwd(cwd, home): string` — the per-project state path
-  resolution (pure path arithmetic, no filesystem access).
+  `resolveStatePathForCwd(process.cwd(), os.homedir(), agentId)`. The
+  `event` hook registers sub-agent sessions from the host bus
+  (`session.created`/`session.updated` carry `info.parentID`): a sub-agent
+  session resolves to `agents/<parentPrefix>-<sessionPrefix>/` instead of
+  overwriting its parent's state file.
+- `resolveStatePathForCwd(cwd, home?, agentId?): string` — the per-project
+  state path resolution (pure path arithmetic, no filesystem access).
+- `pluginAgentId(input, messages?)` / `scopedAgentId(agentId)` /
+  `registerSessionParent(sessionId, parentId)` / `resetSessionParents()` —
+  the agent-scope plumbing (session id → `agents/` directory name).
 - `readSkillState` / `saveSkillState` / `mergePatch` / `extractPatch` — the
   plugin's state helpers, shared by the static plugin.
 - `savePluginCode(target, options?): Promise<string>` — writes the plugin
@@ -162,9 +166,13 @@ Root path `@skillstate/opencode` exports the adapter and the static plugin:
 - The generated plugin is a **thin loader**: it imports
   `createSkillStatePlugin` from `@skillstate/opencode` (one source of truth).
   Hook logic lives only in `src/plugin.ts` — regenerate rather than editing
-  generated files. State resolves per session:
-  `<cwd>/.skillstate/skillstate.json` (global bucket from `~` when the
-  session cwd is `$HOME`).
+  generated files. **WHERE STATE LIVES** (each opencode session reads AND
+  writes the same path within its cwd — no cross-file surprises):
+  - main session: `<cwd>/.skillstate/skillstate.json`
+  - sub-agent session (Task sub-agents carry `parentID` on the session):
+    `<cwd>/.skillstate/agents/<parentPrefix>-<sessionPrefix>/skillstate.json`
+  - a session started in `$HOME`: the global bucket
+    `~/.skillstate/global/...` with the same main/sub split.
 - Depends on [`@skillstate/core`](../core) for `PromptTransformer`,
   `atomicWriteFile`, and `resolveStatePath`.
 

@@ -142,13 +142,20 @@ export function extractPatch(response: string): Record<string, unknown> | null {
  * message's `info.sessionID` (the transform hook input is empty — the
  * session lives on the message envelopes), else `'default'` (the plugin
  * trims the history of one session context).
+ *
+ * SUB-AGENT SCOPING: when the resolved session is a known sub-agent
+ * (registered via the `event` hook through
+ * {@link registerSessionParent}), the agent id becomes
+ * `<parentPrefix>-<sessionPrefix>` — the sub state lands INSIDE the
+ * parent's `agents/` scope instead of overwriting the parent's own state
+ * file, and two parallel sub-agents of one parent never share a scope.
  */
 export function pluginAgentId(
   input: { sessionID?: unknown },
   messages?: OpenCodeMessage[],
 ): string {
   const direct = resolveAgentIdFromSession(input?.sessionID);
-  if (direct.length > 0) return direct;
+  if (direct.length > 0) return scopedAgentId(direct);
   const fromMessages = (messages ?? []).find(
     (m) =>
       typeof m.info?.sessionID === 'string' &&
@@ -156,11 +163,55 @@ export function pluginAgentId(
       m.info.sessionID !== 'skillstate',
   );
   const indirect = resolveAgentIdFromSession(fromMessages?.info.sessionID);
-  return indirect.length > 0 ? indirect : PLUGIN_DEFAULT_AGENT_ID;
+  return indirect.length > 0 ? scopedAgentId(indirect) : PLUGIN_DEFAULT_AGENT_ID;
+}
+
+/**
+ * Widen an agent id for a registered sub-agent session:
+ * `<parentPrefix>-<sessionPrefix>`. Plain sessions resolve to themselves.
+ */
+export function scopedAgentId(agentId: string): string {
+  const parent = SUB_AGENT_PARENTS.get(agentId);
+  if (parent === undefined) return agentId;
+  return `${parent}-${agentId}`;
+}
+
+/**
+ * Record a session→parent edge from the host event stream. `sessionId`
+ * with a non-empty `parentID` registers that session as a sub-agent of
+ * `parentID`; an empty `parentID` (the main session being updated after
+ * the fact) clears a stale registration. Exposed for tests.
+ */
+export function registerSessionParent(sessionId: unknown, parentId: unknown): void {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+  const session = resolveAgentIdFromSession(sessionId);
+  if (session.length === 0) return;
+  const parent = resolveAgentIdFromSession(parentId);
+  if (parent.length === 0 || parent === session) {
+    SUB_AGENT_PARENTS.delete(session);
+    return;
+  }
+  SUB_AGENT_PARENTS.set(session, parent);
+}
+
+/** Test-only: forget every registered session→parent edge. */
+export function resetSessionParents(): void {
+  SUB_AGENT_PARENTS.clear();
 }
 
 /** Synthetic message ids for the injected state carrier. */
 const STATE_MESSAGE_ID = 'skillstate-state-inject';
+
+/**
+ * The session ids known to be SUB-AGENT sessions, keyed by session id →
+ * parent session id. Populated from the `event` hook
+ * (`session.created`/`session.updated` carry `info.parentID`); consulted
+ * when resolving an agent id so a sub-agent's state lands in the SAME
+ * agents/<parent>/<session-8>/ scope as its hook-session (the task tool
+ * spawns sessions whose ids never appear as sub-agent prefixes — without
+ * this map a sub-agent would silently write the MAIN state).
+ */
+const SUB_AGENT_PARENTS = new Map<string, string>();
 
 /**
  * Build the OpenCode plugin function with the same behavior for every host
@@ -180,6 +231,29 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
 
   return async () => {
     return {
+      // ── Session registry ──────────────────────────────────────────────
+      // The host event bus carries full Session objects on
+      // session.created/updated — including `parentID`. Registering here
+      // is what makes sub-agent scoping work: a Task sub-agent's session
+      // (parentID set) resolves to agents/<parent>-<session>/ BEFORE its
+      // first hook fires, so it never touches the parent's state file.
+      event: async ({ event }: { event: unknown }): Promise<void> => {
+        const payload = event as
+          | { type?: unknown; properties?: { info?: { id?: unknown; parentID?: unknown } } }
+          | undefined;
+        if (
+          payload === null ||
+          typeof payload !== 'object' ||
+          payload['type'] !== 'session.created' && payload['type'] !== 'session.updated'
+        ) {
+          return;
+        }
+        const info = payload['properties']?.['info'];
+        if (info === null || typeof info !== 'object') return;
+        const record = info as { id?: unknown; parentID?: unknown };
+        registerSessionParent(record['id'], record['parentID']);
+      },
+
       // ── O(1) history trimming ──────────────────────────────────────────
       // Filters messages BEFORE each LLM call: keeps all system messages
       // plus the last `maxHistory` non-system messages, then injects a
@@ -246,9 +320,9 @@ export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): S
       'tool.execute.after': async (input, output): Promise<void> => {
         const response = output.output ?? '';
         if (typeof response !== 'string') return;
+        const agentId = pluginAgentId(input);
         const patch = extractPatch(response);
         if (patch) {
-          const agentId = pluginAgentId(input);
           mergeSkillState(resolvePath(agentId), patch);
         }
       },
