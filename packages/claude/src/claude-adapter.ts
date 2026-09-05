@@ -285,6 +285,7 @@ ${STATE_PATCH_CONTRACT}`;
     return skillMdBody({
       hostLabel: 'Claude Code',
       injectionPhrase: 'injected into your context via hooks',
+      hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
       spec,
       statePath,
     });

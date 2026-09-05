@@ -23,11 +23,9 @@ import { PromptTransformer } from '@skillstate/core';
 import {
   atomicWriteFile,
   describeSchema,
-  REASONING_DISCARDED_NOTE,
   resolveStatePath,
+  skillMdBody,
   STATE_PATCH_CONTRACT,
-  STATE_PATCH_EXAMPLE_JSON,
-  STATE_PATCH_RULES,
 } from '@skillstate/core';
 import type { StatePathRef } from '@skillstate/core';
 
@@ -104,39 +102,16 @@ ${STATE_PATCH_CONTRACT}`;
    * the plugin's `messages.transform` hook — the LLM sees only the state.
    */
   generateSkillMd(spec: ProceduralSpec, statePath?: string): string {
-    const resolvedStatePath = statePath ?? './.skillstate.json';
-
-    return `---
-name: ${JSON.stringify(spec.name)}
-description: ${JSON.stringify(spec.instructions)}
-version: ${spec.version}
-execution_context:
-  state_path: ${resolvedStatePath}
-  format: json
----
-
-# ${spec.name}
-
-${spec.instructions}
-
-## Execution Context
-
-Your execution state is persisted at \`${resolvedStatePath}\`. Read it at the
-start of every step to recover where you are — never rely on conversation
-history to carry state between steps. History is automatically trimmed by the
-plugin; only the current state and the latest observation matter.
-
-## Process
-
-1. Read the current state from the state file.
-2. Observe the result of your last action.
-3. Reason about what to do next, given the state and the observation.
-4. Respond with:
-
-${STATE_PATCH_CONTRACT}
-
-- \`action\` names what you will do next (e.g. "continue", "done").
-- ${REASONING_DISCARDED_NOTE}`;
+    return skillMdBody({
+      hostLabel: 'OpenCode',
+      injectionPhrase: 'injected into the message list before every model call',
+      hooks: {
+        inject: 'messages.transform',
+        reInject: 'session.compacting',
+      },
+      spec,
+      statePath: statePath ?? './.skillstate/skillstate.json',
+    });
   }
 
   /**

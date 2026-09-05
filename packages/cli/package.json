@@ -25,9 +25,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@skillstate/codex": "^2.0.0",
-    "@skillstate/core": "^2.0.0",
-    "@skillstate/mcp": "^2.0.0",
-    "@skillstate/opencode": "^2.0.0"
+    "@skillstate/claude": "^2.2.0",
+    "@skillstate/codex": "^2.2.0",
+    "@skillstate/core": "^2.2.0",
+    "@skillstate/mcp": "^2.2.0",
+    "@skillstate/opencode": "^2.2.0"
   }
 }

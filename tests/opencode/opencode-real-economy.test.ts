@@ -118,7 +118,7 @@ describe('OpenCode messages.transform: O(1) message count', () => {
 // ─── generateSkillMd: updated instructions ──────────────────────────────────
 
 describe('OpenCode generateSkillMd: state persistence instructions', () => {
-  it('mentions history is trimmed by the plugin', () => {
+  it('tells the agent history is not reliable (trimmed by the plugin)', () => {
     const adapter = new OpenCodeAdapter();
     const md = adapter.generateSkillMd({
       id: 'test',
@@ -127,7 +127,9 @@ describe('OpenCode generateSkillMd: state persistence instructions', () => {
       schema: {},
       version: '1.0.0',
     });
-    expect(md).toContain('trimmed');
+    expect(md).toContain('not reliable');
+    expect(md).toContain('messages.transform');
+    expect(md).toContain('session.compacting');
   });
 
   it('mentions reasoning is discarded', () => {
@@ -139,6 +141,8 @@ describe('OpenCode generateSkillMd: state persistence instructions', () => {
       schema: {},
       version: '1.0.0',
     });
-    expect(md).toContain('discarded');
+    expect(md).toContain('state_patch');
+    expect(md).toContain('state.finalize');
+    expect(md).toContain('state.summary');
   });
 });

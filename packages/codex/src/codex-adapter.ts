@@ -318,6 +318,7 @@ export class CodexAdapter {
     return skillMdBody({
       hostLabel: 'Codex',
       injectionPhrase: 'provided as developer context',
+      hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
       spec,
       statePath,
     });

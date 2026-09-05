@@ -541,7 +541,7 @@ describe('CodexAdapter.generateSkillMd', () => {
     expect(md).toContain('state.patch');
     expect(md).toContain('not reliable');
     expect(md).toContain('UserPromptSubmit');
-    expect(md).toContain('^compact$');
+    expect(md).toContain('SessionStart');
     expect(md).toContain('PostToolUse');
     expect(md).toContain('null');
   });

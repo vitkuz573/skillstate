@@ -108,12 +108,14 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
   const claudeBody = skillMdBody({
     hostLabel: 'Claude Code',
     injectionPhrase: 'injected into your context via hooks',
+    hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
     spec,
     statePath: './.skillstate/skillstate.json',
   });
   const codexBody = skillMdBody({
     hostLabel: 'Codex',
     injectionPhrase: 'provided as developer context',
+    hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
     spec,
   });
 
@@ -127,11 +129,11 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
   });
 
   it('differs between hosts ONLY in the brand label and injection phrase', () => {
-    expect(claudeBody).toContain('The skillstate Claude Code hooks:');
+    expect(claudeBody).toContain('The skillstate Claude Code integration:');
     expect(claudeBody).toContain(
       '- the CURRENT state is injected into your context via hooks on every prompt submit',
     );
-    expect(codexBody).toContain('The skillstate Codex hooks:');
+    expect(codexBody).toContain('The skillstate Codex integration:');
     expect(codexBody).toContain(
       '- the CURRENT state is provided as developer context on every prompt submit',
     );
@@ -156,7 +158,7 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
       expect(body).toContain('orchestrator knows');
       expect(body).toContain('history is not reliable');
       expect(body).toContain('UserPromptSubmit');
-      expect(body).toContain('^compact$');
+      expect(body).toContain('SessionStart');
       expect(body).toContain('PostToolUse');
       expect(body).toContain(STATE_PATCH_EXAMPLE_JSON);
       expect(body).toContain(STATE_PATCH_RULES);
@@ -168,6 +170,7 @@ describe('skillMdBody (A2 — one body for claude + codex)', () => {
       skillMdBody({
         hostLabel: 'Codex',
         injectionPhrase: 'provided as developer context',
+        hooks: { inject: 'UserPromptSubmit', reInject: 'SessionStart', patchHook: 'PostToolUse' },
         spec,
       }),
     ).toBe(codexBody);
