@@ -18,13 +18,17 @@
  *   ```json `state_patch` block is merged (paper ⊕: null deletes) and saved.
  *
  * AGENT-SCOPED STATE: the opencode hook inputs carry the session id
- * (`input.sessionID`; message envelopes carry `info.sessionID`), so every
- * hook scopes the state file to `<cwd>/.skillstate/agents/<session>/` —
- * parallel opencode sessions (sub-agents) never last-writer-win over the
- * main state. When no session id is available the `'default'` agent is
- * used (the plugin trims the history of one session context). Writes go
- * through the core cross-process sync lock (`lockStateWrite`) so a
- * session state file is never interleaved between processes.
+ * (`input.sessionID`; message envelopes carry `info.sessionID`). The MAIN
+ * session resolves to the ROOT state file
+ * `<cwd>/.skillstate/skillstate.json` — the same file the skillstate MCP
+ * tools and the CLI address, so the injected state and `state.patch` can
+ * never disagree. SUB-AGENT sessions (registered from the host event bus —
+ * `session.created`/`session.updated` carry `info.parentID`) resolve to
+ * isolated `agents/<parentPrefix>-<sessionPrefix>/` copies and never
+ * last-writer-win the main state; the main agent folds them back with
+ * `agent.merge`. Writes go through the core cross-process sync lock
+ * (`lockStateWrite`) so a state file is never interleaved between
+ * processes.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -58,9 +62,6 @@ export * from './plugin-types.js';
 export { resolveHostStateForCwd as resolveStatePathForCwd };
 
 export { mergePatch };
-
-/** Agent scope used by the plugin when no session id is available. */
-export const PLUGIN_DEFAULT_AGENT_ID = 'default';
 
 /** Options for {@link createSkillStatePlugin}. */
 export interface SkillStatePluginOptions {
@@ -137,43 +138,45 @@ export function extractPatch(response: string): Record<string, unknown> | null {
 }
 
 /**
- * Agent id for an opencode hook call: the 8-char session prefix from
- * `input.sessionID` when the hook carries it, else the first non-synthetic
- * message's `info.sessionID` (the transform hook input is empty — the
- * session lives on the message envelopes), else `'default'` (the plugin
- * trims the history of one session context).
+ * Agent id for an opencode hook call.
  *
- * SUB-AGENT SCOPING: when the resolved session is a known sub-agent
- * (registered via the `event` hook through
- * {@link registerSessionParent}), the agent id becomes
- * `<parentPrefix>-<sessionPrefix>` — the sub state lands INSIDE the
- * parent's `agents/` scope instead of overwriting the parent's own state
- * file, and two parallel sub-agents of one parent never share a scope.
+ * MAIN SESSION → `''` (the ROOT state file `<cwd>/.skillstate/skillstate.json`
+ * — the SAME file the skillstate MCP tools and the CLI address, so the
+ * injected state and `state.patch` can never disagree). A session
+ * registered as a SUB-AGENT via the host event bus
+ * (`session.created`/`updated` carry `info.parentID`) resolves to
+ * `<parentPrefix>-<sessionPrefix>` — an isolated copy under `agents/` that
+ * never last-writer-wins the main state; the main agent folds it back with
+ * `agent.merge`. No session id at all → `''` (root: a single context).
  */
 export function pluginAgentId(
   input: { sessionID?: unknown },
   messages?: OpenCodeMessage[],
 ): string {
   const direct = resolveAgentIdFromSession(input?.sessionID);
-  if (direct.length > 0) return scopedAgentId(direct);
-  const fromMessages = (messages ?? []).find(
-    (m) =>
-      typeof m.info?.sessionID === 'string' &&
-      m.info.sessionID.length > 0 &&
-      m.info.sessionID !== 'skillstate',
-  );
-  const indirect = resolveAgentIdFromSession(fromMessages?.info.sessionID);
-  return indirect.length > 0 ? scopedAgentId(indirect) : PLUGIN_DEFAULT_AGENT_ID;
+  const sessionPrefix =
+    direct.length > 0
+      ? direct
+      : resolveAgentIdFromSession(
+          (messages ?? []).find(
+            (m) =>
+              typeof m.info?.sessionID === 'string' &&
+              m.info.sessionID.length > 0 &&
+              m.info.sessionID !== 'skillstate',
+          )?.info.sessionID,
+        );
+  if (sessionPrefix.length === 0) return '';
+  return scopedAgentId(sessionPrefix);
 }
 
 /**
  * Widen an agent id for a registered sub-agent session:
- * `<parentPrefix>-<sessionPrefix>`. Plain sessions resolve to themselves.
+ * `<parentPrefix>-<sessionPrefix>`. Plain sessions resolve to `''` (the
+ * main/root scope — NOT their own agents/ copy).
  */
 export function scopedAgentId(agentId: string): string {
   const parent = SUB_AGENT_PARENTS.get(agentId);
-  if (parent === undefined) return agentId;
-  return `${parent}-${agentId}`;
+  return parent === undefined ? '' : `${parent}-${agentId}`;
 }
 
 /**
