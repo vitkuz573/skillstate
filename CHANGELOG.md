@@ -161,49 +161,42 @@ empty is not a better product, and §5.1 line 12 having the runtime own executio
 is not a detail the implementation inherited — it is the difference between a
 record and nothing.
 
-**The crossover, measured.** Thirty files of forty lines each — 1,200 lines of
-observation, so the control's history has something to grow into. The lever is
-observation size, not file count: tiny files make a tiny transcript, which would
-rig the comparison in paper's favour by making the control's history too small
-to hurt.
+**The crossover, re-measured: the saving did not survive n=3.** Thirty files of
+forty lines each, 1,200 lines of observation. Six runs, all six 30/30 and all
+six correct:
 
-| arm, n=3 | prompt tokens, median | range | uncached input, range | correct | state |
-| --- | --- | --- | --- | --- | --- |
-| paper — bounded context | **966,072** | 594,894 – 1,390,359 | 52,545 – 144,015 | 2 / 2 | 25/30, 30/30 |
-| notes — transcript | 2,015,473 | 490,262 – 2,052,736 | 241,061 – 1,502,583 | 3 / 3 | 30/30 ×3 |
+| arm, n=3 | prompt tokens, median | range | uncached input, range |
+| --- | --- | --- | --- |
+| paper — bounded context | 1,613,699 | 1,211,662 – 2,211,504 | 121,609 – 130,133 |
+| notes — transcript | **148,160** | 96,827 – 1,780,955 | 36,413 – 1,240,321 |
 
-A third paper run was killed by us to free the machine and is excluded rather
-than counted as a failure.
+Paper is **ten times more expensive at the median**, and 12.5× more expensive
+than its own best run against the control's best. **The figures earlier in this
+entry — 2.09×, 1.25×, 8.96× — are withdrawn.** Each was real arithmetic on real
+numbers; each was computed against a control that happened to read file-by-file
+that day, and the 2.09× also compared an incomplete run with a complete one.
 
-**Paper is 2.09× cheaper at the median at thirty files, having been 3.75×
-dearer at eight.**
-The two numbers say exactly where the saving comes from: the control's
-*uncached input* is 16.6× paper's, because a growing history is re-sent on every
-request, while paper's context is stable and therefore cache-local. Paper's
-`cache_read` is the higher of the two — a bounded context that repeats is cached;
-a history that keeps changing is not.
+**Why the control is sometimes that cheap: a strategy, not a mechanism.** Two of
+three notes runs read one file and ran **one grep** across `src/` for the `REAL_`
+constants — 6 and 9 tool calls — and both declared the deviation in their own
+output: *"I did not read the files one at a time, and I emitted one consolidated
+state patch instead of 30."* The third read all thirty one at a time, 65 calls,
+1,780,955 tokens, costing about what paper cost.
 
-Scaling from 8 files to 30 is a 3.75× larger task. Paper went 923,253 → 966,072,
-**+5%**. The control went 245,940 → 2,052,736, **+735%**. That is the O(1)
-against O(n²) claim showing up in a measurement rather than a proof, and it puts
-the crossover somewhere between 8 and 30 files.
+**What survives is a bound, and it is the paper's shape.** Paper's prompt per
+request is 12,239 – 12,710 tokens across the three runs — a **1.04× spread,
+flat**. The control's runs 10,759 – 17,989 and grows with files read. The O(1)
+per-step claim holds, measured, and always did.
 
-**The spread corrects an earlier claim in this file.** The three-turn table
-reports paper's spread as flat to within 60 tokens against the control's ±18%,
-and calls that the mechanism visible in one number. Here it inverts: paper's
-relative MAD is 38%, the control's 1.8%. That flatness belonged to the short
-task, not to paper mode. What survives is narrower — paper's cost is bounded
-*per step* while its step count varies (45, 68, 31 tool calls), so the total is
-less predictable; the control's grows with its transcript while its run length is
-steadier. Paper wins the total and loses the predictability, and both are true.
+The catch is that ~12k of that 12.5k is the host's system prompt and tool
+definitions, not `Aₜ`; eq. 2's `Aₜ` is roughly 700 tokens and the host adds
+~11.5k on top, which both arms pay. So the paper's saving is a saving on the
+*marginal* context, and this host has a floor that swamps it. What the runs
+differ on is the request **count** — roughly 43 model turns against the
+control's 4.
 
-One caveat that does not resolve: paper answered correctly while its state ended
-25/30, and the control's ended 30/30 complete. The cause is measured and it
-belongs to the paper's own operator — §3 rule 1 replaces arrays wholesale, so a
-model emitting `done: ["cfg9.ts"]` over a ten-element list is doing exactly what
-is specified. The state rewinds, `total` double-counts, and the run still answers
-correctly out of its own arithmetic. A guard would be a rule the paper does not
-have.
+That is dispersion, not cost, and the two must not be swapped: the control's best
+case beats paper's worst by an order of magnitude.
 
 **Why the state lagged, and why the step driver costs what it costs.** Both come
 from the same thing, and neither was visible until `SKILLSTATE_DEBUG_STEPS`
