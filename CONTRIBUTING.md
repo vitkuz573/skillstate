@@ -58,7 +58,7 @@ declared in `vitest.config.ts`. `npm run test:coverage` fails the build unless
 Run the suite locally before pushing:
 
 ```bash
-npm test                # all tests (currently 745)
+npm test                # all tests; the count is deliberately not recorded here
 npm run test:coverage   # 100% on branches/functions/lines/statements
 ```
 

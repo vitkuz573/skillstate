@@ -5,7 +5,6 @@
 **O(1) prompt-footprint runtime for long-horizon agent skills — structured execution state instead of append-only conversation history.**
 
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](./CONTRIBUTING.md)
-[![Tests](https://img.shields.io/badge/tests-1165%20passing-brightgreen)](#development)
 [![npm version](https://img.shields.io/npm/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![node](https://img.shields.io/node/v/@skillstate/core)](https://www.npmjs.com/package/@skillstate/core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -729,6 +728,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML, wired machine-level by `skillstate install` and picking up each project's state automatically; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
 - [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
 - [x] Session lifecycle (`@non-paper`): `<stateDir>/.session-meta.json` sidecar (statuses `running`/`interrupted`/`completed`/`failed`/`merged`, debounced `lastActivityAt`, `STALE_MS` staleness in `agent.list`/`state.summary`), `state.finalize` marker, SIGINT/SIGTERM interrupt flush via `installShutdown`, and the `SessionStart` interrupted-session note in the claude/codex hooks
+- [ ] OpenCode limitation (deliberate): the v2 plugin does **not** trim the host transcript. Truncating it is what made the previous integration unusable — it deleted the task statement, the tool results and the errors the agent had just been given. The host conversation therefore stays O(T); the runtime's own prompt `(P, Σₜ, Oₜ)` remains O(1) per step, which is what the paper claims and what `tests/core/runtime-footprint.test.ts` asserts
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming
 - [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 
@@ -736,7 +736,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 
 ```bash
 npm ci
-npm test                # 1165 tests
+npm test                # the full suite; coverage thresholds are enforced below
 npm run test:coverage   # 100% thresholds enforced (branches/functions/lines/statements)
 npm run typecheck       # tsc -b
 npm run build           # tsc -b — emits each packages/*/dist/

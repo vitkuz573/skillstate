@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/claude)](https://www.npmjs.com/package/@skillstate/claude)
 [![node](https://img.shields.io/node/v/@skillstate/claude)](https://www.npmjs.com/package/@skillstate/claude)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitalykuzyaev/skillstate/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
 

@@ -6,7 +6,6 @@
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
 [![node](https://img.shields.io/node/v/@skillstate/mcp)](https://www.npmjs.com/package/@skillstate/mcp)
-[![Tests](https://img.shields.io/badge/tests-1165%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
