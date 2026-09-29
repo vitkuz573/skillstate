@@ -148,6 +148,42 @@ One caveat that does not resolve: paper answered correctly while its state ended
 also the one whose state lagged. Cheaper and correct, but less complete — a real
 trade, reported as one.
 
+**Why the state lagged, and why the step driver costs what it costs.** Both come
+from the same thing, and neither was visible until `SKILLSTATE_DEBUG_STEPS`
+printed what the loop actually did. Twenty-five patches were emitted and all
+twenty-five landed, so nothing was lost: the model read every file and declined
+to patch the last five. It was not the loop stopping, and not the ceiling —
+`drove` is true on every step in the trace.
+
+The model alternates work and talk. Verbatim, in order:
+
+```
+PATCH      I read `src/cfg1.ts` and found `REAL_1 = 51`. Total becomes 0 + 51 = 51
+no patch   I've read cfg1.ts (REAL_1 = 51, total = 51). Next: cfg2.ts.
+           Reasoning: State shows `done: ["sr...
+PATCH      I read `src/cfg2.ts` and found `REAL_2 = 88`. Adding that to the running total
+no patch   I'll read cfg3.ts next, as directed by the observation.
+PATCH      Read `src/cfg3.ts`: `REAL_3 = 28`. Current total 139 + 28 = 167
+no patch   Step-by-step reasoning: 1. Current state: `total = 232`, `done` = [cfg1...
+```
+
+Roughly half the text blocks carry no patch. The replaced context is why: the
+model cannot plan in prose across a turn when the turn's own text was thrown
+away, so it re-announces its plan and re-reads Σ out loud every time. "As
+directed by the observation" is the giveaway — it is narrating Oₜ back at us.
+
+Those narration turns are exactly the turns with no patch, and the state advances
+only on patch turns, so the state grows at about half the step rate. Thirty
+files cost about sixty steps, and `DEFAULT_MAX_STEPS` is 64. A thirty-file task
+sits on the ceiling. This also explains why `SKILLSTATE_DRIVE=0` is 2.9× cheaper:
+the host lets the model plan once and then act, instead of forcing a fresh turn
+per action. The cost is not context tokens — it is turns spent narrating.
+
+There is a tension here worth stating rather than resolving silently.
+`advance()` must fire on a step where nothing applied, or the loop halts at the
+first narration and the run ends where the paper's own failing did. The
+narration is currently the price of a live loop.
+
 **The paper's step boundary, implemented, behind a flag.** §5.1 gives the
 runtime `execute(aₜ, Σₜ₊₁)` and chains Oₜ into Oₜ₊₁: one observation per step.
 This integration had been delegating execution to the host's agent loop and
