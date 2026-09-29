@@ -468,10 +468,18 @@ export const CONTINUATION_MARKER =
  *
  * Its second sentence used to read "each step ends with a real tool call — read
  * the next file, or answer and stop." That clause was this repository's
- * instruction, not a host constraint, and it was measured doing exactly what it
- * said: a thirty-file task produced 51, 53 and 54 `read` calls for thirty
- * files, while a control with no step driver at all read one file and ran a
- * single grep — nine calls for the same work.
+ * instruction, not a host constraint, and it pointed the wrong way: a
+ * thirty-file task produced 51, 53 and 54 `read` calls for thirty files, while
+ * a control with no step driver at all read one file and ran a single grep —
+ * nine calls for the same work.
+ *
+ * Worth being precise about how much this was worth, because the first version
+ * of this comment claimed the note CAUSED those counts and that is not
+ * supported. The transcripts show the model batching anyway — up to nine
+ * consecutive `read` calls inside a single turn. So the note was pushing the
+ * wrong way and was not obeyed literally. It is one defect, and removing it is
+ * right on its own terms; it is not the whole of the 43% of calls that are
+ * re-reads.
  *
  * The host does not limit a turn to one tool call. It does limit what ends a
  * turn: no tool call means the turn is over. So the note says that, and says
