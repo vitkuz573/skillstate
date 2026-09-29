@@ -152,20 +152,66 @@ const PAPER_PREAMBLE_MARK = '<skillstate-task>';
 const transformer = new PromptTransformer();
 
 /**
- * A user message carries text in `content: [{ type: 'text', text }]`.
- * Anything else (a tool result, a media part) is not a task statement.
+ * The text a content part carries, whatever shape it arrives in.
+ *
+ * Two shapes exist and missing the second one is the single worst bug this
+ * module ever had:
+ *
+ * - `{ type: 'text', text: '…' }` — user, assistant and system turns;
+ * - `{ type: 'tool-result', result: { type: 'text', value: '…' } }` — what
+ *   OpenCode v2 actually emits for a tool result.
+ *
+ * A reader that handled only the first made Oₜ **permanently empty**: the
+ * host sends `result.value`, not `text`, so every observation came back as
+ * `''` and the model never saw the result of any tool it had just run. It
+ * would read a file, answer correctly in that same turn, and have no trace
+ * of the value on the next one — which presented as "the model will not
+ * record what it discovers" and cost a long hunt through prompt slots and
+ * model choice before anyone looked at the shape of the payload.
+ *
+ * The result body is unwrapped generically rather than assuming one layout:
+ * a bare string, `{ value }`, `{ output }`, or a nested `{ content }` all
+ * appear across host versions, and an observation that silently empties on
+ * a shape change is the failure mode that costs a debugging session.
+ */
+function partText(part: unknown, depth = 0): string {
+  // Hard depth cap, not a comment claiming one. A malformed or
+  // self-referential payload is a real possibility in a message the plugin
+  // does not own, and this runs inside the agent loop: an unbounded walk
+  // there is a hang, not a wrong answer.
+  if (depth > 4) return '';
+  if (typeof part === 'string') return part;
+  if (typeof part !== 'object' || part === null) return '';
+  const record = part as Record<string, unknown>;
+  const type = record['type'];
+  if (type === 'text' && typeof record['text'] === 'string') return record['text'];
+  if (type === 'tool-result') return resultText(record['result'], depth + 1);
+  return '';
+}
+
+function resultText(result: unknown, depth: number): string {
+  if (typeof result === 'string') return result;
+  if (typeof result !== 'object' || result === null) return '';
+  const record = result as Record<string, unknown>;
+  for (const key of ['value', 'output', 'text'] as const) {
+    const candidate = record[key];
+    if (typeof candidate === 'string') return candidate;
+  }
+  return partText(record['content'], depth + 1);
+}
+
+/**
+ * A message's readable text, joined across its parts.
+ *
+ * Order is preserved and parts are newline-joined, because a turn can carry
+ * both a file listing and a tool result and dropping either loses a fact the
+ * model needed.
  */
 function textOf(message: { content: unknown }): string {
   if (!Array.isArray(message.content)) return '';
   return message.content
-    .filter(
-      (part): part is { type: 'text'; text: string } =>
-        typeof part === 'object' &&
-        part !== null &&
-        (part as { type?: unknown }).type === 'text' &&
-        typeof (part as { text?: unknown }).text === 'string',
-    )
-    .map((part) => part.text)
+    .map((part) => partText(part))
+    .filter((text) => text.length > 0)
     .join('\n');
 }
 

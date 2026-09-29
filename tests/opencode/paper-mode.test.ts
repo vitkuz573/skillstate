@@ -386,6 +386,112 @@ describe('choosing the observation Oₜ', () => {
     expect(latestObservation([{ id: 'm', role: 'user', content: 'plain string' }]).content).toBe('');
   });
 
+  it('reads a real OpenCode v2 tool-result part', () => {
+    // ── The bug this guards ───────────────────────────────────────────────
+    // Captured from a live host on 2026-09-29. The payload is
+    // `{ type: 'tool-result', result: { type: 'text', value } }` — the text is
+    // under `result.value`, NOT `text`. A reader that only knew
+    // `{ type: 'text', text }` made Oₜ permanently empty, so the model never
+    // saw the output of any tool it ran: it would read a file, answer
+    // correctly in that turn, and have nothing on the next one. That
+    // presented as "the model refuses to record what it discovers" and sent
+    // the hunt through prompt slots and model choice before anyone looked at
+    // the shape of the payload.
+    const observation = latestObservation([
+      {
+        id: 'm',
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            id: 'call_1',
+            name: 'read',
+            result: { type: 'text', value: 'Read file src/mod3.ts, lines 1-1\n1: export const v3 = 21;' },
+            providerExecuted: false,
+          },
+        ],
+      },
+    ]);
+    expect(observation.source).toBe('tool');
+    expect(observation.content).toBe('Read file src/mod3.ts, lines 1-1\n1: export const v3 = 21;');
+  });
+
+  it('reads a tool result delivered as a bare string', () => {
+    const observation = latestObservation([
+      { id: 'm', role: 'tool', content: [{ type: 'tool-result', result: 'plain output' }] },
+    ]);
+    expect(observation.content).toBe('plain output');
+  });
+
+  it('yields nothing for a tool result that is not a string or an object', () => {
+    // A numeric or boolean body must render as nothing, never as "42" — the
+    // observation is a place the model reads facts, not metadata.
+    expect(
+      latestObservation([
+        { id: 'm', role: 'tool', content: [{ type: 'tool-result', result: 42 }] },
+      ]).content,
+    ).toBe('');
+  });
+
+  it('yields nothing for a tool message whose content is not an array', () => {
+    expect(
+      latestObservation([{ id: 'm', role: 'tool', content: 'a bare string' }]).content,
+    ).toBe('');
+  });
+
+  it('reads a tool result that uses output rather than value', () => {
+    // Host versions differ on which key carries the body; missing one makes
+    // the observation silently empty, which is the failure this guards.
+    expect(
+      latestObservation([
+        { id: 'm', role: 'tool', content: [{ type: 'tool-result', result: { output: 'via output' } }] },
+      ]).content,
+    ).toBe('via output');
+  });
+
+  it('reads a tool result that uses text at the result level', () => {
+    expect(
+      latestObservation([
+        { id: 'm', role: 'tool', content: [{ type: 'tool-result', result: { text: 'via text' } }] },
+      ]).content,
+    ).toBe('via text');
+  });
+
+  it('stops unwrapping a deeply nested result instead of recursing forever', () => {
+    // The depth cap is a real bound, not a comment: this runs inside the
+    // agent loop, where an unbounded walk is a hang rather than a wrong
+    // answer.
+    let nested: Record<string, unknown> = { type: 'tool-result' };
+    for (let i = 0; i < 20; i += 1) nested = { type: 'tool-result', result: { content: nested } };
+    expect(latestObservation([{ id: 'm', role: 'tool', content: [nested] }]).content).toBe('');
+  });
+
+  it('reads a tool result nested one wrapper deeper', () => {
+    const observation = latestObservation([
+      {
+        id: 'm',
+        role: 'tool',
+        content: [{ type: 'tool-result', result: { content: { type: 'text', text: 'buried' } } }],
+      },
+    ]);
+    expect(observation.content).toBe('buried');
+  });
+
+  it('yields nothing for a tool result with no readable body', () => {
+    // A result that carries metadata only must render as nothing rather than
+    // as "[object Object]" in the model's observation.
+    const observation = latestObservation([
+      { id: 'm', role: 'tool', content: [{ type: 'tool-result', result: { ok: true } }] },
+    ]);
+    expect(observation.content).toBe('');
+  });
+
+  it('survives a self-referential result without spinning', () => {
+    const cyclic: Record<string, unknown> = { type: 'tool-result' };
+    cyclic['result'] = { content: cyclic };
+    expect(latestObservation([{ id: 'm', role: 'tool', content: [cyclic] }]).content).toBe('');
+  });
+
   it('joins several text parts of one tool message', () => {
     const observation = latestObservation([
       { id: 'm', role: 'tool', content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] },
@@ -393,7 +499,10 @@ describe('choosing the observation Oₜ', () => {
     expect(observation.content).toBe('one\ntwo');
   });
 
-  it('ignores parts that are not text objects', () => {
+  it('keeps readable parts and drops the ones carrying nothing', () => {
+    // A bare string part IS readable text, so it is kept; `null` and a
+    // `{ type: 'text' }` with no body carry nothing and are dropped rather
+    // than rendered as blanks that would break the single-line A.4 slot.
     const observation = latestObservation([
       {
         id: 'm',
@@ -401,7 +510,7 @@ describe('choosing the observation Oₜ', () => {
         content: [null, 'bare', { type: 'text' }, { type: 'text', text: 'kept' }],
       },
     ]);
-    expect(observation.content).toBe('kept');
+    expect(observation.content).toBe('bare\nkept');
   });
 
   it('trims surrounding whitespace off the rendered observation', () => {

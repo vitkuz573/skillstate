@@ -84,10 +84,11 @@
  */
 
 import { Plugin } from '@opencode/plugin';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolvePluginMode } from './mode.js';
 import type { PluginMode } from './mode.js';
-import { applyPaperContext, buildPaperPrompt } from './paper-mode.js';
+import { applyPaperContext, buildPaperPrompt, latestObservation } from './paper-mode.js';
 import type { PaperContextEvent } from './paper-mode.js';
 import { FeedbackQueue } from './feedback.js';
 import { PaperStateSink, isTextEnded } from './response-sink.js';
@@ -99,6 +100,58 @@ import { registerTools } from './tools.js';
 
 /** Stable plugin id — scopes plugin storage and identifies it in `/api/plugin`. */
 export const PLUGIN_ID = 'skillstate';
+
+/** How much of an observation the diagnostic records. */
+const DEBUG_OBSERVATION_CHARS = 400;
+
+/**
+ * Append what the host actually handed us to a file, for diagnosis.
+ *
+ * @non-paper diagnostics. Enabled by `SKILLSTATE_DEBUG_PROMPT=<path>`.
+ *
+ * This exists because of a bug that was invisible from the inside for a
+ * long time. The model would run a tool, get the answer, and never record
+ * it — which looks exactly like a model refusing to cooperate, and sent the
+ * search through prompt slots, model choice and spec wording. The cause was
+ * the SHAPE: OpenCode v2 delivers a tool result as
+ * `{ type: 'tool-result', result: { value } }`, so a reader that only knew
+ * `{ type: 'text', text }` made Oₜ permanently empty without ever throwing.
+ *
+ * The dump records the part types alongside the extracted text, so that
+ * class of failure is visible on sight: a `tool-result` in the list next to
+ * an empty `observation` says the reader, not the model, is at fault.
+ *
+ * Append-only so a session's turns accumulate in order, and every failure
+ * is swallowed — diagnostics must never break the agent loop.
+ */
+export function dumpPromptShape(
+  path: string | undefined,
+  messages: ReadonlyArray<{ role: string; content: unknown }>,
+): void {
+  if (path === undefined || path.length === 0) return;
+  const record = {
+    turn: messages.length,
+    roles: messages.map((m) => m.role),
+    partTypes: messages.map((m) =>
+      Array.isArray(m.content)
+        ? m.content.map((part) =>
+            typeof part === 'object' && part !== null
+              ? String((part as { type?: unknown }).type)
+              : typeof part,
+          )
+        : typeof m.content,
+    ),
+    observation: latestObservation(messages as PaperContextEvent['messages']).content.slice(
+      0,
+      DEBUG_OBSERVATION_CHARS,
+    ),
+  };
+  try {
+    fs.appendFileSync(path, `${JSON.stringify(record)}\n`);
+  } catch {
+    // Diagnostics must never break the agent loop.
+  }
+}
 
 /**
  * The plugin definition.
@@ -206,12 +259,14 @@ export const SkillStatePlugin = Plugin.define({
         // Taken exactly once: `take` clears on read, so calling it twice would
         // show the correction to nobody.
         const correction = feedback?.take(event.sessionID);
+        const raw = event.messages as unknown as PaperContextEvent['messages'];
+        dumpPromptShape(process.env['SKILLSTATE_DEBUG_PROMPT'], raw);
         applyPaperContext(
           event as unknown as PaperContextEvent,
           buildPaperPrompt({
             spec: spec!,
             state,
-            messages: event.messages as unknown as PaperContextEvent['messages'],
+            messages: raw,
             ...(correction === undefined ? {} : { feedback: correction }),
           }),
         );
