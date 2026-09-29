@@ -182,7 +182,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | Host | Mechanism | State injection | O(1)? |
 | --- | --- | --- | --- |
 | **Claude Code** | project `.claude/settings.json` hook groups (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + project hook scripts + stdio project `.mcp.json` + shared project `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
-| **OpenCode** | npm plugin (`"plugins": ["@skillstate/opencode"]` in the project config) with **native tools**, plus the project MCP server for portable access, plus a shared project `SKILL.md` | one additive, bounded fragment on `event.system` — the transcript is never modified | additive, and deliberately so (see [Why the transcript is never rewritten](#why-the-transcript-is-never-rewritten)) |
+| **OpenCode** | npm plugin (`"plugins": ["@skillstate/opencode"]` in the project config) with **native tools**, plus a shared project `SKILL.md` | `notes` (default): one additive, bounded fragment on `event.system`, transcript untouched. `paper` (opt-in): the A.4 context replacement, O(1) in transcript length | additive by default, and deliberately so (see [Why the transcript is never rewritten](#why-the-transcript-is-never-rewritten)); paper mode is opt-in and A.4-conformant |
 | **Codex** | machine-level glue (`skillstate install`): `~/.codex/hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML | state injected per prompt, re-injected after compaction, persisted per Bash tool call — project state is picked up automatically from the session cwd | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
 | **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
 
@@ -329,31 +329,57 @@ default export directly.
 // opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@skillstate/opencode"],
-  "mcp": {
-    "skillstate": {
-      "type": "local",
-      "command": ["npx", "-y", "@skillstate/mcp@^3"],
-      "enabled": true
-    }
-  }
+  "plugins": ["@skillstate/opencode"]
 }
 ```
 
-Both integrations are registered on purpose. The plugin contributes **native
-tools** — typed schemas and structured output, no JSON-RPC round-trip. The
-MCP server is the portable surface: any other MCP-capable host reads the same
-state through it. They address one file, so they cannot disagree.
+Only the plugin is registered. The plugin contributes **native tools** — typed
+schemas and structured output, no JSON-RPC round-trip. The MCP server is still
+shipped for every other MCP-capable host (claude, codex, and anything without
+a plugin API); for opencode it was measured at ~1 600 tokens of resident tool
+description per request and a second, disagreeing view of what may be written
+to the same file. See the 3.0.1 changelog entry.
 
 ```ts
 // What the plugin registers, in setup():
 //   ctx.tool.transform(...)  -> skillstate_read, skillstate_update, skillstate_merge
-//   ctx.session.hook('context', e => e.system.push(...))   // additive only
-//   ctx.event.subscribe(...)  -> session parent edges, for sub-agent scoping
+//   ctx.session.hook('context', ...)  -> notes: additive; paper: replaces (opt-in)
+//   ctx.event.subscribe(...)  -> session parent edges + the paper-mode state sink
 ```
 
-Nothing else. It does not register `compaction`, `generate` or `title` hooks,
-and it never touches `event.messages`.
+Nothing else. It does not register `compaction`, `generate` or `title` hooks.
+
+#### Two modes
+
+The plugin holds one of two different contracts with the model. It is
+`notes` unless a project asks otherwise, and it must stay that way: a default
+that rewrites the context would reproduce the failure documented below.
+
+| | `notes` (default) | `paper` (opt-in) |
+|---|---|---|
+| `event.messages` | untouched | replaced by one A.4 prompt |
+| `event.system` | one bounded fragment | replaced (paper's P is the whole instruction surface) |
+| Σₜ source | the `skillstate_*` tools | the `state_patch` the model emits, applied automatically |
+| prompt size | grows with the transcript | constant — O(1) in transcript length |
+
+Select paper mode with either:
+
+```jsonc
+// skillstate.json in the project root
+{ "mode": "paper" }
+```
+
+```sh
+SKILLSTATE_MODE=paper opencode   # environment wins over the file
+```
+
+An unrecognised value falls back to `notes` and is reported rather than
+silently applied, so a typo cannot quietly select a mode nobody asked for.
+
+**Paper mode is the paper's specification, not a tuning knob.** §3.2 discards
+the reasoning trace by construction, so the model stops seeing its own
+transcript; everything it needs to remember has to be in Σₜ. It is worth
+choosing deliberately.
 
 The paper-exact `OpenCodeAdapter` is still exported as the research surface
 used by the benchmark. It is not the host integration, and nothing in the
@@ -381,13 +407,53 @@ the opposite: every message of a 67-message conversation survives, the array
 object is the same reference, and the only thing the plugin contributes goes
 to `event.system`.
 
-Three rules, each enforced by a test:
+Four rules, each enforced by a test:
 
 | Rule | Enforced by |
 | --- | --- |
-| Never mutate `event.messages` | `context-integrity.test.ts` |
+| `notes` mode never mutates `event.messages` | `context-integrity.test.ts` |
 | Never inject behavioural instructions | `system-hint.test.ts` |
 | Inert until a state file exists | `plugin.test.ts` |
+| `paper` mode replaces the context with exactly Aₜ | `paper-mode.test.ts` |
+
+#### Paper mode, and how Σₜ actually advances
+
+A.4 ends the prompt with a directive: emit a `json` block containing
+`{ "state_patch": { … }, "action": "…" }`. If nothing reads that block, Σₜ is
+frozen and every later step re-reads a state that stopped moving — silent,
+total failure on exactly the long-horizon work the paper targets.
+
+The v2 session API has no response hook. `SessionHooks` offers `prompt`,
+`context`, `compaction`, `generate`, `title`, the request/response HTTP hooks,
+the WebSocket hooks and `retry` — all of which run before or around the model
+call. None of them see the completed assistant text.
+
+The server's durable event stream does. `session.text.ended` publishes one
+finished assistant text block with `{ sessionID, assistantMessageID, ordinal,
+text }`, on the same stream the plugin already subscribes to for the session
+tree. `PaperStateSink` parses that text with the core's own
+`PromptTransformer.parseResponse` — the same parser the benchmark measures, so
+the A.4 prompt and the parse cannot drift apart — validates the patch against
+P's schema (§3.2), and writes it through the project's normal locked atomic
+write.
+
+Four guarantees the sink makes, each with a test:
+
+- **A rejected response never touches Σₜ** (§7). A missing fence, malformed
+  JSON, a missing `state_patch`, a missing `action`, or a patch the schema
+  rejects returns a typed outcome and changes nothing on disk.
+- **At most once per block.** Durable events can be replayed after a
+  reconnect; blocks are keyed by `assistantMessageID:ordinal` and remembered
+  in a bounded set.
+- **Failures are values.** Nothing throws into the event loop — a rejected
+  sink would otherwise end the shared subscription and silently stop session
+  scoping too.
+- **Sub-agents keep their own scope.** The sink resolves the same scope as the
+  registry, so a parallel sub-agent cannot clobber the root session's notes.
+
+What the sink does **not** do is own the loop: the host's agent loop still
+executes the action, so rollback-with-retry (§7) and opaque action dispatch
+belong to `SkillStateRuntime` in `packages/bench`, not to a host plugin.
 
 Measured on a live OpenCode 2.0.19, one session, five turns:
 
@@ -574,7 +640,7 @@ Verify with `opencode debug config`, `opencode debug skill`, and an
 
 ## Real-world usage
 
-### OpenCode — an additive system fragment, never a transcript rewrite
+### OpenCode — an additive system fragment by default
 
 The npm plugin loads from the project `"plugins": ["@skillstate/opencode"]`
 and registers three native tools plus one `context` hook:
@@ -594,9 +660,11 @@ await SkillStatePlugin.setup(ctx);
   tool error.
 - **`ctx.session.hook('context', ...)`** — pushes ONE bounded fragment onto
   `event.system`. Nothing else. `event.messages` is never read for
-  rewriting and never written.
+  rewriting and never written. In `paper` mode this same hook replaces the
+  context instead; see [Two modes](#two-modes).
 - **`ctx.event.subscribe(...)`** — feeds the session registry, which is how
-  a sub-agent is recognised and given its own state file.
+  a sub-agent is recognised and given its own state file, and (in paper mode
+  only) the state sink that applies the model's `state_patch`.
 
 The fragment is intentionally small and advisory. It names the state file,
 renders the current notes (bounded — a large document is summarized to a key

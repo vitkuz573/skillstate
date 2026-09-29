@@ -6,8 +6,8 @@
  * module and calls `setup(ctx)`. Everything else is exported for tests and
  * for embedders that want the pieces without the plugin lifecycle.
  *
- * See `plugin.ts` for the design contract, in particular the rule that this
- * package never mutates `event.messages`.
+ * See `plugin.ts` for the design contract, in particular that notes mode
+ * (the default) never mutates `event.messages`.
  */
 
 export { SkillStatePlugin, PLUGIN_ID, default } from './plugin.js';
@@ -53,3 +53,39 @@ export type {
   ToolResult,
   UpdateValue,
 } from './tools.js';
+/**
+ * Paper mode — the A.4 context replacement. Pure functions plus the two
+ * halves of the write (`buildPaperPrompt` reads, `applyPaperContext`
+ * writes); the plugin composes them in `plugin.ts`.
+ */
+export {
+  PAPER_MESSAGE_ID,
+  applyPaperContext,
+  buildPaperPrompt,
+  initialTask,
+  latestObservation,
+  proceduralSpecWithTask,
+} from './paper-mode.js';
+export type {
+  ObservationSource,
+  PaperContextEvent,
+  PaperMessage,
+  PaperObservation,
+  PaperPrompt,
+  PaperPromptOptions,
+} from './paper-mode.js';
+/** The Σₜ sink that closes the paper transition in the OpenCode host. */
+export { DEFAULT_DEDUPE_CAPACITY, PaperStateSink } from './response-sink.js';
+export type { PaperStateSinkOptions, SinkOutcome, SinkRejection } from './response-sink.js';
+/** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
+export {
+  DEFAULT_PLUGIN_MODE,
+  MODE_ENV_VAR,
+  PLUGIN_MODES,
+  asPluginMode,
+  resolvePluginMode,
+} from './mode.js';
+export type { ModeResolution, ModeSource, PluginMode, ResolveModeOptions } from './mode.js';
+/** Resolving P for paper mode. */
+export { SPEC_FILE_NAME, SpecResolver, parseSpec } from './spec-loader.js';
+export type { SpecResolution, SpecSource } from './spec-loader.js';

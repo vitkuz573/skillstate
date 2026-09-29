@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**Added:** paper mode — the model-facing context rebuilt as `Aₜ = (P, Σₜ, Oₜ)`.
+
+The plugin previously had exactly one behaviour: push a bounded fragment onto
+`event.system` and leave the transcript alone. That is right for a persistence
+aid, and it is what fixed the earlier failure — but it is not the paper.
+SKILL.state does not merely permit discarding the transcript, it requires it
+(§3: "The language model never receives previous observations, previous
+actions, or previous reasoning traces"), and Appendix A.4 fixes the prompt
+shape exactly.
+
+`paper` mode implements that. It is **opt-in** and the default stays `notes`,
+because a default that discards the user's task is the old bug under a new
+name. Select it with `{ "mode": "paper" }` in the project's `skillstate.json`
+or `SKILLSTATE_MODE=paper`; an unrecognised value falls back to `notes` and is
+reported rather than silently applied.
+
+**Closing the loop.** A.4 requires the model to emit
+`{ "state_patch": { … }, "action": "…" }`. The v2 session API has no response
+hook — `prompt`, `context`, `compaction`, `generate`, `title`, the HTTP and
+WebSocket hooks and `retry` all run before or around the model call, and none
+of them sees the completed assistant text. A plugin that only rewrote the
+context would leave Σₜ frozen, which on a long-horizon task is silent total
+failure.
+
+The server's durable event stream carries it. `session.text.ended` publishes
+one finished assistant text block with `{ sessionID, assistantMessageID,
+ordinal, text }` on the same stream the plugin already subscribes to for the
+session tree. `PaperStateSink` parses that text with the core's own
+`PromptTransformer.parseResponse` — the same parser the benchmark measures, so
+the prompt and the parse cannot drift — validates the patch against P's schema
+(§3.2) and writes it through the project's existing locked atomic write.
+
+Guarantees, each with a test:
+
+- a rejected response never reaches disk (§7): a missing fence, malformed
+  JSON, a missing `state_patch`, a missing `action` or a schema violation
+  returns a typed outcome and leaves the state file byte-identical;
+- a replayed durable event applies at most once, keyed by
+  `assistantMessageID:ordinal` in a bounded set;
+- failures are values, never throws, so a rejected sink cannot end the shared
+  subscription and silently stop session scoping;
+- sub-agents write to their own scope, resolved by the same registry the
+  context hook uses.
+
+P comes from the project's `skill-spec.json` when it validates, and from the
+built-in domain-neutral spec otherwise. A spec file that does not typecheck is
+**never** shown to the model — it falls back and the failing field is
+reported. That check exists because the earlier default spec's instructions
+told the agent to hunt for a flag, and a model told to look for a flag looks
+for a flag.
+
+Paper mode stays inert until a session has saved something. Replacing the
+context with an empty Σₜ before the agent has done anything would only lose
+the task.
+
+The user-visible transcript, `skillstate_read` and `skillstate_update` are
+untouched by all of this: the model stops seeing its own reasoning and
+tool-output trail, and everything it wrote is still in Σₜ, which is in the
+prompt. Owning the executor end-to-end — opaque action dispatch and
+rollback-with-retry — remains `SkillStateRuntime`'s job in `packages/bench`;
+a host plugin cannot invoke a tool on the model's behalf.
+
+Nothing in `notes` mode changed. `context-integrity.test.ts` still asserts
+that the transcript is never rewritten.
+
 ## [3.0.1] - 2026-09-29
 
 **Fix:** `skillstate init` no longer registers the MCP server for opencode.

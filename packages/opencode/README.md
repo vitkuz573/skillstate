@@ -85,11 +85,35 @@ await SkillStatePlugin.setup(ctx);
 | Registration | Detail |
 | --- | --- |
 | `ctx.tool.transform(...)` | `skillstate_read`, `skillstate_update`, `skillstate_merge` |
-| `ctx.session.hook('context')` | pushes ONE bounded fragment onto `event.system` |
-| `ctx.event.subscribe(...)` | session parent edges, for sub-agent scoping |
+| `ctx.session.hook('context')` | `notes`: pushes ONE bounded fragment onto `event.system`. `paper`: replaces the context with the A.4 prompt |
+| `ctx.event.subscribe(...)` | session parent edges, for sub-agent scoping; in paper mode also the `state_patch` sink |
 
 Nothing else. It does not register `compaction`, `generate` or `title` hooks,
-and it never touches `event.messages`.
+and in the default `notes` mode it never touches `event.messages`.
+
+### Modes
+
+`notes` is the default and stays the default. `paper` is the paper's own
+specification and is opt-in:
+
+```jsonc
+// skillstate.json in the project root
+{ "mode": "paper" }
+```
+
+```sh
+SKILLSTATE_MODE=paper opencode   # environment wins over the file
+```
+
+`paper` replaces the model-facing context with `Aₜ = (P, Σₜ, Oₜ)` — the
+Appendix A.4 prompt, byte-verbatim — and applies the `state_patch` the model
+emits in response, parsed from the `session.text.ended` event. Prompt size is
+then constant regardless of transcript length.
+
+Note that paper mode means the model no longer sees its own transcript: §3.2
+discards the reasoning trace by construction. Anything worth remembering has
+to be in Σₜ. An unrecognised mode value falls back to `notes` and is reported
+rather than silently applied.
 
 ### Tools
 
@@ -140,13 +164,14 @@ The old test suite asserted the bug — `expect(messages).toHaveLength(1 + 3 + 1
 It is replaced by `tests/opencode/context-integrity.test.ts`, which asserts the
 opposite.
 
-Three rules, each enforced by a test:
+Four rules, each enforced by a test:
 
 | Rule | Enforced by |
 | --- | --- |
-| Never mutate `event.messages` | `context-integrity.test.ts` |
+| `notes` mode never mutates `event.messages` | `context-integrity.test.ts` |
 | Never inject behavioural instructions | `system-hint.test.ts` |
 | Inert until a state file exists | `plugin.test.ts` |
+| `paper` mode replaces the context with exactly Aₜ | `paper-mode.test.ts` |
 
 Measured on a live OpenCode 2.0.19, one session, five turns:
 

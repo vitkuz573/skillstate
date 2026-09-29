@@ -27,14 +27,33 @@
  *
  * ── The v2 design ────────────────────────────────────────────────────────
  *
+ * Two modes, each enforced by a test. They are different contracts with the
+ * model, not variants of one behaviour:
+ *
+ * - **`notes` (default).** Contribute one additive, bounded fragment to
+ *   `event.system` and leave the transcript alone. The agent sees its own
+ *   history the way the host intends, and the saved notes ride alongside it.
+ *   This is the mode that fixed the v1 failure, and it is the default for
+ *   exactly that reason.
+ * - **`paper` (opt-in).** Replace the model-facing context with
+ *   Aₜ = (P, Σₜ, Oₜ) — the paper's Appendix A.4 prompt, byte-verbatim — and
+ *   apply the `state_patch` the model emits in response. This is the paper's
+ *   specification, and it is a real behavioural change: the model stops
+ *   seeing its transcript, because §3.2 discards the reasoning trace by
+ *   construction. Select it with `mode: "paper"` in the project's
+ *   `skillstate.json` or `SKILLSTATE_MODE=paper`; see `mode.ts`.
+ *
+ * The default is `notes` and must stay that way: a default that discards the
+ * user's task is the v1 bug under a new name.
+ *
  * Three rules, each enforced by a test:
  *
- * - **Never mutate `event.messages`.** The plugin contributes one additive
- *   fragment to `event.system` and leaves the transcript alone. See
- *   `tests/opencode/context-integrity.test.ts`.
- * - **Never inject behavioural instructions.** The system fragment
- *   describes what the notes are and when to use them; it contains no
- *   "you must", no "always", and no output format. See
+ * - **Notes mode never mutates `event.messages`.** The plugin contributes
+ *   one additive fragment to `event.system` and leaves the transcript alone.
+ *   See `tests/opencode/context-integrity.test.ts`.
+ * - **Never inject behavioural instructions in notes mode.** The system
+ *   fragment describes what the notes are and when to use them; it contains
+ *   no "you must", no "always", and no output format. See
  *   `system-hint.ts`.
  * - **Inert until used.** A project with no state file gets no system
  *   fragment at all and behaves exactly like vanilla OpenCode. No files are
@@ -66,7 +85,13 @@
 
 import { Plugin } from '@opencode/plugin';
 import * as path from 'node:path';
+import { resolvePluginMode } from './mode.js';
+import type { PluginMode } from './mode.js';
+import { applyPaperContext, buildPaperPrompt } from './paper-mode.js';
+import type { PaperContextEvent } from './paper-mode.js';
+import { PaperStateSink } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
+import { SpecResolver } from './spec-loader.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint } from './system-hint.js';
 import { registerTools } from './tools.js';
@@ -77,14 +102,20 @@ export const PLUGIN_ID = 'skillstate';
 /**
  * The plugin definition.
  *
- * `setup` wires three things and returns a cleanup function:
+ * `setup` wires the session registry, the project state store, the native
+ * tools, the mode resolver and the one `context` hook, then returns a cleanup
+ * function.
  *
  * - a {@link SessionRegistry}, fed by the server event stream, so a
  *   sub-agent session is recognised and given its own state file;
  * - a {@link ProjectStateStore} rooted at the plugin's own project
  *   location, so two checkouts served by one OpenCode server never share
  *   state;
- * - native tools plus a single additive `context` hook.
+ * - a {@link SpecResolver} for paper mode's P, so a project that ships its
+ *   own `skill-spec.json` gets its own procedure;
+ * - a {@link PaperStateSink}, in paper mode only, which applies the
+ *   `state_patch` the model emits;
+ * - native tools plus a single `context` hook whose body depends on the mode.
  *
  * The event subscription is the only resource the plugin owns, so the
  * returned cleanup aborts it. Hook and tool registrations are disposed by
@@ -99,23 +130,37 @@ export const SkillStatePlugin = Plugin.define({
     // `ctx.location.project.canonical` is the canonical checkout, stable
     // across worktrees and symlinks. The v1 plugin used `process.cwd()`,
     // which in v2 is the server's cwd, not the session's project.
-    const store = new ProjectStateStore({
-      directory: ctx.location.project.canonical,
-    });
+    const directory = ctx.location.project.canonical;
+    const store = new ProjectStateStore({ directory });
+
+    const mode: PluginMode = resolvePluginMode({ directory }).mode;
+    const specs = new SpecResolver();
+    // Resolved once at setup: P is fixed for the life of the process, and
+    // the sink validates every patch against it.
+    const spec = mode === 'paper' ? specs.resolve(directory).spec : undefined;
+    const sink = spec === undefined ? undefined : new PaperStateSink({ store, spec, scopeFor });
 
     await ctx.tool.transform((editor) => {
       registerTools(editor, { store, sessions, scopeFor });
     });
 
-    // ── Session tree ────────────────────────────────────────────────────
+    // ── Session tree and the paper-mode state sink ───────────────────────
     // Sub-agent sessions are created by OpenCode itself, so the parent edge
     // arrives on the event stream. Until one is seen a session is treated as
     // a root session, which is the correct default for single-session use.
+    //
+    // The same stream carries the completed assistant text blocks that close
+    // the paper's transition, so both consumers share one subscription: a
+    // second `subscribe()` would be a second socket for no gain.
     const controller = new AbortController();
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           sessions.ingestEvent(event);
+          // A sink failure is a value, never a throw — an unhandled
+          // rejection here would end the loop and silently stop both the
+          // registry and the sink for the rest of the process's life.
+          if (sink !== undefined) await sink.ingest(event);
         }
       } catch {
         // The stream ends when the plugin unloads or the server goes away.
@@ -124,16 +169,34 @@ export const SkillStatePlugin = Plugin.define({
       }
     })();
 
-    // ── System fragment ─────────────────────────────────────────────────
+    // ── Context ─────────────────────────────────────────────────────────
     // Registered on the agent loop only. `compaction`, `generate` and
     // `title` are separate hooks in v2 and are deliberately left alone:
-    // after a compaction the next agent-loop request re-adds the fragment,
-    // so state survives without this plugin ever touching the transcript or
-    // the summariser's input.
+    // after a compaction the next agent-loop request re-enters here, so
+    // state survives without this plugin ever touching the summariser's
+    // input. The same holds in paper mode, where the compaction summary is
+    // discarded along with the rest of the transcript.
     await ctx.session.hook('context', (event) => {
       const scope = scopeFor(event.sessionID);
-      if (!store.exists(scope)) return;
       const state = store.read(scope);
+
+      if (mode === 'paper') {
+        // A session that has saved nothing yet has no Σₜ to show, and
+        // replacing the context with an empty state block before the agent
+        // has done anything would only lose the task. Stay inert.
+        if (Object.keys(state).length === 0) return;
+        applyPaperContext(
+          event as unknown as PaperContextEvent,
+          buildPaperPrompt({
+            spec: spec!,
+            state,
+            messages: event.messages as unknown as PaperContextEvent['messages'],
+          }),
+        );
+        return;
+      }
+
+      if (!store.exists(scope)) return;
       const hint = buildStateHint({
         state,
         statePath: path.relative(store.projectDirectory, store.pathFor(scope)),
