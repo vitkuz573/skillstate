@@ -735,6 +735,41 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming
 - [ ] Codex limitation: hooks cannot trim host history — hooks alone give O(T) prompts; programmatic O(1) requires the `codex app-server` fork-trim session (`thread/fork { beforeTurnId }`, experimental, non-interactive)
 
+## Does the host integration actually save tokens?
+
+**Unproven. Do not take the tagline's word for it.**
+
+The runtime's own prompt is O(1) per step — a flat ~1.8k characters
+regardless of progress, which is what the paper claims and what
+`tests/core/runtime-footprint.test.ts` asserts. That is a property of
+`PromptTransformer.formatPaper` and it holds.
+
+What is **not** established is the token economy of the *host integration*.
+An A/B run on OpenCode 2.0.19 — identical git archive, task, model and turn
+count, one arm plain and one arm with the plugin — produced this:
+
+| | input | cache read | output |
+| --- | --- | --- | --- |
+| A, plain opencode | 42 364 → **71 590** | 468 283 → **1 272 390** | 2 667 → **4 793** |
+| B, + plugin | 25 727 | 336 259 | 1 439 |
+
+The two numbers in each A cell are the same session measured mid-run and at
+the end, which is itself the finding: run-to-run variance in a
+non-deterministic setup is larger than any effect being looked for, and
+`AUDIT.md` came out byte-identical in both arms.
+
+More to the point: **the state file was never written.** The model never
+called `skillstate_update` or `skillstate_read`. The system fragment tells it
+to skip the tools when the work needs no cross-turn memory, and on a linear
+audit task it did exactly that. The apparent 39–64% saving was the model
+taking a different path, not skillstate.
+
+So: the tools carry no measurable overhead when unused, and the value
+proposition remains unmeasured. A fair test needs a task that genuinely
+survives a context reset. Until that exists, the honest position is that
+this repository demonstrates a working O(1) *runtime*, not a demonstrated
+token *saving*.
+
 ## Development
 
 ```bash
