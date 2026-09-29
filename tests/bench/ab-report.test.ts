@@ -51,6 +51,10 @@ function run(overrides: Partial<RunRecord> & Pick<RunRecord, 'arm' | 'trial'>): 
     work: { artifactDigest: 'sha:demo', turns: 6, toolCalls: 4 },
     durationMs: 1000,
     completed: true,
+    // Witnessed by default: a run that did not record whether the task was
+    // answered is refused by the outcome gate, and these fixtures are about
+    // the other gates. Absence must never read as a pass.
+    outcome: { correct: true },
     ...overrides,
   };
 }
@@ -374,6 +378,88 @@ group('completeness gate', () => {
     arms.set('plain', arm('plain', [run({ arm: 'plain', trial: 0 }), run({ arm: 'plain', trial: 1, completed: false })]));
     const failure = runExperiment(arms).failures.find((f) => f.gate === 'completeness')!;
     expect(failure.detail).toContain('unknown error');
+  });
+});
+
+group('outcome gate', () => {
+  it('refuses to report a saving from an experiment that never checked the answer', () => {
+    // The failure this gate exists for, replayed: a pair that measures cost and
+    // not the work. Every other gate passes — the arms are comparable, both
+    // engage, the variance is small — so without this the verdict would be
+    // SAVING and the number would be reported as a result.
+    const arms = passingPair();
+    arms.set(
+      'notes',
+      arm('notes', [
+        run({ arm: 'notes', trial: 0, usage: { input: 20000, cacheRead: 200000, cacheWrite: 0, output: 900 }, engagement: ENGAGED, outcome: undefined }),
+        run({ arm: 'notes', trial: 1, usage: { input: 21000, cacheRead: 205000, cacheWrite: 0, output: 950 }, engagement: ENGAGED, outcome: undefined }),
+      ]),
+    );
+    const result = runExperiment(arms);
+    // `not-comparable`, not `invalid`: the runs are valid, there is simply
+    // nothing to compare the cost against. The same verdict task-equivalence
+    // gets, and the same refusal not to print a number.
+    expect(result.verdict).toBe('not-comparable');
+    const failure = result.failures.find((f) => f.gate === 'outcome')!;
+    expect(failure.detail).toContain('not a result');
+  });
+
+  it('refuses when only the control recorded an outcome', () => {
+    const arms = passingPair();
+    arms.set(
+      'notes',
+      arm('notes', [
+        run({ arm: 'notes', trial: 0, engagement: ENGAGED, outcome: undefined }),
+        run({ arm: 'notes', trial: 1, engagement: ENGAGED, outcome: undefined }),
+      ]),
+    );
+    expect(runExperiment(arms).failures.find((f) => f.gate === 'outcome')!.detail).toContain('`correct`');
+  });
+
+  it('rejects a cheaper arm that answered less often than the control', () => {
+    // 3 trials, 2 correct against the control's 3 of 3, at a third of the
+    // cost. This is the shape that would have been reported as a 60% saving
+    // while the work went undone.
+    const arms = passingPair();
+    arms.set(
+      'notes',
+      arm('notes', [
+        run({ arm: 'notes', trial: 0, usage: { input: 20000, cacheRead: 200000, cacheWrite: 0, output: 900 }, engagement: ENGAGED, outcome: { correct: true } }),
+        run({ arm: 'notes', trial: 1, usage: { input: 21000, cacheRead: 205000, cacheWrite: 0, output: 950 }, engagement: ENGAGED, outcome: { correct: true } }),
+        run({ arm: 'notes', trial: 2, usage: { input: 22000, cacheRead: 210000, cacheWrite: 0, output: 980 }, engagement: ENGAGED, outcome: { correct: false } }),
+      ]),
+    );
+    const result = runExperiment(arms);
+    expect(result.verdict).not.toBe('saving');
+    const failure = result.failures.find((f) => f.gate === 'outcome')!;
+    expect(failure.detail).toContain('2 of 3');
+    expect(failure.detail).toContain('regression, not a saving');
+  });
+
+  it('accepts a tie on accuracy, so a genuine cost difference is not thrown away', () => {
+    // The n=7 experiment's honest reading was that the arms are comparably
+    // accurate and only the cost differs. A gate that fired on a tie would have
+    // discarded the finding it was written to protect.
+    expect(runExperiment(passingPair()).failures.map((f) => f.gate)).not.toContain('outcome');
+  });
+
+  it('lets the instrumented arm win outright', () => {
+    const arms = passingPair();
+    arms.set(
+      'plain',
+      arm('plain', [
+        run({ arm: 'plain', trial: 0, outcome: { correct: true } }),
+        run({ arm: 'plain', trial: 1, outcome: { correct: false } }),
+      ]),
+    );
+    arms.set(
+      'notes',
+      arm('notes', [
+        run({ arm: 'notes', trial: 0, engagement: ENGAGED, outcome: { correct: true } }),
+        run({ arm: 'notes', trial: 1, engagement: ENGAGED, outcome: { correct: true } }),
+      ]),
+    );
+    expect(runExperiment(arms).failures.map((f) => f.gate)).not.toContain('outcome');
   });
 });
 

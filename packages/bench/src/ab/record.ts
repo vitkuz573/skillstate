@@ -138,8 +138,32 @@ export interface RunRecord {
   readonly durationMs: number;
   /** True when the run completed without a provider or host error. */
   readonly completed: boolean;
+  /**
+   * Whether the run produced the correct answer, when the experiment recorded
+   * it.
+   *
+   * Optional because a trial file written before this field existed has none,
+   * and because a task with no checkable answer has none to give. What is NOT
+   * optional is its absence counting as a pass — hence the outcome gate, which
+   * refuses an experiment that measured cost and not the work.
+   */
+  readonly outcome?: Outcome;
   /** Failure reason when `completed` is false. */
   readonly error?: string;
+}
+
+/**
+ * What the run was supposed to produce, and whether it did.
+ *
+ * Separate from `completed`: a run can complete perfectly and still be wrong.
+ * That distinction is the whole reason this type exists — "it finished" and
+ * "it did the work" are different claims, and conflating them is how an
+ * experiment reports a saving for a run that answered nothing.
+ */
+export interface Outcome {
+  readonly correct: boolean;
+  /** What the run reported, for a human reading the record. */
+  readonly reported?: string;
 }
 
 /** One arm's results across every trial it ran. */

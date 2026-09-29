@@ -39,6 +39,8 @@ interface TrialFile {
   readonly artifactDigest: string | null;
   readonly durationMs: number;
   readonly completed: boolean;
+  /** Whether the run produced the correct answer, when the task is checkable. */
+  readonly correct?: boolean;
   readonly error?: string;
   /** State-file samples for this trial; at least two, or it is unwitnessed. */
   readonly stateSamples: readonly StateSample[];
@@ -90,6 +92,7 @@ function toRunRecord(trial: TrialFile): RunRecord {
     },
     durationMs: trial.durationMs,
     completed: trial.completed,
+    ...(trial.correct === undefined ? {} : { outcome: { correct: trial.correct } }),
     ...(trial.error === undefined ? {} : { error: trial.error }),
   };
 }

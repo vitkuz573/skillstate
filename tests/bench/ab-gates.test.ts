@@ -54,6 +54,10 @@ function run(overrides: Partial<RunRecord> & Pick<RunRecord, 'arm' | 'trial'>): 
     work: { artifactDigest: 'sha:demo', turns: 6, toolCalls: 4 },
     durationMs: 1000,
     completed: true,
+    // Witnessed by default: a run that did not record whether the task was
+    // answered is refused by the outcome gate, and these fixtures are about
+    // the other gates. Absence must never read as a pass.
+    outcome: { correct: true },
     ...overrides,
   };
 }

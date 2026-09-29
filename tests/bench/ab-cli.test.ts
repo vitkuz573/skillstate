@@ -165,6 +165,7 @@ group('skillstate ab — a run that does engage', () => {
         sessionID: 'ses_c0',
         usage: { input: 50000, cacheRead: 500000, cacheWrite: 0, output: 2000 },
         artifactDigest: 'sha256:same',
+        correct: true,
         stateSamples: [{ trial: 0, step: 0, content: null }, { trial: 0, step: 6, content: null }],
       },
       {
@@ -174,6 +175,7 @@ group('skillstate ab — a run that does engage', () => {
         sessionID: 'ses_c1',
         usage: { input: 52000, cacheRead: 510000, cacheWrite: 0, output: 2100 },
         artifactDigest: 'sha256:same',
+        correct: true,
         stateSamples: [{ trial: 0, step: 0, content: null }, { trial: 0, step: 6, content: null }],
       },
     ]);
@@ -185,6 +187,7 @@ group('skillstate ab — a run that does engage', () => {
         sessionID: 'ses_i0',
         usage: { input: 20000, cacheRead: 200000, cacheWrite: 0, output: 900 },
         artifactDigest: 'sha256:same',
+        correct: true,
         stateSamples: [
           { trial: 0, step: 0, content: null },
           { trial: 0, step: 6, content: '{"goal":"x"}', fromSink: true },
@@ -197,6 +200,7 @@ group('skillstate ab — a run that does engage', () => {
         sessionID: 'ses_i1',
         usage: { input: 21000, cacheRead: 205000, cacheWrite: 0, output: 950 },
         artifactDigest: 'sha256:same',
+        correct: true,
         stateSamples: [
           { trial: 0, step: 0, content: null },
           { trial: 0, step: 6, content: '{"goal":"y"}', fromSink: true },
@@ -212,6 +216,26 @@ group('skillstate ab — a run that does engage', () => {
     expect(mainFromArgv([control, instrumented])).toBe(0);
     expect(lines.join('\n')).toMatch(/SAVING/);
     expect(lines.join('\n')).toMatch(/\d+(\.\d+)?% of prompt tokens/);
+  });
+
+  it('refuses to print a percentage for trials that never recorded an outcome', () => {
+    // Written because the gate broke this very test when it landed: the
+    // fixtures here had measured engagement, comparability and cost, and never
+    // whether the task was answered. That is the experiment the outcome gate
+    // refuses, and it exited 0 with a percentage until it did not.
+    const [control, instrumented] = engagedFiles();
+    const strip = (file: string): string => {
+      const trials = JSON.parse(fs.readFileSync(file, 'utf-8')).map((t: Record<string, unknown>) => {
+        const { correct: _dropped, ...rest } = t;
+        return rest;
+      });
+      return writeRunFile(path.basename(file).replace(/\.json$/, '-unwitnessed.json'), trials);
+    };
+    const { lines } = capture();
+    expect(mainFromArgv([strip(control), strip(instrumented)])).toBe(1);
+    const output = lines.join('\n');
+    expect(output).toContain('outcome');
+    expect(output).not.toMatch(/% of prompt tokens/);
   });
 
   it('marks NOT-A-TEST when the task needs the transcript', () => {

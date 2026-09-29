@@ -55,6 +55,7 @@ export interface GateFailure {
     | 'sample-size'
     | 'engagement'
     | 'task-equivalence'
+    | 'outcome'
     | 'variance'
     | 'paper-compatibility';
   /** Why the gate fired, phrased so a reader can act on it. */
@@ -170,6 +171,47 @@ export function runExperiment(
           detail: `arm ${arm} trial ${run.trial} did not complete: ${run.error ?? 'unknown error'}`,
         });
       }
+    }
+  }
+
+  // ── Gate 2b: the outcome — did the work get done? ───────────────────────
+  //
+  // The last gate, and the one that was missing. Every other gate asks whether
+  // the comparison is valid; none asks whether the result is worth anything.
+  // An arm that reads every file, writes state and never produces the answer
+  // passes engagement, comparability and variance, and would be reported as a
+  // saving. That is the failure this project has already paid for once: "paper
+  // 81,685 tokens vs control 203,801 = 60% cheaper, paper answered WRONG".
+  //
+  // Two refusals, and the second is the one that matters most. An experiment
+  // that measured cost and not the work has not earned the right to report the
+  // cost, whatever its token numbers say.
+  const measured = (record: ArmRecord): boolean =>
+    record.runs.some((run) => run.outcome !== undefined);
+  for (const [arm, record] of instrumented) {
+    if (!measured(record) || control === undefined || !measured(control)) {
+      failures.push({
+        gate: 'outcome',
+        detail:
+          `arm ${arm} did not record whether the task was answered — a cost ` +
+          'saving with no outcome is not a result, so none is reported. Pass ' +
+          '`correct` in the trial files to measure it.',
+      });
+      continue;
+    }
+    const correct = (record: ArmRecord): number =>
+      record.runs.filter((run) => run.outcome?.correct === true).length;
+    // Strictly, not "at least as good". The n=7 experiment's honest reading
+    // was that the arms are comparably accurate and only the cost differs, and
+    // a gate that fired on a tie would have thrown that finding away.
+    if (correct(record) / record.runs.length < correct(control) / control.runs.length) {
+      failures.push({
+        gate: 'outcome',
+        detail:
+          `arm ${arm} answered correctly ${correct(record)} of ${record.runs.length} trial(s) ` +
+          `while the control answered ${correct(control)} of ${control.runs.length} — ` +
+          'a cheaper run that did not finish the work is a regression, not a saving',
+      });
     }
   }
 
