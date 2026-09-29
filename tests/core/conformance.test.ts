@@ -364,6 +364,48 @@ group('§10.2 conformance harness', () => {
     expect(step.success).toBe(true);
   });
 
+  it('5b. The protocol is Markov in one step — the same Σ and O give the same prompt', async () => {
+    // §2: "Σ_{t+1} depends only on Σ_t and ΔΣ_t, and O_t depends only on
+    // a_{t-1} and Σ_t. No other history is consulted."
+    //
+    // Asserted as byte equality between two runtimes driven with the same
+    // responses and the same observations, at the same depth. Anything that
+    // leaked — a counter, a cache, the previous observation, a piece of
+    // reasoning, a timestamp, an id — would make the second prompts differ. A
+    // length comparison would miss most of that; equality cannot.
+    async function secondPrompt(): Promise<string> {
+      const prompts: string[] = [];
+      const runtime = new SkillStateRuntime({
+        spec: SPEC,
+        llm: scriptedLlm(
+          [
+            llmText('REASONING-STEP-1', { count: 5 }, 'ACTION-STEP-1'),
+            llmText('REASONING-STEP-2', { mood: 'ok' }, 'ACTION-STEP-2'),
+          ],
+          prompts,
+        ),
+        execute: fixedExecutor,
+      });
+      await runtime.step(obs('OBS-STEP-1'));
+      await runtime.step(obs('OBS-STEP-2'));
+      expect(prompts).toHaveLength(2);
+      return prompts[1]!;
+    }
+
+    const first = await secondPrompt();
+    const second = await secondPrompt();
+
+    // The claim, exactly.
+    expect(second).toBe(first);
+    // And what makes it non-vacuous: the second prompt carries the current
+    // state and the current observation, and none of step 1.
+    expect(second).toContain('OBS-STEP-2');
+    expect(second).toContain('"count":5');
+    expect(second).not.toContain('OBS-STEP-1');
+    expect(second).not.toContain('ACTION-STEP-1');
+    expect(second).not.toContain('REASONING-STEP-1');
+  });
+
   it('7. Complexity — O(T) cumulative, and the (T+1)/2 floor', async () => {
     // "For a fixed-size prompt, assert cumulative state chars are O(T) and the
     // measured reduction floor is (T+1)/2."
