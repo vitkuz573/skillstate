@@ -100,12 +100,17 @@ loop. It used it — 21 tool calls, 3 text blocks, one patch written at the end
 from whatever observation happened to be current.
 
 Withholding tools on alternating requests reproduces §5.1's alternation with the
-host standing in for both `llm` and `execute`. The measurement that put it behind
-a flag — that a tool-less turn produces prose, not a patch — was taken while the
-runtime's step request was being rejected by the host schema, so the report turn
-it leads to had nowhere to go. **That measurement has to be taken again now that
-the runtime actually drives.** Until it is, `SKILLSTATE_STEP_BOUNDARY=1` is
-untested in the field and should stay off.
+host standing in for both `llm` and `execute`. **Measured on a working runtime,
+it still costs the task:** the four-file accumulate task with the boundary on
+made 2 tool calls and produced no answer, and with it off the same fixture
+answered correctly. The premise — that a tool-less turn can only be answered in
+text, and that the patch lives there — does not hold for these models; they
+write prose instead.
+
+The first measurement said the same thing, but it was taken while the runtime's
+step request was being refused by the host, so the report turn had nowhere to
+lead. This one is a real repeat, and the switch stays off for the same reason:
+it is faithful to the paper and worse in the field.
 
 `SkillStateRuntime`, which owns that loop properly, exists at
 `packages/core/src/runtime.ts:218`, tested and used by `bench` and `cli`, and
