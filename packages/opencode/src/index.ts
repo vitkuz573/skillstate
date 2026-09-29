@@ -84,6 +84,9 @@ export { FeedbackQueue, applyFeedback, feedbackFor } from './feedback.js';
 export type { PendingFeedback } from './feedback.js';
 /** `SKILLSTATE_DEBUG_PROMPT` diagnostic — what the host actually handed us. */
 export { dumpPromptShape, dumpDrift } from './plugin.js';
+/** The runtime that owns the paper-mode step loop. */
+export { RuntimeDriver, DEFAULT_MAX_STEPS } from './runtime.js';
+export type { RuntimeDriverOptions, RuntimeStep } from './runtime.js';
 /** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
 export {
   DEFAULT_PLUGIN_MODE,

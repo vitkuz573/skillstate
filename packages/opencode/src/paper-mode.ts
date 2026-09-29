@@ -409,11 +409,16 @@ export const HOST_ACTION_NOTE = [
  *
  * - the A.4 prompt becomes the ONLY message, so no reasoning, action or tool
  *   output from earlier steps survives into this dispatch;
- * - the host's own system prompt is REPLACED, not appended to. The paper's P
- *   is the entire instruction surface; leaving the harness's default system
- *   prompt in place would quietly reintroduce behaviour the runtime is
- *   supposed to own (and the default one tells the model to prefer parallel
- *   tool calls, which is incoherent with a single-step state machine).
+ * - the host's own system prompt is KEPT. An earlier version replaced it
+ *   wholesale, on the reasoning that P is the entire instruction surface and
+ *   the default prompt tells the model to prefer parallel tool calls, which
+ *   is incoherent with a single-step state machine. Measured: that reasoning
+ *   was wrong about a consequence, because the default system prompt is also
+ *   what carries the host's tool-use discipline. Replacing it with one
+ *   sentence produced a model that emitted a correct patch and then never
+ *   called a tool again — the run ended after the first file, three times
+ *   running, on two models. The "parallel calls" worry is real but costs
+ *   less than a dead loop; the trade is measured, not assumed.
  *
  * `systemPrefix` is where a host that cannot be the runtime says so; see
  * {@link HOST_ACTION_NOTE}. It is optional because a deployment where
@@ -434,10 +439,8 @@ export function applyPaperContext(
   };
   event.messages.length = 0;
   event.messages.push(message);
-  if (event.system !== undefined) {
-    const parts = systemPrefix === undefined ? [] : [{ type: 'text', text: systemPrefix }];
-    event.system.length = 0;
-    event.system.push(...parts);
+  if (event.system !== undefined && systemPrefix !== undefined) {
+    event.system.push({ type: 'text', text: systemPrefix });
   }
   return message;
 }

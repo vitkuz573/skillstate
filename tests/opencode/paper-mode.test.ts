@@ -534,14 +534,14 @@ describe('choosing the observation Oₜ', () => {
 });
 
 describe('replacing the model-facing context', () => {
-  function event(messages: HostMessage[]): PaperContextEvent {
-    return {
-      messages,
-      system: [
-        { type: 'text', text: 'You are opencode, a coding agent.' },
-        { type: 'text', text: 'Prefer parallel tool calls.' },
-      ],
-    };
+  function event(
+    messages: HostMessage[],
+    system: PaperContextEvent['system'] = [
+      { type: 'text', text: 'You are opencode, a coding agent.' },
+      { type: 'text', text: 'Prefer parallel tool calls.' },
+    ],
+  ): PaperContextEvent {
+    return { messages, system };
   }
 
   it('leaves exactly one message, and it is the A.4 prompt', () => {
@@ -577,19 +577,28 @@ describe('replacing the model-facing context', () => {
     expect(rendered).toContain('Error: TS2345 at install.ts:120');
   });
 
-  it('replaces the host system prompt rather than appending to it', () => {
+  it('keeps the host system prompt, and adds nothing when no note is supplied', () => {
+    // This was "replaces the host system prompt", and that was wrong. The
+    // default system prompt carries the host's tool-use discipline; wiping it
+    // produced a model that applied a correct patch and then never called a
+    // tool again. Measured on two models, three times running each.
+    //
+    // What this test protects is narrower and real: the plugin contributes
+    // nothing to the system surface unless it has something to say.
     const messages = longTranscript();
-    const target = event(messages);
+    const target = event(messages, [{ type: 'text', text: 'HOST DEFAULT PROMPT' }]);
     applyPaperContext(target, buildPaperPrompt({ spec: SPEC, state: {}, messages }));
-
-    expect(target.system).toEqual([]);
+    expect(target.system).toEqual([{ type: 'text', text: 'HOST DEFAULT PROMPT' }]);
   });
 
-  it('keeps only an explicit prefix when one is supplied', () => {
+  it('appends the host note to what the host already said', () => {
     const messages = longTranscript();
-    const target = event(messages);
-    applyPaperContext(target, buildPaperPrompt({ spec: SPEC, state: {}, messages }), 'prefix');
-    expect(target.system).toEqual([{ type: 'text', text: 'prefix' }]);
+    const target = event(messages, [{ type: 'text', text: 'HOST DEFAULT PROMPT' }]);
+    applyPaperContext(target, buildPaperPrompt({ spec: SPEC, state: {}, messages }), 'note');
+    expect(target.system).toEqual([
+      { type: 'text', text: 'HOST DEFAULT PROMPT' },
+      { type: 'text', text: 'note' },
+    ]);
   });
 
   it('tolerates a host that supplies no system array', () => {

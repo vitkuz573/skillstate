@@ -1,0 +1,96 @@
+/**
+ * The runtime that owns the step loop.
+ *
+ * These tests exist because the alternative is shipping a fix for a bug whose
+ * failure mode is invisible. The bug was a run that stopped after the first
+ * file with a perfectly correct patch; nothing threw, the state file looked
+ * healthy, and only a live host with eight files in it could show it. A test
+ * that cannot fail would have been worse than none here, so the host call is
+ * injected and every branch of the decision — advance, decline, stop, cap —
+ * is driven directly.
+ */
+import { describe, it, expect } from 'vitest';
+import { RuntimeDriver, DEFAULT_MAX_STEPS } from '@skillstate/opencode';
+
+const ok = (): Promise<boolean> => Promise.resolve(true);
+const refused = (): Promise<boolean> => Promise.resolve(false);
+
+describe('RuntimeDriver', () => {
+  it('requests the next step for a non-terminal action', async () => {
+    // The whole point: an applied patch whose action is not terminal means
+    // there is another step, and code asks for it.
+    const asked: string[] = [];
+    const driver = new RuntimeDriver({
+      prompt: (sessionID, text) => {
+        asked.push(text);
+        return ok();
+      },
+    });
+    const step = await driver.advance('ses_1', 'read src/cfg2.ts');
+    expect(step).toEqual({ sessionID: 'ses_1', action: 'read src/cfg2.ts', step: 1 });
+    expect(asked).toEqual(['read src/cfg2.ts']);
+  });
+
+  it('stops on every spelling of a terminal action', async () => {
+    // Getting this wrong permissively costs tokens forever; wrongly strict
+    // ends a run early. Both directions are worth pinning.
+    for (const action of ['done', 'DONE', ' complete ', 'completed', 'finished', 'stop', 'end', '']) {
+      const driver = new RuntimeDriver({ prompt: ok });
+      expect(await driver.advance('ses_1', action)).toBeNull();
+    }
+  });
+
+  it('does not advance when the model supplied no action', async () => {
+    // A patch with no action is not a request to continue. Advancing on the
+    // strength of a patch alone would loop on a model that is merely thinking.
+    const driver = new RuntimeDriver({ prompt: ok });
+    expect(await driver.advance('ses_1', undefined)).toBeNull();
+  });
+
+  it('does not advance when the host refuses', async () => {
+    // A refusal usually means the session has ended. It must not be counted
+    // as a step, or a run that is over would look like it is progressing.
+    const driver = new RuntimeDriver({ prompt: refused });
+    expect(await driver.advance('ses_1', 'continue')).toBeNull();
+    expect(driver.stepsFor('ses_1')).toBe(0);
+  });
+
+  it('counts steps per session, not globally', async () => {
+    // One session ending must not stop another from progressing.
+    const driver = new RuntimeDriver({ prompt: ok });
+    await driver.advance('ses_a', 'read cfg1');
+    await driver.advance('ses_b', 'read cfg1');
+    expect(driver.stepsFor('ses_a')).toBe(1);
+    expect(driver.stepsFor('ses_b')).toBe(1);
+  });
+
+  it('stops at the ceiling instead of running forever', async () => {
+    // A model that answers "continue" to a prompt that keeps asking will
+    // never stop on its own, and that bill arrives at the provider.
+    const driver = new RuntimeDriver({ prompt: ok, maxSteps: 3 });
+    expect((await driver.advance('ses_1', 'go'))!.step).toBe(1);
+    expect((await driver.advance('ses_1', 'go'))!.step).toBe(2);
+    expect((await driver.advance('ses_1', 'go'))!.step).toBe(3);
+    expect(await driver.advance('ses_1', 'go')).toBeNull();
+    expect(driver.stepsFor('ses_1')).toBe(3);
+  });
+
+  it('has a default ceiling, because a runaway is worse than a stopped run', () => {
+    expect(DEFAULT_MAX_STEPS).toBeGreaterThan(0);
+    expect(DEFAULT_MAX_STEPS).toBeLessThanOrEqual(256);
+  });
+
+  it('records what it did, in order', async () => {
+    // The diagnostic value of owning the loop is being able to see it.
+    const driver = new RuntimeDriver({ prompt: ok });
+    await driver.advance('ses_1', 'first');
+    await driver.advance('ses_1', 'second');
+    expect(driver.advanced.map((s) => s.action)).toEqual(['first', 'second']);
+  });
+
+  it('exposes the terminal test directly, since the edge is worth testing alone', () => {
+    expect(RuntimeDriver.isTerminal('done')).toBe(true);
+    expect(RuntimeDriver.isTerminal('  Done  ')).toBe(true);
+    expect(RuntimeDriver.isTerminal('read src/cfg2.ts')).toBe(false);
+  });
+});

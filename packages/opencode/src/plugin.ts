@@ -94,6 +94,7 @@ import { FeedbackQueue } from './feedback.js';
 import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
+import { RuntimeDriver } from './runtime.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
 import { registerTools } from './tools.js';
@@ -240,6 +241,28 @@ export const SkillStatePlugin = Plugin.define({
     // notice was followed by a write — the only half of the claim that is
     // actually about the model.
     const stateWrites = new Map<string, number>();
+    // The step loop. Present in paper mode only, where the context is
+    // replaced and the model therefore cannot fall back on the transcript to
+    // keep going; see runtime.ts for why this belongs in code.
+    const runtime =
+      mode === 'paper'
+        ? new RuntimeDriver({
+            prompt: async (sessionID, text) => {
+              try {
+                await ctx.session.prompt({
+                  sessionID,
+                  text: { text },
+                } as unknown as Parameters<typeof ctx.session.prompt>[0]);
+                return true;
+              } catch {
+                // The session has ended, or the host is shutting down. Either
+                // way there is no next step to request, and a throw here
+                // would end the event loop for the rest of the process.
+                return false;
+              }
+            },
+          })
+        : undefined;
 
     await ctx.tool.transform((editor) => {
       registerTools(editor, { store, sessions, scopeFor });
@@ -278,6 +301,13 @@ export const SkillStatePlugin = Plugin.define({
               const key = scopeFor(event.data.sessionID);
               turnsSinceWrite.set(key, 0);
               stateWrites.set(key, (stateWrites.get(key) ?? 0) + 1);
+              // ── The runtime owns the step ────────────────────────────────
+              // An applied patch whose action is not terminal means the
+              // procedure has more steps, and the model has just told us
+              // what the next one is. Requesting it is the plugin's half of
+              // Algorithm 1 — the half that was missing, and whose absence
+              // was patched over with three prompts that did not work.
+              await runtime?.advance(event.data.sessionID, outcome.action);
             }
           }
         }
