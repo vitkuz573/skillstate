@@ -104,6 +104,44 @@ import { registerTools } from './tools.js';
 export const PLUGIN_ID = 'skillstate';
 
 /**
+ * The action carried forward when a turn produced no usable patch.
+ *
+ * NOT `__invalid_patch__`, though the paper names that sentinel at §5.1 line
+ * 9. It is a return value there — what the step function hands back to signal
+ * that Σ is unchanged — and forwarding it into the prompt as the next action
+ * is meaningless to a model: it is a name, not a request. The retry instruction
+ * the model actually needs already rides in Oₜ through the feedback queue, so
+ * this only has to say "keep going", and the queue says why.
+ */
+export const CONTINUE_ACTION = 'continue';
+
+/**
+ * The action the model last asked for, per session, waiting for the turn to end.
+ *
+ * A text block ending is not a turn ending — a model that narrates and then
+ * calls a tool ends a block and is nowhere near done. The host says when the
+ * turn is actually over, and that is the only point at which asking for the
+ * next step is correct.
+ */
+const lastAction = new Map<string, string>();
+
+/**
+ * Whether an event says the session has finished a turn.
+ *
+ * `session.idle` is the host's own statement that the agent loop is done, with
+ * the outcome attached, so a failed or interrupted turn is visible rather than
+ * inferred from silence.
+ */
+function isIdle(event: unknown): event is { type: 'session.idle'; data: { sessionID: string } } {
+  if (typeof event !== 'object' || event === null) return false;
+  const typed = event as { type?: unknown; data?: { sessionID?: unknown } };
+  return (
+    typed.type === 'session.idle' &&
+    typeof typed.data?.sessionID === 'string'
+  );
+}
+
+/**
  * Record a failed step request, so "the host declined" is not a guess.
  *
  * @non-paper diagnostics. Enabled by `SKILLSTATE_DEBUG_PROMPT`, appended to
@@ -311,7 +349,14 @@ export const SkillStatePlugin = Plugin.define({
                 // a diagnostic started recording it.
                 await ctx.session.prompt({
                   sessionID,
-                  text,
+                  // The text is a WAKE-UP, not the instruction. `applyPaperContext`
+                  // clears the messages this arrives in, so the model never
+                  // reads it — the real instruction rides in Oₜ, which is the
+                  // paper's channel for the environment. Anything written here
+                  // is transcript noise that a reader sees and the model does
+                  // not, which is worse than nothing: it looks like the user
+                  // said it.
+                  text: '',
                 } as unknown as Parameters<typeof ctx.session.prompt>[0]);
                 return true;
               } catch (error) {
@@ -357,36 +402,50 @@ export const SkillStatePlugin = Plugin.define({
             if (feedback !== undefined && isTextEnded(event)) {
               feedback.record(event.data.sessionID, outcome);
             }
-            // An applied patch means the state moved, so the drift counter
-            // starts again. Without this it would only ever climb and the
-            // notice would become a permanent wallpaper line.
-            if (outcome.applied && isTextEnded(event)) {
+            if (isTextEnded(event)) {
               const key = scopeFor(event.data.sessionID);
-              turnsSinceWrite.set(key, 0);
-              stateWrites.set(key, (stateWrites.get(key) ?? 0) + 1);
-              // The model has accounted for the step, so the next request may
-              // act again. A rejected patch leaves the phase alone on purpose:
-              // §6.3 re-asks for the same step rather than letting the model
-              // act before it has recorded anything.
-              boundary.patchApplied(event.data.sessionID);
-              // ── The runtime owns the step ────────────────────────────────
-              // An applied patch whose action is not terminal means the
-              // procedure has more steps, and the model has just told us
-              // what the next one is.
-              //
-              // Deferred out of the event loop on purpose. Measured: called
-              // inline, the host accepted the request and no turn ever began —
-              // the run simply ended after the patch, with the runtime
-              // convinced it had advanced. Asking the server to start a turn
-              // from inside the handler that is reporting that turn's own
-              // completion is re-entrant, and the request is dropped. Yielding
-              // first is not a politeness; it is the difference between the
-              // loop turning and it not.
+              if (outcome.applied) {
+                turnsSinceWrite.set(key, 0);
+                stateWrites.set(key, (stateWrites.get(key) ?? 0) + 1);
+                boundary.patchApplied(event.data.sessionID);
+                // Remembered, not acted on: the turn is not over yet, and
+                // ordering the next step here is what made the continuation
+                // arrive against a request that was already superseded.
+                //
+                // `action` needs no guard — the parser refuses a response
+                // without one, so `applied` already implies it. The gate proved
+                // the guard was dead by refusing to let it be covered.
+                lastAction.set(event.data.sessionID, outcome.action as string);
+              }
+            }
+            // ── The runtime owns the step, and a step is not a patch ───────
+            //
+            // §5.1, lines 9–10: if no valid patch was produced, the step
+            // returns (Σₜ, __invalid_patch__, {invalidated: true}) — the
+            // state is UNCHANGED and the loop continues anyway. Advancing only
+            // on `applied` therefore deleted the failure case: a turn that
+            // produced prose instead of a patch ended the procedure, when the
+            // paper says it should have been retried with the reason attached.
+            // The feedback queue carries that reason; it just never got reached,
+            // because the loop stopped before the next turn.
+            //
+            // Fired on `idle`, NOT on a completed text block. A text block ends
+            // when the model's response ends, which is not the same thing: a
+            // model that narrates and then calls a tool has ended a text block
+            // and is nowhere near done. Advancing there ordered the next step
+            // while the current one was still running, and the continuation was
+            // consumed by a request that got superseded — measured, the
+            // `[next step]` marker never reached the model at all.
+            if (mode === 'paper' && isIdle(event)) {
               const sessionID = event.data.sessionID;
-              const action = outcome.action;
+              const last = lastAction.get(sessionID);
+              // Deferred out of the event loop: asking the server to start a
+              // turn from inside the handler reporting that turn is re-entrant,
+              // and the request is dropped.
               setTimeout(() => {
-                void runtime?.advance(sessionID, action);
+                void runtime?.advance(sessionID, last ?? CONTINUE_ACTION);
               }, 0);
+              lastAction.delete(sessionID);
             }
           }
         }

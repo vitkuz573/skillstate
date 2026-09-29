@@ -953,6 +953,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -978,6 +979,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1063,6 +1065,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1095,6 +1098,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
             },
           },
+          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
         ],
       });
       cleanups.push(await harness.start());
@@ -1195,6 +1199,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
             },
           },
+          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
         ],
       });
       cleanups.push(await harness.start());
@@ -1220,6 +1225,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
             },
           },
+          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
         ],
       });
       cleanups.push(await second.start());
@@ -1253,12 +1259,50 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
     await waitFor(() => payloads.length > 0, 'the step request');
     expect(typeof payloads[0]!.text).toBe('string');
-    expect(payloads[0]!.text).toBe('read src/cfg2.ts');
+    // Empty on purpose. applyPaperContext clears the messages this arrives in,
+    // so the model never reads it - it shows up in the conversation as though
+    // the user had said it. The instruction rides in O_t instead.
+    expect(payloads[0]!.text).toBe('');
+  });
+
+  it('ignores a junk event and a patch that named no action', async () => {
+    // Two edges of the idle trigger. A malformed event must not be read as the
+    // end of a turn — that would ask for a next step nobody finished. And a
+    // patch with no action leaves the runtime to fall back to CONTINUE_ACTION,
+    // which is the whole point of §5.1 line 9: an invalidated step is still a
+    // step, and the loop continues.
+    const prompts: string[] = [];
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      prompts,
+      events: [
+        null as never,
+        'session.idle' as never,
+        { type: 'session.idle' } as never,
+        { type: 'session.idle', data: { sessionID: 42 } } as never,
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":1}}\n```',
+          },
+        },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+      ],
+    });
+    cleanups.push(await harness.start());
+    // The junk is skipped, but the real idle still turns the loop — once.
+    await waitFor(() => prompts.length > 0, 'the step request');
+    expect(prompts).toEqual(['ses_root']);
   });
 
   it('applies a recovered patch once, however often the host asks', async () => {
@@ -1278,6 +1322,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":9},"action":"read more"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1326,6 +1371,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":2},"action":"read the file"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1471,6 +1517,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":5},"action":"continue"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1575,6 +1622,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":2},"action":"x"}\n```',
           },
         },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1591,6 +1639,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       events: [
         { type: 'session.text.ended', data: { sessionID: 'ses_root', assistantMessageID: 'a', ordinal: 0, text: 'no json here' } },
+        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
         sessionCreated('ses_child', 'ses_root'),
         {
           type: 'session.text.ended',
