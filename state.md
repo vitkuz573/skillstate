@@ -396,7 +396,8 @@ The specification is **protocol-agnostic**: it does not mandate a host, a messag
 Three common integration surfaces, all covered by the same three primitive operations:
 
 - **CLI / script hooks.** A pre-step hook reads the state file and injects it into the tool call / compaction context; a post-step hook extracts `state_patch` + `action` from the model's response, validates against the embedded schema, applies `⊕`, and writes the state file back. (Applies to hosts whose hook lifecycle is append-only.)
-- **Plugin hooks.** A plugin intercepts the message transform layer to **trim** history to a bounded window and inject a single state message before each model call — the true `O(1)` path where the host permits history mutation. It also hooks compaction to preserve `Σ` and post-tool to persist the merged state.
+- **Plugin hooks.** A plugin rebuilds the model-facing context from `(P, Σₜ, Oₜ)` before each model call — the true `O(1)` path where the host permits context replacement. It hooks compaction to preserve `Σ` and post-tool to persist the merged state.
+  - **Do not trim history by slicing.** An earlier version kept the last three messages and appended a synthetic `user` message containing raw state JSON. It deleted the task statement, the tool results, and the errors the agent had just been handed, and because the last `user` message is what a model reads as the current instruction, the state blob displaced the request. The symptom was an agent that stopped doing the task and started emitting state JSON. Replacement is the paper's specification; slicing was a misreading of it. See `packages/opencode/src/paper-mode.ts`.
 - **Protocol servers (e.g. MCP).** Expose three primitives as tools: `read` (return current `Σ`), `patch` (validate + `⊕` + persist), and `reset` (rebuild `Σ_0`). The schema can be advertised via a tool or resource descriptor.
 
 ### 9.2 Reading and writing state
@@ -417,19 +418,21 @@ The canonical persistence unit is **`skillstate.json`** at a configurable path:
 
 ```json
 {
-  "version": "1.0.0",
-  "spec": "intercode-ctf",
-  "schema_version": "1.0.0",
-  "state": { "working_dir": "/", "cmd_summary": "", "discovered_flags": [], "tested_hypotheses": [], "active_files": [] },
-  "updated_at": 1760000000000
+  "version": 1,
+  "state": { "working_dir": "/", "cmd_summary": "", "discovered_flags": [], "tested_hypotheses": [], "active_files": [] }
 }
 ```
 
-- `version` — the specification version being honored.
-- `spec` — the procedural spec identifier.
-- `schema_version` — the schema's own version, so a state file can be rejected if the schema changed incompatibly.
+- `version` — the envelope version, an integer. The reference implementation writes `1`.
 - `state` — the current `Σ`, always a plain object whose keys are schema-conforming.
-- `updated_at` — a monotonic-ish timestamp (host clock).
+
+This is what the reference implementation actually writes and what
+`packages/opencode/src/state-store.ts` reads. An earlier revision of this
+document specified `version` as a semver string and added `spec`,
+`schema_version` and `updated_at`; none of that is on disk, and a reader
+written against it would reject a real file. The `state` object is the only
+mandatory payload, and a reader must ignore unknown top-level keys to stay
+forward-compatible.
 
 A companion **`state.schema`** file may accompany it (or the schema may be embedded/derived from the spec). For cross-implementer interop, the `state` object is the only mandatory payload; the rest are metadata. Reads must tolerate a superset of keys and must ignore unknown top-level metadata to remain forward-compatible. A conforming writer must never emit a `state` containing a key absent from the schema.
 

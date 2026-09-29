@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Pre-commit: the gate runs on every commit, which is the whole point.
+#
+# The test-count badge rotted because nothing re-checked it. A badge is a
+# number someone remembered to update; a hook is a gate nobody can commit
+# past. This is the local replacement for the CI that this repo does not run,
+# and it is the reason `just gate` is not optional.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+fail () {
+  printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2
+  exit 1
+}
+
+printf '\n\033[1m▸ pre-commit\033[0m\n'
+
+# Only gate when something that matters changed. A docs-only commit should
+# not cost 40 seconds of coverage; a source change always pays.
+staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
+
+needs_gate () {
+  case "$1" in
+    packages/*|tests/*|vitest.config.ts|tsconfig*.json|package.json) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -z "$(printf '%s\n' "$staged" | grep -E '^(packages/|tests/|vitest\.config\.ts|tsconfig.*\.json|package\.json)')" ]; then
+  printf '  no source changes staged — skipping the gate\n'
+  exit 0
+fi
+
+npm run typecheck >/dev/null 2>&1 || fail "typecheck. Run: just check"
+printf '  typecheck ok\n'
+
+npm test >/dev/null 2>&1 || fail "tests. Run: just test"
+printf '  tests ok\n'
+
+npm run test:coverage >/dev/null 2>&1 || fail "coverage gate (100% on all four metrics). Run: just coverage"
+printf '  coverage 100% ok\n'
