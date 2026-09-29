@@ -17,9 +17,10 @@ import type {
   ToolResult,
   UpdateValue,
 } from '@skillstate/opencode';
-import { FakeToolEditor, fakeToolContext } from './_support/harness.js';
+import { FakeToolEditor, createPluginHarness, fakeToolContext } from './_support/harness.js';
 
 let tmpDirs: string[] = [];
+let cleanups: Array<() => void> = [];
 
 function makeProject(): string {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'skillstate-tools-')));
@@ -39,8 +40,8 @@ function makeHome(): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
-  tmpDirs = [];
+  for (const cleanup of cleanups.splice(0)) cleanup();
+  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /** Build an editor wired to a real store over a temp project. */
@@ -438,5 +439,56 @@ describe('skillstate_merge', () => {
     expect(errorOf<MergeValue>(result)).toBe('Cancelled.');
     expect(contentOf(result)).toBe('Cancelled.');
     expect(patch).not.toHaveBeenCalled();
+  });
+});
+
+describe('paper mode has no second write path into Σ', () => {
+  // §6.4: "A rejected patch has no path into Σ ... there is nothing to undo
+  // because there is nothing partially applied."
+  //
+  // `skillstate_update` is free-form by design — it cannot see the spec — so
+  // registering it in paper mode put an UNVALIDATED writer beside the validated
+  // one. Measured, not theorised: a thirty-file run left `total: '1523'` in the
+  // state file, a string in a field the spec declares `number`, and no
+  // validated patch can produce that. The model had used the tool, and nothing
+  // in the runtime noticed.
+  //
+  // The model does not need the read tool either: eq. 1 puts Σ in the prompt.
+
+  async function namesFor(mode: 'paper' | 'notes'): Promise<string[]> {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ss-mode-${mode}-`)));
+    tmpDirs.push(dir);
+    fs.writeFileSync(path.join(dir, 'skillstate.json'), JSON.stringify({ mode }));
+    fs.writeFileSync(
+      path.join(dir, 'skill-spec.json'),
+      JSON.stringify({
+        id: 'accumulate',
+        name: 'Accumulate',
+        version: '1.0.0',
+        instructions: 'Accumulate.',
+        schema: { total: { type: 'number', default: 0, description: 'running sum' } },
+      }),
+    );
+    const stateDir = path.join(dir, '.skillstate');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0 } }),
+    );
+    const harness = createPluginHarness({ projectDir: dir });
+    cleanups.push(await harness.start());
+    return harness.capturedTools().tools.keys().toArray().sort();
+  }
+
+  it('registers nothing at all in paper mode', async () => {
+    expect(await namesFor('paper')).toEqual([]);
+  });
+
+  it('still registers them in notes mode, which is where they belong', async () => {
+    // Guarding the removal with the case that must not change: without this, a
+    // refactor could satisfy the test above by never registering anything.
+    const names = await namesFor('notes');
+    expect(names).toContain('skillstate_read');
+    expect(names).toContain('skillstate_update');
   });
 });

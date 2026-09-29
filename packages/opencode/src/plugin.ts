@@ -493,8 +493,23 @@ export const SkillStatePlugin = Plugin.define({
           })
         : undefined;
 
+    // Paper mode registers NO skillstate tools, and the reason is measured
+    // rather than doctrinal.
+    //
+    // `skillstate_update` is free-form by design — it cannot see the spec — so
+    // in paper mode it was a second write path into Sigma that bypasses
+    // `validatePatch` entirely. A thirty-file run left `total: '1523'` in the
+    // state file: a STRING, in a field the spec declares as `number`. No
+    // validated patch can produce that, so the model had used the tool, and
+    // nothing in the runtime noticed.
+    //
+    // §6.4's rollback guarantee is that "a rejected patch has no path into
+    // Sigma ... there is nothing to undo because there is nothing partially
+    // applied". An unvalidated second writer is exactly such a path. And the
+    // model does not need the tool to read: paper mode puts Sigma in the
+    // prompt by construction, which is the whole of eq. 1.
     await ctx.tool.transform((editor) => {
-      registerTools(editor, { store, sessions, scopeFor });
+      if (mode !== 'paper') registerTools(editor, { store, sessions, scopeFor });
     });
 
     // ── Session tree and the paper-mode state sink ───────────────────────
