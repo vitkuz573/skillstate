@@ -1305,6 +1305,108 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(prompts).toEqual(['ses_root']);
   });
 
+  it('traces every step, counting the state as it stood afterwards', async () => {
+    // The trace is the only thing that can tell "the loop stopped driving" from
+    // "the model kept answering without patching", and the second one is what
+    // the 30-file run did. `done` here is the count that fell five short of the
+    // answer, which is the number a reader of that run is looking for.
+    const trace = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-steps-')), 'steps.jsonl');
+    process.env['SKILLSTATE_DEBUG_STEPS'] = trace;
+    try {
+      const projectDir = paperProjectWithSpec({ done: ['src/a.ts', 'src/b.ts'], total: 1288 });
+      const harness = createPluginHarness({
+        projectDir,
+        prompts: [],
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":1},"action":"read src/a.ts"}\n```',
+            },
+          },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
+        ],
+      });
+      cleanups.push(await harness.start());
+      await waitFor(
+        () => fs.existsSync(trace) && fs.readFileSync(trace, 'utf-8').length > 0,
+        'a step to be traced',
+      );
+      const [line] = fs
+        .readFileSync(trace, 'utf-8')
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(line).toMatchObject({ done: 2, total: 1288, applied: true, drove: true });
+    } finally {
+      delete process.env['SKILLSTATE_DEBUG_STEPS'];
+    }
+  });
+
+  it('says -1 and null when the state has nothing to count', async () => {
+    // A state with no `done` and no `total`: 0 would be a lie in both
+    // directions, and a trace that reported it would be read as "the model did
+    // nothing" when the truth is "there was nothing there to count".
+    const trace = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-steps-')), 'steps.jsonl');
+    process.env['SKILLSTATE_DEBUG_STEPS'] = trace;
+    try {
+      const projectDir = paperProjectWithSpec({ note: 'no counters here' });
+      const harness = createPluginHarness({
+        projectDir,
+        prompts: [],
+        events: [{ type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
+      });
+      cleanups.push(await harness.start());
+      await waitFor(
+        () => fs.existsSync(trace) && fs.readFileSync(trace, 'utf-8').length > 0,
+        'the step to be traced',
+      );
+      const [line] = fs
+        .readFileSync(trace, 'utf-8')
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(line).toMatchObject({ done: -1, total: null });
+    } finally {
+      delete process.env['SKILLSTATE_DEBUG_STEPS'];
+    }
+  });
+
+  it('traces a step the driver never owned and no patch had written', async () => {
+    // The two values a reader would otherwise have to guess: no step number,
+    // because the runtime is off, and `continue` as the note, because there
+    // was no action to carry forward. Both are sentinels, and a sentinel that
+    // can be confused with a real measurement is not a sentinel.
+    const trace = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-steps-')), 'steps.jsonl');
+    process.env['SKILLSTATE_DEBUG_STEPS'] = trace;
+    process.env['SKILLSTATE_DRIVE'] = '0';
+    try {
+      const projectDir = paperProjectWithSpec({});
+      const harness = createPluginHarness({
+        projectDir,
+        prompts: [],
+        events: [{ type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
+      });
+      cleanups.push(await harness.start());
+      await waitFor(
+        () => fs.existsSync(trace) && fs.readFileSync(trace, 'utf-8').length > 0,
+        'the step to be traced',
+      );
+      const [line] = fs
+        .readFileSync(trace, 'utf-8')
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(line).toMatchObject({ step: -1, applied: false, drove: false, note: 'continue' });
+    } finally {
+      delete process.env['SKILLSTATE_DEBUG_STEPS'];
+      delete process.env['SKILLSTATE_DRIVE'];
+    }
+  });
+
   it('leaves the loop alone when the driver is switched off', async () => {
     // The switch that makes the cost trade-off measurable rather than arguable:
     // paper's context replacement with the host's own batching untouched.

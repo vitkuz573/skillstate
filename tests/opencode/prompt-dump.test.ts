@@ -12,7 +12,7 @@ import { describe as group, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { applyFeedback, applyObservation, dumpDrift, dumpPromptShape } from '@skillstate/opencode';
+import { applyFeedback, applyObservation, dumpDrift, dumpPromptShape, dumpStepTrace } from '@skillstate/opencode';
 
 let dirs: string[] = [];
 
@@ -175,6 +175,57 @@ group('dumpPromptShape — the state the model was shown', () => {
     dumpPromptShape(file, [{ role: 'user', content: [] }]);
     const [entry] = readLines(file);
     expect(entry!['state']).toBeUndefined();
+  });
+});
+
+group('dumpStepTrace', () => {
+  const line = (over: Partial<Parameters<typeof dumpStepTrace>[1]> = {}) => ({
+    sessionID: 'ses_1',
+    step: 3,
+    applied: true,
+    done: 25,
+    total: 1288,
+    drove: true,
+    note: 'read src/cfg4.ts',
+    ...over,
+  });
+
+  it('does nothing when no path is configured', () => {
+    expect(() => dumpStepTrace(undefined, line())).not.toThrow();
+    expect(() => dumpStepTrace('', line())).not.toThrow();
+  });
+
+  it('records whether the turn patched, and what the state said afterwards', () => {
+    // The 30-file run answered correctly with its state at 25/30, and from the
+    // outside that is indistinguishable from the loop stopping, the model
+    // abandoning the protocol, and the ceiling being hit. These two fields are
+    // what tell those apart.
+    const file = scratch();
+    dumpStepTrace(file, line());
+    const [entry] = readLines(file);
+    expect(entry).toMatchObject({ step: 3, applied: true, done: 25, total: 1288, drove: true });
+  });
+
+  it('marks a turn that patched nothing and a driver that never ran', () => {
+    // -1 for `step` and `done` is the signal: the runtime was off, so the
+    // numbers are not a count of anything. Null total is the state having no
+    // such field, which is a different thing from a state that has it at zero.
+    const file = scratch();
+    dumpStepTrace(file, line({ applied: false, drove: false, step: -1, done: -1, total: null }));
+    const [entry] = readLines(file);
+    expect(entry).toMatchObject({ applied: false, drove: false, step: -1, done: -1, total: null });
+  });
+
+  it('appends one line per step so a run reads in order', () => {
+    const file = scratch();
+    dumpStepTrace(file, line({ step: 1, done: 1 }));
+    dumpStepTrace(file, line({ step: 2, done: 2 }));
+    const entries = readLines(file);
+    expect(entries.map((e) => e['done'])).toEqual([1, 2]);
+  });
+
+  it('survives an unwritable path', () => {
+    expect(() => dumpStepTrace('/nonexistent-dir/trace.log', line())).not.toThrow();
   });
 });
 

@@ -84,6 +84,8 @@ export { FeedbackQueue, applyFeedback, applyObservation, feedbackFor } from './f
 export type { PendingFeedback } from './feedback.js';
 /** `SKILLSTATE_DEBUG_PROMPT` diagnostic — what the host actually handed us. */
 export { dumpPromptShape, dumpDrift } from './plugin.js';
+/** `SKILLSTATE_DEBUG_STEPS` diagnostic — what the paper step loop did, per step. */
+export { dumpStepTrace } from './plugin.js';
 /** The runtime that owns the paper-mode step loop. */
 export { RuntimeDriver, DEFAULT_MAX_STEPS } from './runtime.js';
 /** §5.1's one-observation-per-step boundary, enforced by withholding tools. */

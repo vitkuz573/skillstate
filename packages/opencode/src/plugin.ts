@@ -299,6 +299,43 @@ export function dumpDrift(
 }
 
 /**
+ * One line per step, for the run that answered correctly while its state
+ * under-reported the work. Enabled by `SKILLSTATE_DEBUG_STEPS=<path>`.
+ *
+ * The 30-file measurement produced the most confusing result in this project's
+ * history: paper mode answered correctly, its state ended 25/30, and the
+ * control's ended 30/30 complete. Twenty-five patches were emitted and all
+ * twenty-five landed, so no patch was lost — the model read every file and
+ * declined to patch the last five, while the loop kept driving it. From the
+ * outside that is indistinguishable from the loop stopping, from the model
+ * silently abandoning the protocol, and from the ceiling being hit.
+ *
+ * So this prints the thing that tells those apart: at every step, whether a
+ * patch was applied, what the state looked like, and whether the driver asked
+ * again. Every previous wrong guess in this file came from reasoning about the
+ * loop instead of watching it.
+ */
+export function dumpStepTrace(
+  path: string | undefined,
+  record: {
+    readonly sessionID: string;
+    readonly step: number;
+    readonly applied: boolean;
+    readonly done: number;
+    readonly total: number | null;
+    readonly drove: boolean;
+    readonly note: string;
+  },
+): void {
+  if (path === undefined || path.length === 0) return;
+  try {
+    fs.appendFileSync(path, `${JSON.stringify(record)}\n`);
+  } catch {
+    // Diagnostics must never break the agent loop.
+  }
+}
+
+/**
  * The plugin definition.
  *
  * `setup` wires the session registry, the project state store, the native
@@ -465,15 +502,31 @@ export const SkillStatePlugin = Plugin.define({
             // while the current one was still running, and the continuation was
             // consumed by a request that got superseded — measured, the
             // `[next step]` marker never reached the model at all.
-            if (mode === 'paper' && isStepEnded(event) && runtime !== undefined) {
+            if (mode === 'paper' && isStepEnded(event)) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
-              // Deferred out of the event loop: asking the server to start a
-              // turn from inside the handler reporting that turn is re-entrant,
-              // and the request is dropped.
-              setTimeout(() => {
-                void runtime?.advance(sessionID, last ?? CONTINUE_ACTION);
-              }, 0);
+              if (runtime !== undefined) {
+                // Deferred out of the event loop: asking the server to start a
+                // turn from inside the handler reporting that turn is re-entrant,
+                // and the request is dropped.
+                setTimeout(() => {
+                  void runtime?.advance(sessionID, last ?? CONTINUE_ACTION);
+                }, 0);
+              }
+              // What the loop did, step by step. Read BEFORE the action is
+              // forgotten, and after the state is written, so the line answers
+              // the only question that matters here: did the turn before this
+              // one produce a patch, and what did the state say afterwards?
+              const snapshot = store.read(scopeFor(sessionID));
+              dumpStepTrace(process.env['SKILLSTATE_DEBUG_STEPS'], {
+                sessionID,
+                step: runtime?.advanced.length ?? -1,
+                applied: last !== undefined,
+                done: Array.isArray(snapshot?.done) ? snapshot.done.length : -1,
+                total: typeof snapshot?.total === 'number' ? snapshot.total : null,
+                drove: runtime !== undefined,
+                note: last ?? CONTINUE_ACTION,
+              });
               lastAction.delete(sessionID);
             }
           } catch {
