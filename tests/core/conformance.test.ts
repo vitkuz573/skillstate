@@ -221,6 +221,33 @@ group('§10.2 conformance harness', () => {
     expect(runtime.state).toEqual({ mood: 'neutral', count: 0, log: [] });
   });
 
+  it('4c. The corrective prompt is §10.1\'s string, character for character', async () => {
+    // §10.1's `Transition` appends a specific sentence to the SAME A_t, and it
+    // is the only thing standing between a model and a silent second failure.
+    // The paper writes it as a string literal; A.4 is declared byte-normative
+    // and this is not, but "not declared normative" is not "free to change" —
+    // so it is pinned here rather than paraphrased in a helper.
+    const prompts: string[] = [];
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: scriptedLlm(['no fence here', llmText('ok', { mood: 'ok' }, 'go')], prompts),
+      execute: fixedExecutor,
+      maxValidationRetries: 1,
+    });
+
+    await runtime.step(obs('OBS'));
+
+    const retried = prompts[1]!;
+    // The base prompt is unchanged and the correction is appended to it — the
+    // same A_t, not a fresh one with different contents.
+    expect(retried.startsWith(prompts[0]!)).toBe(true);
+    expect(retried.slice(prompts[0]!.length)).toBe(
+      '\n\nYour previous response was invalid: no_block. Respond again. ' +
+        'Reasoning is discarded; respond with the JSON block with exactly these ' +
+        'two keys: state_patch and action.',
+    );
+  });
+
   it('5. Reasoning discard — R_t is recorded, and never re-sent', async () => {
     // "Assert R_t appears in the step record but never in Σ and never in a
     // later prompt."

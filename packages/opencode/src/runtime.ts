@@ -34,8 +34,21 @@
 /** Actions that mean the model considers the procedure finished. */
 const TERMINAL_ACTIONS = new Set(['done', 'complete', 'completed', 'finished', 'stop', 'end', '']);
 
-/** Default ceiling on runtime-driven steps before it stops asking. */
-export const DEFAULT_MAX_STEPS = 64;
+/**
+ * Default ceiling on runtime-driven steps before it stops asking.
+ *
+ * 100, not a number chosen here. §10.1's reference `Run` signature reads
+ * `Run(P, Σ0, O0, llm, execute, isDone, maxSteps = 100)`, and this value was 64
+ * until the paper was re-read for that line — with a comment claiming the paper
+ * did not give a number. It does.
+ *
+ * The cost of getting this wrong was measured rather than argued: at 64 a
+ * thirty-file task stopped at 25/30 having answered correctly, and the ceiling
+ * looked like the binding constraint when the real cause was that narration
+ * turns were each spending a step. Fixing the retry loop changed the pace;
+ * matching the paper's ceiling is what makes the two agree.
+ */
+export const DEFAULT_MAX_STEPS = 100;
 
 /** What the loop driver needs from its host, injected so it is testable. */
 export interface RuntimeDriverOptions {

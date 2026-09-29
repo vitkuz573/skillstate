@@ -917,7 +917,7 @@ argument:
 
 | variable | default | what it changes |
 | --- | --- | --- |
-| `SKILLSTATE_MAX_STEPS=<n>` | 64 | the runtime-driven step ceiling; a malformed value is ignored rather than clamped, so a typo leaves the ceiling where the code says it is |
+| `SKILLSTATE_MAX_STEPS=<n>` | 100 | the runtime-driven step ceiling, per §10.1's `Run(... maxSteps = 100)`. A malformed value is ignored rather than clamped, so a typo leaves the ceiling where the code says it is |
 | `SKILLSTATE_DRIVE=0` | driving on | paper's context replacement with the host's own batching left alone — 2.9× cheaper on the eight-file task, and a real option rather than a diagnostic |
 
 Note the direction. Driving the loop is the paper's mechanism and is the

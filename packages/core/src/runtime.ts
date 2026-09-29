@@ -568,6 +568,14 @@ export class SkillStateRuntime {
  * host adapter alike — the two used to build this string separately, and they
  * did not agree: `k = 0` is a legal configuration, and the copy in this file
  * wrote "1 attempts".
+ *
+ * A DELIBERATE divergence from §10.1, which writes the literal
+ * `"... after " + str(attempt) + " attempts: "` and so produces "1 attempts"
+ * when k = 0. The plural is corrected here. A.4 is declared byte-normative in
+ * §5.2 and this is not: §10.1 is illustrative pseudocode, and a grammar error
+ * in a literal that is handed to a model to read is a defect, not a
+ * conformance item. Flagged rather than quietly taken, because the rule for
+ * diverging from the paper is that the divergence is written down.
  */
 export function invalidPatchObservation(attempts: number, lastError: string | undefined): string {
   // Empty for zero attempts, not a sentence about zero attempts. The caller
