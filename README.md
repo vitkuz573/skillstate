@@ -918,22 +918,24 @@ competing instruction channel the model starts preferring over the user.
 What remains unestablished is scale. The 70.4% figure comes from a three-turn
 task with one fact handed over in the first message. A second task shape — eight
 files, a constant hidden among decoys in each, a total not computable until the
-last read — was built to break it, and it did, repeatedly, for reasons that
-turned out to be bugs in this repository rather than facts about the method.
+last read — was built to break it, and it did, repeatedly. Every reason it broke
+turned out to be a bug in this repository rather than a fact about the method:
 
-The runtime's step request had been rejected by the host on every call since it
-was written. `SessionPromptInput` declares `readonly text: {…}["text"]`, and that
-indexing reads as an object; it is the string field itself. So the runtime had
-never once driven a turn, and everything measured before that fix described a
-mechanism that was not running. With the payload corrected, the same
-four-file fixture accumulates exactly — 11, 33, 66, each patch arithmetically
-right — where before the state never moved past `{0, 0}`.
+- the runtime's step request was rejected by the host on every call, so it had
+  never once driven a turn;
+- the loop was triggered by `session.idle`, which the host does not emit;
+- a turn was treated as a completed text block, so the next step was ordered
+  while the current one was still running;
+- a step was only a step if it produced a patch, which deleted the failure case
+  §5.1 says to retry;
+- one malformed event could end the event loop and silently kill the state sink.
 
-The last failure was not in the code either. The state said `files: 2` and not
-*which* two, and in paper mode there is no transcript to recover that from: the
-model re-read a file, listed a directory, and stopped. Recording a set instead
-of a count — the smallest change §4.1 says a spec author makes — made the same
-task answer correctly.
+With those fixed, a four-file accumulate task runs to completion: 11, 33, 66,
+110, each patch exact, final state naming every file, answer correct.
+
+What is still open is whether that holds at n=3 per arm on the eight-file
+shape, and whether the saving survives once the state is actually used rather
+than merely written.
 
 The paper's own §7 also notes that a bounded prompt does not help when the task
 is defined over the historical trajectory, and nothing here measures a long

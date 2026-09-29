@@ -169,6 +169,41 @@ That is the paper's own position: P is the operator's procedural specification,
 and how to author its schema is §4.1. A spec that records a count instead of a
 set is a bad spec, not a broken runtime.
 
+**Fixed: the step trigger was an event the host never emits.** The runtime
+advanced the loop on `session.idle`, which is how the SDK's `SessionMessageIdle`
+reads. The host does not send it. Recorded every event type the plugin receives
+for one real run:
+
+```
+2  session.step.ended      <- the actual end-of-turn signal
+2  session.text.ended
+0  session.idle
+```
+
+So the mechanism meant to turn the loop never fired once, and no amount of
+fixing around it could help. That is what `recordEvent` is for: "the trigger is
+wired wrong" and "the trigger never fires" look identical from the outside —
+both are a run that stops — and the second had already survived several rounds
+of debugging by looking exactly like the first.
+
+Also fixed, found by a test that fed the event loop a bare `null`: the per-event
+body had no guard, so one malformed event threw to the outer catch and ended
+the subscription, taking the session registry and the state sink with it for the
+rest of the process, silently. The loop is the only source of both.
+
+**With those fixed, a four-step task now runs to completion in paper mode:**
+
+```
+ 11   done: [n1]
+ 33   done: [n1, n2]
+ 66   done: [n1, n2, n3]
+110   done: [n1, n2, n3, n4]     answer 110, state complete
+```
+
+Every read recorded, every patch arithmetically exact, and the final state names
+every file rather than counting them. What the CHANGELOG previously called a
+limitation of the method was five bugs in this repository.
+
 **Fixed: a read-after-write race that served the model a state that had not
 moved.** The `context` hook learns of a patch from `session.text.ended`, which
 arrives on an async iterator the host does not wait for. The host starts its
