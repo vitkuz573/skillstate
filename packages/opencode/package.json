@@ -25,6 +25,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@opencode/plugin": "2.0.19",
     "@skillstate/core": "^3.0.0"
   }
 }

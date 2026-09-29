@@ -58,7 +58,7 @@ import {
 } from '@skillstate/core';
 import type { SessionMeta } from '@skillstate/core';
 import { installShutdown } from '@skillstate/core';
-import { INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
+import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type {
   ProceduralSpec,
   SchemaField,
@@ -1623,8 +1623,21 @@ function listCheckpoints(
 
 /**
  * Resolve the procedural spec for a launch: explicit `args.spec` wins, then
- * a `SKILLSTATE_SPEC_PATH`/`args.specPath` JSON file, else the canonical
- * InterCode CTF spec. Pure w.r.t. the returned value.
+ * a `SKILLSTATE_SPEC_PATH`/`args.specPath` JSON file, else the neutral
+ * `GENERIC_PROCEDURE_SPEC`. Pure w.r.t. the returned value.
+ *
+ * THE DEFAULT IS NOT THE CTF SPEC. It used to be
+ * `INTERCODE_CTF_SPEC`, whose instructions read "You are an autonomous CTF
+ * agent operating inside an InterCode CTF environment: a Docker container
+ * with a hidden flag somewhere on its filesystem". Because `spec.get`
+ * returns `spec.instructions` verbatim, any host launched without
+ * `SKILLSTATE_SPEC_PATH` handed the model a task description it had never
+ * been asked for -- the reported symptom was an agent that would not do the
+ * user's task and kept looking for a flag instead.
+ *
+ * A spec is a task description, so a default must be a description of the
+ * STORAGE FORMAT and nothing else. The CTF spec stays reachable, but only
+ * when a caller asks for it by name.
  */
 function resolveSpec(
   args: LaunchArgs | undefined,
@@ -1637,7 +1650,7 @@ function resolveSpec(
   if (typeof specPath === 'string' && specPath.length > 0) {
     return JSON.parse(fs.readFileSync(specPath, 'utf-8')) as ProceduralSpec;
   }
-  return INTERCODE_CTF_SPEC;
+  return GENERIC_PROCEDURE_SPEC;
 }
 
 /**

@@ -1567,18 +1567,41 @@ describe('MCP launch', () => {
     expect(toolJson(parsed.result).id).toBe('from-file');
   });
 
-  it('launch defaults to the InterCode CTF spec', async () => {
+  it('launch defaults to the NEUTRAL spec, never a task description', async () => {
+    // Regression: the default used to be INTERCODE_CTF_SPEC, whose
+    // instructions tell the model it is "an autonomous CTF agent" hunting a
+    // hidden flag. spec.get returns those instructions verbatim, so a host
+    // launched without SKILLSTATE_SPEC_PATH handed the agent a task it was
+    // never given.
     const { input, output } = streams();
     const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
-    const parsed = await toolCall(server, 'spec.get', {});
-    expect(toolJson(parsed.result).id).toBe('intercode-ctf');
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    expect(spec.id).toBe('generic-procedure');
+    expect(spec.instructions).not.toMatch(/ctf|flag\{/i);
   });
 
   it('launch falls back to the default spec for an empty specPath string', async () => {
     const { input, output } = streams();
     const server = await launch({ specPath: '', root: makeTmp(), input, output, installInterruptHandler: false });
-    const parsed = await toolCall(server, 'spec.get', {});
-    expect(toolJson(parsed.result).id).toBe('intercode-ctf');
+    expect(toolJson((await toolCall(server, 'spec.get', {})).result).id).toBe('generic-procedure');
+  });
+
+  it('the default spec never tells the model how to behave', async () => {
+    const { input, output } = streams();
+    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    const text = spec.instructions as string;
+    expect(text).not.toMatch(/you are operating in/i);
+    expect(text).not.toMatch(/emit a json block/i);
+    expect(text).not.toMatch(/state_patch/);
+    expect(text).not.toMatch(/\byou must\b|\balways\b|respond with/i);
+  });
+
+  it('the default spec documents the argument the tools really accept', async () => {
+    const { input, output } = streams();
+    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    expect(spec.instructions).toContain('"patch"');
   });
 
   it('launch honours the SKILLSTATE_SPEC_PATH env', async () => {

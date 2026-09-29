@@ -31,6 +31,10 @@ function project(pkg: string, extraInclude: string[] = []): object {
     test: {
       name: pkg,
       include: [`tests/${pkg}/**/*.ts`, ...extraInclude],
+      // `_support/` holds shared fixtures and harnesses, not suites. The
+      // include glob above is `**/*.ts`, so it has to be excluded
+      // explicitly or vitest reports "no test suite found" for each helper.
+      exclude: [...GLOBALS_NODE, '**/_support/**'],
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json', 'html'],
