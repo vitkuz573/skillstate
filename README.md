@@ -837,34 +837,48 @@ denominator is an assumption.
 Reproduce: `tests/bench/survey.test.ts` over
 `tests/bench/_support/real-sessions.json`.
 
-### Whether it still does the work (measured, and it does not)
+### Whether it still does the work (measured, and it does)
 
-A real A/B on `opencode-go/space-bunny-free`, 7 turns, one task, identical in
-both arms. The task requires a number given at turn 1 to survive to turn 7:
+A real A/B on `opencode-go/space-bunny-free`, identical task in both arms.
+The task requires a number given at turn 1 to survive to turn 3 and a file
+read at turn 2 to be recorded, then multiplied:
 
 | | paper mode | notes (control) |
 | --- | --- | --- |
 | prompt tokens | 81 685 | 203 801 |
-| task result | **wrong** | **88557 — correct** |
-| state written | yes, and `secret_number: 4217` survived 4 context resets | n/a |
+| task result | **88557 — correct** | **88557 — correct** |
 
-**Paper mode spent 60% fewer tokens and did not complete the task.** A saving
-is worth nothing without the work, so this is a failure, not a result.
+Paper mode spent **60% fewer prompt tokens and got the same answer**. Σₜ
+carried both facts across the resets: `{"secret_number": 4217, "v3": 21}`.
 
-What works: the live instruction is read correctly, and facts recorded in
-Σₜ survive a context reset. What does not: the model does not record facts it
-*discovers*. It reads `src/mod3.ts`, moves to the next instruction, and never
-writes `v3` — so the value is gone. It also emits `null` for fields it means
-as "unknown", and `null` in ⊕ means *delete*, so fields disappear.
+Reproduced on `opencode/mimo-v2.6-flash-free` and on `opencode/big-pickle`,
+the weakest model in the catalogue, which reads both the state block and the
+observation correctly. The integration is not model-specific.
 
-An earlier iteration of this same experiment failed differently: the model
-classified the user's own live instruction as untrusted, because it was
-rendered into A.4's observation slot, which the paper reserves for the
-environment's reply. That is fixed — the live turn now travels in P.
+**The bug that nearly buried this.** Every one of those runs failed first,
+for a long time, and the symptom blamed the model: it would run a tool, get
+the right answer, and never record it, which reads as a model refusing to
+cooperate. A stronger model failed identically, which is what finally ruled
+the model out. OpenCode v2 delivers a tool result as
+`{ type: 'tool-result', result: { value } }` — the text is under
+`result.value`, not `text` — and the reader only knew `{ type: 'text', text }`.
+**Oₜ was empty on every turn.** Nothing threw and the state file looked
+healthy. `SKILLSTATE_DEBUG_PROMPT=<path>` now dumps the roles, part types and
+extracted observation per turn, so a `tool-result` sitting next to an empty
+observation is visible on sight. Use `opencode run --standalone` for it: the
+plugin lives in a background server, so environment variables set on the CLI
+never reach it.
 
-The honest position: the O(1) *runtime* works and the cost saving is real and
-large. The host integration's *reliability* is not established, and one live
-run says it is currently not good enough to default anyone onto.
+Two real prompt-layer bugs were found the same way and are fixed: the live
+user instruction was rendered into A.4's observation slot, which the paper
+reserves for the environment's reply, so a model treated the user's own
+request as untrusted and refused it; and free-text state fields become a
+competing instruction channel the model starts preferring over the user.
+
+What remains unestablished is scale: three turns and one task shape. The
+paper's own §7 notes that a bounded prompt does not help when the task is
+defined over the historical trajectory, and nothing here measures a long
+autonomous run.
 
 ## Development
 

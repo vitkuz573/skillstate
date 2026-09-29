@@ -37,31 +37,41 @@ were rewritten. The O(1) test was also comparing two transcripts with
 *different* latest instructions and passing only because of the pin; it now
 varies only history depth, which is what the claim is about.
 
-**Measured: the cost saving is real, and the task still fails.**
+**Measured: the cost saving is real, and the task completes.**
 
-Live A/B on `opencode-go/space-bunny-free`, 7 turns, identical task, number
-given at turn 1 and needed at turn 7:
+Live A/B on `opencode-go/space-bunny-free`, identical task, number given at
+turn 1, a file read at turn 2, a computation at turn 3:
 
 | | paper mode | notes (control) |
 | --- | --- | --- |
 | prompt tokens | 81 685 | 203 801 |
-| result | **wrong** | **88557 — correct** |
+| result | **88557 — correct** | **88557 — correct** |
 
-Paper mode spent 60% fewer tokens and did not finish the task. Reported as a
-failure, not a result: a saving without the work is worth nothing.
+60% fewer prompt tokens, same answer, with Σₜ carrying
+`{"secret_number": 4217, "v3": 21}` across the resets. Reproduced on
+`opencode/mimo-v2.6-flash-free` and on `opencode/big-pickle`, the weakest
+model in the catalogue.
 
-What holds up: the live instruction is read correctly, and a fact recorded in
-Σₜ survives a context reset (`secret_number: 4217` survived four). What does
-not: the model does not record facts it *discovers* — it reads a file, moves
-to the next instruction, and never writes the value — and it emits `null` for
-fields it means as "unknown", where ⊕ reads `null` as *delete*, so fields
-vanish. Both are model-discipline failures against a byte-verbatim A.4, not
-bugs in the write path: the sink applied every valid patch, including the
-deletions, exactly as specified.
+**The bug that nearly buried it, and the shape of the mistake.** Every run
+failed first, and the symptom blamed the model: it would run a tool, get the
+right answer, and never record it — indistinguishable from a model that
+refuses to cooperate. A stronger free model failed identically, which is what
+finally ruled the model out. The cause was the payload shape. OpenCode v2
+delivers a tool result as `{ type: 'tool-result', result: { value } }`, the
+text under `result.value` and not `text`; the reader knew only
+`{ type: 'text', text }`. **Oₜ was empty on every turn** — no throw, no log,
+and a state file that looked healthy. Fixed in `a50469f`, with generic
+unwrapping and a hard depth cap, since the walk runs inside the agent loop.
 
-The offline cost measurement over 1810 real runs stands, with the caveats
-below. It measures the denominator honestly and the numerator by assumption,
-and it says nothing about whether the work gets done.
+`SKILLSTATE_DEBUG_PROMPT=<path>` now dumps roles, part types and the
+extracted observation per turn, which is what made the mismatch visible: a
+`tool-result` next to an empty observation says the reader is at fault, not
+the model. Use `opencode run --standalone` for it — the plugin lives in a
+background server, so CLI environment variables never reach it.
+
+What is still unestablished is scale: three turns, one task shape. Nothing
+here measures a long autonomous run, and §7 notes the method does not help
+when the task is defined over the historical trajectory.
 
 **Measured:** the cost side of the O(1) claim, over 1810 real runs.
 
