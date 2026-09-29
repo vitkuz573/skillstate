@@ -89,7 +89,12 @@ export { dumpStepTrace } from './plugin.js';
 /** `SKILLSTATE_MAX_STEPS` — the runtime-driven step ceiling, or the default. */
 export { maxStepsFromEnv } from './plugin.js';
 /** The runtime that owns the paper-mode step loop. */
-export { RuntimeDriver, DEFAULT_MAX_STEPS } from './runtime.js';
+export {
+  RuntimeDriver,
+  DEFAULT_MAX_STEPS,
+  DEFAULT_VALIDATION_RETRIES,
+  INVALID_PATCH,
+} from './runtime.js';
 /** §5.1's one-observation-per-step boundary, enforced by withholding tools. */
 export { StepBoundary, isTerminalAction } from './step-boundary.js';
 export type { RuntimeDriverOptions, RuntimeStep } from './runtime.js';

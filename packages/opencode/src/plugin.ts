@@ -320,6 +320,7 @@ export function dumpStepTrace(
   record: {
     readonly sessionID: string;
     readonly step: number;
+    readonly attempt: number;
     readonly applied: boolean;
     readonly done: number;
     readonly total: number | null;
@@ -530,6 +531,14 @@ export const SkillStatePlugin = Plugin.define({
             if (mode === 'paper' && isStepEnded(event)) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
+              // §5.1 lines 2–8: one step is `k + 1` attempts at the SAME Aₜ.
+              // A turn that produced no patch is an attempt, not a step, so the
+              // corrective feedback arrives on the prompt it belongs to instead
+              // of on the next step's entirely different one.
+              const verdict =
+                runtime === undefined
+                  ? undefined
+                  : runtime.record(sessionID, last !== undefined);
               if (runtime !== undefined) {
                 // Deferred out of the event loop: asking the server to start a
                 // turn from inside the handler reporting that turn is re-entrant,
@@ -545,7 +554,8 @@ export const SkillStatePlugin = Plugin.define({
               const snapshot = store.read(scopeFor(sessionID));
               dumpStepTrace(process.env['SKILLSTATE_DEBUG_STEPS'], {
                 sessionID,
-                step: runtime?.advanced.length ?? -1,
+                step: verdict?.step ?? -1,
+                attempt: verdict?.attempt ?? 0,
                 applied: last !== undefined,
                 done: Array.isArray(snapshot?.done) ? snapshot.done.length : -1,
                 total: typeof snapshot?.total === 'number' ? snapshot.total : null,

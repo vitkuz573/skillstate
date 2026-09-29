@@ -48,6 +48,8 @@ export interface RuntimeDriverOptions {
   readonly prompt: (sessionID: string, text: string) => Promise<boolean>;
   /** Hard ceiling on runtime-driven steps per session. */
   readonly maxSteps?: number;
+  /** §5.1's `k`. Attempts per step are `k + 1`. */
+  readonly retries?: number;
 }
 
 /** One advancement the driver decided to make. */
@@ -57,20 +59,101 @@ export interface RuntimeStep {
   readonly action: string;
   /** The step number, 1-based, for this session. */
   readonly step: number;
+  /** True when this prompt was a §5.1 retry inside the current step. */
+  readonly retry: boolean;
 }
+
+/** §5.1 line 2: `k` retries, so `k + 1` attempts per step. */
+export const DEFAULT_VALIDATION_RETRIES = 2;
+
+/** §5.1 line 10: the sentinel a step returns when every attempt failed. */
+export const INVALID_PATCH = '__invalid_patch__';
 
 export class RuntimeDriver {
   readonly #prompt: (sessionID: string, text: string) => Promise<boolean>;
   readonly #maxSteps: number;
+  readonly #retries: number;
   readonly #steps = new Map<string, number>();
   /** The action each session is mid-way through, read by the context hook. */
   readonly #pending = new Map<string, string>();
+  /**
+   * Attempts spent on the CURRENT step, per session.
+   *
+   * §5.1 lines 2–8: a step is up to `k + 1` attempts at the *same* Aₜ, each
+   * after the first carrying the reason the last one failed. Only when all of
+   * them fail does the step return `__invalid_patch__` and the loop move on.
+   *
+   * This was missing, and it was not a small omission. Without it every failed
+   * attempt became its own step, so the corrective feedback arrived on a
+   * *different* Aₜ than the one it was correcting — which is precisely what
+   * §7's rollback-retry forbids. Measured consequence: the model narrated
+   * instead of patching on about 63% of turns, and because the state advances
+   * only on patching turns, the state grew at 37% of the step rate. Thirty
+   * files cost about 88 steps against a ceiling of 64, and the run stopped at
+   * 25/30 having answered correctly anyway.
+   *
+   * A narration turn is now an attempt, not a step.
+   */
+  readonly #attempts = new Map<string, number>();
+  /** What {@link record} decided, so `advance` does not re-decide it. */
+  readonly #decisions = new Map<string, 'retry' | 'advance'>();
   /** Every advancement made, for diagnostics and tests. */
   readonly advanced: RuntimeStep[] = [];
+  /** Every step that exhausted its attempts, for diagnostics and tests. */
+  readonly invalidated: string[] = [];
 
   constructor(options: RuntimeDriverOptions) {
     this.#prompt = options.prompt;
     this.#maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.#retries = options.retries ?? DEFAULT_VALIDATION_RETRIES;
+  }
+
+  /**
+   * How many attempts the current step has spent, and what it should do next.
+   *
+   * `retry` means the step continues: the loop is asked again, the corrective
+   * feedback rides in Oₜ, and the step number does not move. `advance` means
+   * the attempts are spent and the next prompt opens step t+1. `done` means
+   * the step succeeded and needs no further prompting at all.
+   */
+  record(
+    sessionID: string,
+    applied: boolean,
+  ): {
+    readonly action: 'retry' | 'advance';
+    readonly attempt: number;
+    readonly step: number;
+    readonly result: typeof INVALID_PATCH | null;
+  } {
+    if (applied) {
+      // Lines 11-13: the patch is applied and the step still opens the next
+      // one, chaining Oₜ into Oₜ₊₁. A success is not the end of the loop —
+      // only a terminal action or the ceiling is, and both live in `advance`.
+      this.#attempts.delete(sessionID);
+      this.#decisions.set(sessionID, 'advance');
+      return {
+        action: 'advance',
+        attempt: 0,
+        step: (this.#steps.get(sessionID) ?? 0) + 1,
+        result: null,
+      };
+    }
+    const attempt = (this.#attempts.get(sessionID) ?? 0) + 1;
+    this.#attempts.set(sessionID, attempt);
+    if (attempt > this.#retries) {
+      // Line 10: Σ_t is UNCHANGED and never written. The step is spent.
+      this.#attempts.delete(sessionID);
+      this.invalidated.push(sessionID);
+      this.#decisions.set(sessionID, 'advance');
+      return {
+        action: 'advance',
+        attempt,
+        step: (this.#steps.get(sessionID) ?? 0) + 1,
+        result: INVALID_PATCH,
+      };
+    }
+    this.#decisions.set(sessionID, 'retry');
+    return { action: 'retry', attempt, step: this.#steps.get(sessionID) ?? 0, result: null };
   }
 
   /**
@@ -98,7 +181,15 @@ export class RuntimeDriver {
     if (action === undefined) return null;
     if (RuntimeDriver.isTerminal(action)) return null;
 
-    const step = (this.#steps.get(sessionID) ?? 0) + 1;
+    // A retry re-asks within the CURRENT step and must not spend another one.
+    // §5.1 counts attempts inside a step, not steps: the whole point of the
+    // bounded retry is that the model gets its corrections without the loop
+    // moving on, and a retry that consumed a step would be indistinguishable
+    // from the behaviour this replaced.
+    const decision = this.#decisions.get(sessionID);
+    this.#decisions.delete(sessionID);
+    const isRetry = decision === 'retry';
+    const step = isRetry ? (this.#steps.get(sessionID) ?? 0) : (this.#steps.get(sessionID) ?? 0) + 1;
     if (step > this.#maxSteps) return null;
 
     // The action is remembered BEFORE the host is asked, because the context
@@ -115,7 +206,7 @@ export class RuntimeDriver {
     }
 
     this.#steps.set(sessionID, step);
-    const record: RuntimeStep = { sessionID, action, step };
+    const record: RuntimeStep = { sessionID, action, step, retry: isRetry };
     this.advanced.push(record);
     return record;
   }

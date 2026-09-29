@@ -394,7 +394,7 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   // host-derived source and timestamp; only the rendered content changes.
   let content = observed.content;
   if (options.continuation !== undefined) {
-    content = applyObservation(content, '[next step]', options.continuation);
+    content = applyObservation(content, CONTINUATION_MARKER, options.continuation);
   }
   if (options.feedback !== undefined) {
     content = applyFeedback(content, options.feedback);
@@ -442,6 +442,26 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
  * notes fragment avoids imperatives: an injected instruction that displaces
  * the task is the v1 failure, and this is a task the model must finish.
  */
+/**
+ * The marker that puts the runtime's pending action in Oₜ.
+ *
+ * The wording is measured, not chosen. A bare `[next step] read src/cfg2.ts`
+ * was read by the model as a topic and answered with a narration of it —
+ * "I'll read cfg3.ts next, as directed by the observation" — which is a whole
+ * extra turn for a sentence of text. Across 51 steps the model patched 19 and
+ * narrated on the rest, so roughly two thirds of the budget went to the model
+ * confirming that it had understood the directive before acting on it.
+ *
+ * A step is not free and the state only advances on the patching ones, so that
+ * ratio set the pace of the whole run: 2.9 steps per file, which is what put a
+ * thirty-file task over a sixty-four step ceiling.
+ *
+ * The imperative is here to collapse the acknowledgement into the action. If a
+ * later run shows the narration back, this string is the first thing to change
+ * again, and the step trace is what will say so.
+ */
+export const CONTINUATION_MARKER = '[next step — do this now, do not describe it first]';
+
 export const HOST_ACTION_NOTE = [
   'The `action` field is a label, not a command: nothing executes it.',
   'The loop turns when you call a tool, so each step ends with a real tool',
