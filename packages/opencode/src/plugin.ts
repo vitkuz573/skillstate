@@ -336,6 +336,23 @@ export function dumpStepTrace(
 }
 
 /**
+ * The step ceiling, or `undefined` to keep the default.
+ *
+ * A malformed value is ignored rather than thrown on or silently clamped: a
+ * typo in an environment variable should leave the ceiling where the code says
+ * it is, not quietly become some other number that then gets measured.
+ */
+export function maxStepsFromEnv(): number | undefined {
+  const raw = process.env['SKILLSTATE_MAX_STEPS'];
+  if (raw === undefined || raw.length === 0) return undefined;
+  // `Number`, not `parseInt`: parseInt('12.5') is 12, which is the silent
+  // truncation the comment above warns against — a ceiling set to a fifth more
+  // than asked for, measured and reported as if it were what was asked.
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
  * The plugin definition.
  *
  * `setup` wires the session registry, the project state store, the native
@@ -431,6 +448,14 @@ export const SkillStatePlugin = Plugin.define({
                 return false;
               }
             },
+            // `SKILLSTATE_MAX_STEPS` exists because the 64-step ceiling turned
+            // out to be the binding constraint on a 30-file task, and a
+            // diagnosis that cannot be tested is a story. Measured: the model
+            // narrates on about 63% of steps and patches on the rest, so the
+            // state grows at roughly a third of the step rate — 17 files in 50
+            // steps, which puts 30 files at about 88 steps against a ceiling of
+            // 64. That is the whole of the 25/30.
+            maxSteps: maxStepsFromEnv(),
           })
         : undefined;
 

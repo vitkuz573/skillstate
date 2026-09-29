@@ -12,7 +12,14 @@ import { describe as group, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { applyFeedback, applyObservation, dumpDrift, dumpPromptShape, dumpStepTrace } from '@skillstate/opencode';
+import {
+  applyFeedback,
+  applyObservation,
+  dumpDrift,
+  dumpPromptShape,
+  dumpStepTrace,
+  maxStepsFromEnv,
+} from '@skillstate/opencode';
 
 let dirs: string[] = [];
 
@@ -226,6 +233,37 @@ group('dumpStepTrace', () => {
 
   it('survives an unwritable path', () => {
     expect(() => dumpStepTrace('/nonexistent-dir/trace.log', line())).not.toThrow();
+  });
+});
+
+group('maxStepsFromEnv', () => {
+  afterEach(() => {
+    delete process.env['SKILLSTATE_MAX_STEPS'];
+  });
+
+  it('keeps the default when unset or empty', () => {
+    delete process.env['SKILLSTATE_MAX_STEPS'];
+    expect(maxStepsFromEnv()).toBeUndefined();
+    process.env['SKILLSTATE_MAX_STEPS'] = '';
+    expect(maxStepsFromEnv()).toBeUndefined();
+  });
+
+  it('reads a positive whole number', () => {
+    // The 64-step ceiling is the binding constraint on a 30-file task, measured:
+    // the model patches about 37% of steps, so 30 files need about 88. This is
+    // the switch that makes that a measurement instead of an assertion.
+    process.env['SKILLSTATE_MAX_STEPS'] = '128';
+    expect(maxStepsFromEnv()).toBe(128);
+  });
+
+  it('ignores a value that is not a positive whole number', () => {
+    // Ignored, not clamped and not thrown on. A typo in an environment
+    // variable should leave the ceiling where the code says it is, rather than
+    // silently become some other number that then gets measured and reported.
+    for (const bad of ['0', '-5', 'abc', '12.5', '']) {
+      process.env['SKILLSTATE_MAX_STEPS'] = bad;
+      expect(maxStepsFromEnv()).toBeUndefined();
+    }
   });
 });
 
