@@ -365,6 +365,44 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
 }
 
 /**
+ * The note the host contributes beside P, when the model has to act.
+ *
+ * ── Why this exists, from a measured failure ─────────────────────────────
+ *
+ * A.4 says to emit `{state_patch, action}` and nothing else. It does not say
+ * who runs `action`, because in the paper a runtime does: Algorithm 1 has the
+ * runtime execute aₜ and feed Oₜ₊₁ back. Here the executor is OpenCode's own
+ * agent loop, and the model has no way to know that. So it does the reasonable
+ * thing with an ambiguous instruction — it writes
+ *
+ * ```json
+ * {"state_patch": {"total": 17, "files": 1}, "action": "Read file src/cfg2.ts"}
+ * ```
+ *
+ * and stops, because it has done exactly what P asked and nothing on the
+ * wire will ever execute that string. Measured on a task with eight files:
+ * three runs, three patches applied correctly, and then a hard stop after
+ * file one. The state machinery worked; the loop never turned.
+ *
+ * The fix cannot go in P, and two reasons make that a hard rule rather than
+ * taste. P is the paper's Appendix A.4, kept byte-identical so a claim about
+ * conformance stays checkable (`tests/opencode/paper-mode.test.ts`); and a
+ * correction injected there would move with the state it is supposed to
+ * accompany. So the note lives in the system slot, which the host owns and
+ * which is already replaced wholesale — see {@link applyPaperContext}.
+ *
+ * It states a fact about the wiring, not an order, for the same reason the
+ * notes fragment avoids imperatives: an injected instruction that displaces
+ * the task is the v1 failure, and this is a task the model must finish.
+ */
+export const HOST_ACTION_NOTE = [
+  'The `action` field is a label, not a command: nothing executes it.',
+  'The loop turns when you call a tool, so each step ends with a real tool',
+  'call — read the next file, or answer and stop. Emitting a state_patch on',
+  'its own ends the run, however correct the patch was.',
+].join(' ');
+
+/**
  * Replace the model-facing context with exactly (P, Σₜ, Oₜ).
  *
  * Two edits, and both are required:
@@ -376,6 +414,10 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
  *   prompt in place would quietly reintroduce behaviour the runtime is
  *   supposed to own (and the default one tells the model to prefer parallel
  *   tool calls, which is incoherent with a single-step state machine).
+ *
+ * `systemPrefix` is where a host that cannot be the runtime says so; see
+ * {@link HOST_ACTION_NOTE}. It is optional because a deployment where
+ * something else does own the executor has no such gap to describe.
  *
  * The array is mutated in place: the host keeps the original reference.
  */

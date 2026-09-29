@@ -745,7 +745,37 @@ describe('the plugin in paper mode', () => {
   it('adds no state hint fragment — the state is in the prompt', async () => {
     const projectDir = paperProject({ step: 3 });
     const result = await runContext(projectDir, longTranscript());
-    expect(result.system).toEqual([]);
+    // The notes fragment must never appear in paper mode: the state IS the
+    // prompt there, and a second copy would be a contradiction. The host's
+    // action note is a different thing and is allowed — see below.
+    expect(result.system.map((p) => p.text ?? '')).not.toContainEqual(
+      expect.stringContaining('<skillstate-project-notes>'),
+    );
+    expect(result.system.every((p) => p.text === undefined || !p.text.includes('Notes for this project')))
+      .toBe(true);
+  });
+
+  it('tells the model who executes the action, because nothing else will', async () => {
+    // Measured failure this exists for. A.4 tells the model to emit
+    // {state_patch, action} and does not say who runs `action`, because in
+    // the paper a runtime does. Here the executor is the host's agent loop.
+    // A model that takes P literally writes
+    //   {"state_patch": {...}, "action": "Read file src/cfg2.ts"}
+    // and stops — the patch is applied perfectly and the run is over after
+    // one file. Three runs, three correct patches, three dead ends.
+    //
+    // The note goes in the system slot, never in P: P is Appendix A.4 kept
+    // byte-identical so a conformance claim stays checkable.
+    const projectDir = paperProject({ step: 3 });
+    const result = await runContext(projectDir, longTranscript());
+    const system = result.system.map((p) => p.text ?? '').join('\n');
+    expect(system).toContain('The `action` field is a label, not a command');
+    expect(system).toContain('ends with a real tool call');
+
+    // P itself is untouched by the note — the invariant is on the prompt, not
+    // on the system slot, and this is what keeps it honest.
+    const prompt = promptOf(result.messages);
+    expect(prompt).not.toContain('label, not a command');
   });
 
   it('uses the project spec when it has one', async () => {

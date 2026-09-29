@@ -62,6 +62,7 @@ export type {
 export {
   PAPER_MESSAGE_ID,
   applyPaperContext,
+  HOST_ACTION_NOTE,
   buildPaperPrompt,
   currentInstruction,
   latestObservation,

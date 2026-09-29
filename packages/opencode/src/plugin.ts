@@ -88,7 +88,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolvePluginMode } from './mode.js';
 import type { PluginMode } from './mode.js';
-import { applyPaperContext, buildPaperPrompt, latestObservation } from './paper-mode.js';
+import { HOST_ACTION_NOTE, applyPaperContext, buildPaperPrompt, latestObservation } from './paper-mode.js';
 import type { PaperContextEvent } from './paper-mode.js';
 import { FeedbackQueue } from './feedback.js';
 import { PaperStateSink, isTextEnded } from './response-sink.js';
@@ -321,6 +321,7 @@ export const SkillStatePlugin = Plugin.define({
             messages: raw,
             ...(correction === undefined ? {} : { feedback: correction }),
           }),
+          HOST_ACTION_NOTE,
         );
         return;
       }
