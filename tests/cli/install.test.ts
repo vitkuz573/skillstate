@@ -418,7 +418,7 @@ describe('autoInstall temp-cwd warning', () => {
 });
 
 describe('autoInstall — opencode only', () => {
-  it('wires project opencode.json (plugin + mcp), shared skill, state, manifest v2', async () => {
+  it('wires project opencode.json (plugin only), shared skill, state, manifest v2', async () => {
     const { home, project, configPath, baseConfig } = makeOpencodeHome();
     const code = await autoInstall({ cwd: project, home, flags: initFlags() });
     expect(code).toBe(0);
@@ -431,15 +431,14 @@ describe('autoInstall — opencode only', () => {
     expect(manifest.skillPath).toBe(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'));
 
     // Project config: the v2 `plugins` key carries the native plugin, the
-    // portable `mcp.skillstate` entry is registered, the user's own legacy
-    // `plugin` entry is left completely alone, and comments survive.
+    // user's own MCP server and legacy `plugin` entry are left alone, and
+    // comments survive. The MCP server is deliberately NOT added: the v2
+    // plugin contributes native tools, and a second surface with different
+    // write rules over one file costs 1.6k tokens per request for nothing.
     const afterConfig = fs.readFileSync(configPath, 'utf-8');
     expect(parseJsoncSafe(afterConfig)).toEqual({
       $schema: 'https://opencode.ai/config.json',
-      mcp: {
-        existing: { type: 'local', command: ['/bin/existing'] },
-        skillstate: { type: 'local', command: ['npx', '-y', '@skillstate/mcp@^3'], enabled: true },
-      },
+      mcp: { existing: { type: 'local', command: ['/bin/existing'] } },
       plugin: ['some-npm-plugin'],
       plugins: ['@skillstate/opencode'],
     });
@@ -465,6 +464,37 @@ describe('autoInstall — opencode only', () => {
     expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(true);
   });
 
+  it('removes an mcp.skillstate entry left by the previous version', async () => {
+    // Re-init of a project wired by an older skillstate, which registered
+    // the MCP server for opencode. That entry is now removed rather than
+    // left alongside the native tools: a second surface with different
+    // write rules over one file is a hazard, not redundancy.
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: ['@skillstate/opencode'],
+          mcp: {
+            skillstate: { type: 'local', command: ['npx', '-y', '@skillstate/mcp@^3'], enabled: true },
+            other: { type: 'local', command: ['/bin/keep-me'] },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(parsed).toEqual({
+      plugins: ['@skillstate/opencode'],
+      mcp: { other: { type: 'local', command: ['/bin/keep-me'] } },
+    });
+  });
+
   it('migrates a legacy skillstate `plugin` entry into the v2 `plugins` key', async () => {
     // The shape a previous install left behind: our entry in the v1 array.
     // Re-init must move it, not duplicate it, and drop the emptied key.
@@ -479,10 +509,7 @@ describe('autoInstall — opencode only', () => {
     const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
     expect(code).toBe(0);
     const parsed = parseJsoncSafe(fs.readFileSync(configPath, 'utf-8'));
-    expect(parsed).toEqual({
-      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
-      plugins: ['@skillstate/opencode'],
-    });
+    expect(parsed).toEqual({ plugins: ['@skillstate/opencode'] });
     // The v1 key is gone: a v1 plugin entry would not load in v2 anyway.
     expect(parsed).not.toHaveProperty('plugin');
   });
@@ -496,7 +523,6 @@ describe('autoInstall — opencode only', () => {
     expect(code).toBe(0);
     const configPath = path.join(project, 'opencode.json');
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
-      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
       plugins: ['@skillstate/opencode'],
     });
     expect(readManifest(project).hosts['opencode']?.config.configPath).toBe(configPath);
@@ -509,11 +535,13 @@ describe('autoInstall — opencode only', () => {
     const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
     expect(code).toBe(0);
     const jsonPath = path.join(project, 'opencode.json');
-    expect(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')).plugins).toEqual([
+      '@skillstate/opencode',
+    ]);
     expect(readManifest(project).hosts['opencode']?.config.configPath).toBe(jsonPath);
   });
 
-  it('leaves a non-array plugins key untouched but still registers mcp', async () => {
+  it('leaves a non-array plugins key untouched', async () => {
     // Rewriting a value the installer does not understand would be worse
     // than skipping it, so the malformed key survives verbatim.
     const home = makeTmp();
@@ -522,10 +550,8 @@ describe('autoInstall — opencode only', () => {
     fs.writeFileSync(configPath, '{"plugins": "not-an-array"}');
     const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
     expect(code).toBe(0);
-    const after = fs.readFileSync(configPath, 'utf-8');
-    expect(parseJsoncSafe(after)).toEqual({
+    expect(parseJsoncSafe(fs.readFileSync(configPath, 'utf-8'))).toEqual({
       plugins: 'not-an-array',
-      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
     });
     expect(output()).toContain('not an array');
     expect(readManifest(project).hosts['opencode']).toBeDefined();
@@ -545,7 +571,7 @@ describe('autoInstall — opencode only', () => {
       .readdirSync(path.dirname(configPath))
       .filter((f) => f.startsWith('opencode.jsonc.bak.'));
     expect(second).toBe(first);
-    expect((second.match(/"skillstate"/g) ?? []).length).toBe(1);
+    expect((second.match(/"@skillstate\/opencode"/g) ?? []).length).toBe(1);
     expect(backupsAfterSecond).toHaveLength(backupsAfterFirst.length);
     expect(output()).toContain('already registered');
   });
@@ -687,8 +713,12 @@ describe('autoInstall — both opencode and claude detected', () => {
     expect(fs.existsSync(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'))).toBe(true);
 
     // Both glue sets exist; the fresh project config is opencode.json.
+    // opencode gets the native plugin only; claude, which has no plugin API,
+    // still gets the stdio MCP server.
     const configPath = path.join(project, 'opencode.json');
-    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
+      plugins: ['@skillstate/opencode'],
+    });
     expect(fs.existsSync(path.join(project, '.claude', 'settings.json'))).toBe(true);
     expect(JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf-8')).mcpServers.skillstate).toBeDefined();
 
@@ -819,7 +849,9 @@ describe('autoInstall — re-init idempotency + manifest merge', () => {
     expect(manifest.hosts['claude']).toBeDefined();
 
     // Both glue sets still present after the second run.
-    expect(JSON.parse(fs.readFileSync(path.join(project, 'opencode.json'), 'utf-8')).mcp.skillstate).toBeDefined();
+    expect(
+      JSON.parse(fs.readFileSync(path.join(project, 'opencode.json'), 'utf-8')).plugins,
+    ).toEqual(['@skillstate/opencode']);
     expect(fs.existsSync(path.join(project, '.claude', 'settings.json'))).toBe(true);
 
     // Uninstall rolls BOTH back (settings.json stays — it is a live file —

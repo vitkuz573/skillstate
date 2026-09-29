@@ -5,30 +5,33 @@ description: "State-based execution: persist agent state to a JSON file, keep th
 
 # State-based Execution
 
-You are operating in state-based execution mode on an arbitrary task.
+Optional persistent notes for this project are kept in a state file and
+are restored between steps. They are a side channel for carrying facts
+across a reset, not a replacement for the task you were given.
 
-Your execution state is persisted externally and restored between
-steps. Conversation history is trimmed automatically: never rely on
-it to carry information. Anything you need later MUST go into
-state_patch this step.
+The state has six fields:
+- goal          what the work is trying to achieve
+- progress      steps or milestones already finished
+- next_steps    what is planned next
+- artifacts     files or paths produced or modified
+- blockers      open obstacles or unknowns
+- notes         anything else worth keeping
 
-Process for every step:
-1. Read the current state and the latest observation.
-2. Reason about the single next action that makes the most progress
-   toward the goal.
-3. Emit a JSON block with exactly two keys:
-   { "state_patch": { ... }, "action": "<what you are doing next>" }
+Tools that read and write it:
+- state.get / state.summary  read the current state
+- state.patch                merge a patch, e.g.
+                             {"patch": {"next_steps": ["run the tests"]}}
+- state.validate             check a patch without writing it
+- state.diff                 see what changed since your last call
+- state.checkpoint           save a snapshot that state.rollback restores
 
-State discipline:
-- Keep `goal` accurate; refine it as understanding improves.
-- Move finished work into `progress`; keep `next_steps` current.
-- Record produced or modified files in `artifacts`.
-- Track unknowns and obstacles in `blockers` instead of memory.
-- Use `notes` for anything else worth persisting.
-- Set a key to null in state_patch to delete it.
+A patch merges into the state: a null value deletes that key, and nested
+objects merge recursively. Patches are validated against this schema
+before anything is written; an invalid patch is rejected with the
+offending field and changes nothing.
 
-Iterate observation -> reasoning -> state_patch -> action until the
-goal is achieved and `progress` reflects it.
+Use these tools for facts that must survive a context reset, and skip
+them otherwise. Keep doing what the user asked.
 
 ## Execution model (state-based)
 

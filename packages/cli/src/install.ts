@@ -4,8 +4,9 @@
 // init` writes NO files into `~` — every piece of glue lives inside the
 // project and is committed, so a fresh clone works for the whole team:
 // - state dir `./.skillstate/skillstate.json` (per-project state + manifest);
-// - OpenCode: `"plugins": ["@skillstate/opencode"]` AND `mcp.skillstate`
-//   spliced into the PROJECT `opencode.jsonc|json` (one timestamped backup
+// - OpenCode: `"plugins": ["@skillstate/opencode"]` spliced into the PROJECT
+//   `opencode.jsonc|json` — the v2 plugin contributes NATIVE tools, so the
+//   MCP server is deliberately NOT registered there (one timestamped backup
 //   per run; no baked env — everything resolves the state from its cwd);
 // - Claude: self-contained `.cjs` hook scripts + hook groups merged into the
 //   PROJECT `.claude/settings.json` (`$CLAUDE_PROJECT_DIR`-anchored
@@ -617,18 +618,21 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     if (pluginResult.pluginSkipped) {
       say(`opencode: plugins key in ${configPath} is not an array — skipped plugin registration`);
     }
-    // BOTH integrations are registered, deliberately:
+    // The `mcp.skillstate` entry is NOT registered for opencode.
     //
-    // - the `plugins` entry is the native tool path. It is typed, needs no
-    //   JSON-RPC round-trip, and is what the v2 plugin prefers;
-    // - the `mcp.skillstate` entry is the portable path. It is what every
-    //   other MCP-capable host reads, and it is the only way to reach this
-    //   state from a client that is not opencode.
+    // The v2 plugin contributes native tools, which is the same capability
+    // with a typed schema, a structured result and no JSON-RPC round-trip.
+    // Registering the MCP server as well would cost ~1.6k tokens of tool
+    // description on EVERY model request, and — worse — the two surfaces
+    // disagree about what may be written. The native tools are
+    // schema-free; the MCP server validates against the procedural spec.
+    // Writing `{decision: ...}` succeeds through the plugin and is rejected
+    // by `state.patch` with "Unknown key", over one file.
     //
-    // The two address the same file, so they can never disagree about what
-    // is saved; the native tools win on speed and typing, the MCP server
-    // wins on reach.
-    const mcpResult = addSkillstateMcp(next, buildMcpEntry());
+    // The MCP server is still shipped and still registered for claude,
+    // codex and any other MCP-capable host, which is where it is the only
+    // way in. It is simply redundant here, and redundantly harmful.
+    const mcpResult = removeSkillstateMcp(next);
     if (mcpResult.changed) {
       next = mcpResult.text;
       changed = true;
@@ -645,7 +649,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
         await atomicWriteFile(configPath, next);
       }
     }
-    say(`opencode: ${configPath} (${changed ? 'plugin + mcp registered' : 'already registered'})`);
+    say(`opencode: ${configPath} (${changed ? 'plugin registered' : 'already registered'})`);
     manifest.hosts['opencode'] = { config: { configPath } };
   }
 
