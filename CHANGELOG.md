@@ -199,6 +199,22 @@ And the model **deleted its own complete state** at the end, with
 model chose destruction. It is the same class as the array-truncation finding
 below, except that this one empties the artifact at the moment it is finished.
 
+**What the Oₜ work bought, measured.** Three configurations, same task, same
+model, same code:
+
+| Oₜ carries | reads | wasted | tokens | state | answer |
+| --- | --- | --- | --- | --- | --- |
+| the model's own action, as an order | 53 | 22 | 1,613,699 | 30/30 | correct |
+| nothing at all | 41 | 11 | 7.9M, never converged | 1/30 | — |
+| the environment's report | 43 | 14 | 1,375,365 | **deleted by the model** | correct |
+| the report, with the spec describing the state as a record | 44 | — | **1,368,071** | **30/30, total 1523 as a number** | correct |
+
+The last row is the current default, and it is the first configuration in this
+whole investigation that is better than the one it replaced on every measured
+axis at once: 15% cheaper, half the re-reads, a state that survives, and a
+`total` that is a number rather than the string an unvalidated writer left
+behind.
+
 **The crossover, re-measured: the saving did not survive n=3.** Thirty files of
 forty lines each, 1,200 lines of observation. Six runs, all six 30/30 and all
 six correct:
