@@ -911,9 +911,28 @@ reserves for the environment's reply, so a model treated the user's own
 request as untrusted and refused it; and free-text state fields become a
 competing instruction channel the model starts preferring over the user.
 
-What remains unestablished is scale: three turns and one task shape. The
-paper's own §7 notes that a bounded prompt does not help when the task is
-defined over the historical trajectory, and nothing here measures a long
+What remains unestablished is scale. The 70.4% figure comes from a three-turn
+task with one fact handed over in the first message. A second task shape — eight
+files, a constant hidden among decoys in each, a total not computable until the
+last read — was built to break it, and it did break it: paper mode reads all
+eight files and does not finish.
+
+The loop itself is fixed, and it was worth fixing for reasons that are not
+about the number. The step loop belonged to the model, so a model that emitted a
+correct patch and stopped had satisfied its instruction completely; three
+prompts compensating for that did nothing. The runtime now owns step
+advancement, the action reaches the model through Oₜ, and the host's own system
+prompt is left alone — all three were bugs, and the same task went from 1–2
+tool calls to 21.
+
+What is left is per-step state discipline, and it is not a prompt problem: while
+reading, these models emit `["reasoning", "tool-call"]` with no text at all, so
+there is no moment in which a state patch can be written. 21 tool calls produce
+3 text blocks. The read phase is batched and the patch arrives at the end, from
+whatever Oₜ happens to hold.
+
+The paper's own §7 also notes that a bounded prompt does not help when the task
+is defined over the historical trajectory, and nothing here measures a long
 autonomous run.
 
 ## Development
