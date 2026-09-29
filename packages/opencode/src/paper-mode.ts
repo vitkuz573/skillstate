@@ -481,16 +481,26 @@ export const CONTINUATION_MARKER =
  * right on its own terms; it is not the whole of the 43% of calls that are
  * re-reads.
  *
- * The host does not limit a turn to one tool call. It does limit what ends a
- * turn: no tool call means the turn is over. So the note says that, and says
- * the opposite of what it used to about batching.
+ * The host does not limit a turn to one tool call. What limits it is eq. 1: the
+ * prompt is (P, Σₜ, Oₜ) and there is ONE Oₜ, so a turn that makes several calls
+ * keeps only the last result and the model must re-read the rest. That is not
+ * a guess — a turn that batched nine reads produced a model that said "the last
+ * observation re-read cfg8.ts" and then went and read cfg8 again, and the
+ * thirty-file run reached 103 reads for 29 files.
+ *
+ * So the note says the truth the model needs: one call per step, because the
+ * second one would be lost. An earlier version of this comment went the other
+ * way and told the model it could make as many calls as it liked. That was
+ * written before the single-observation consequence was understood, and it
+ * invited exactly the data loss the paper's own equation makes unavoidable.
  */
 export const HOST_ACTION_NOTE = [
   'The `action` field is a label, not a command: nothing executes it.',
   'A step ends when you call a tool, so end each step with a real tool call —',
-  'or answer and stop. Make as many tool calls in one step as the work needs;',
-  'a step may read every file it wants. Emitting a state_patch on its own ends',
-  'the run, however correct the patch was.',
+  'or answer and stop. Emitting a state_patch on its own ends the run, however',
+  'correct the patch was. One tool call per step: this prompt shows you only the',
+  'LAST result, so a second call in the same step would leave you unable to',
+  'remember the first, and you would have to read it again.',
 ].join(' ');
 
 /**

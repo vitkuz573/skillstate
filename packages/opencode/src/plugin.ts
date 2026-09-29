@@ -724,7 +724,25 @@ export const SkillStatePlugin = Plugin.define({
             spec: spec!,
             state,
             messages: raw,
-            ...(continuation === undefined ? {} : { continuation }),
+            // §5.1 line 12: `O_{t+1} ← execute(aₜ, Σ_{t+1})`. Oₜ is the
+            // RESULT of the model's last action, not the next action as an
+            // order. Putting the action there was this implementation's answer
+            // to a real gap — the model was being re-prompted with nothing
+            // saying why — and it turned the environment's channel into a
+            // command channel, and the model obeyed the command.
+            //
+            // Measured, from the transcripts. With the action in Oₜ the model
+            // says "I'll read cfg3.ts next, as directed by the observation"
+            // and reads cfg3.ts. It made 54 `read` calls for thirty files and
+            // used grep three times as a side errand. A control with no step
+            // driver read one file, ran ONE grep, and finished in six calls.
+            //
+            // So the action is reported as having happened, not prescribed.
+            // `SKILLSTATE_CONTINUATION` restores the old wording for anyone who
+            // wants the old behaviour to measure.
+            ...(continuation === undefined || process.env['SKILLSTATE_CONTINUATION'] === '0'
+              ? {}
+              : { continuation }),
             ...(correction === undefined ? {} : { feedback: correction }),
           }),
           HOST_ACTION_NOTE,

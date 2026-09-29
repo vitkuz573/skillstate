@@ -787,8 +787,18 @@ describe('the plugin in paper mode', () => {
     // it was measured: thirty files cost 51, 53 and 54 `read` calls, while a
     // control with no step driver read one file and ran a single grep. The host
     // does not limit a turn to one tool call; it limits what ENDS a turn.
-    expect(system).toContain('as many tool calls in one step as the work needs');
+    // The truth is one call per step, and the reason is eq. 1: the prompt has
+    // ONE observation, so a second call in the same step leaves the first
+    // result invisible and the model re-reads. A turn that batched nine reads
+    // produced a model that said "the last observation re-read cfg8.ts" and then
+    // read cfg8 again, and the run reached 103 reads for 29 files.
+    expect(system).toContain('One tool call per step');
+    expect(system).toContain('LAST result');
+    // The old instruction, which told the model to read one file per step
+    // without saying why, is gone.
     expect(system).not.toContain('read the next file');
+    // And so is the one that invited the data loss.
+    expect(system).not.toContain('as many tool calls in one step');
 
     // P itself is untouched by the note — the invariant is on the prompt, not
     // on the system slot, and this is what keeps it honest.
