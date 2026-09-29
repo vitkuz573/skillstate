@@ -914,22 +914,22 @@ competing instruction channel the model starts preferring over the user.
 What remains unestablished is scale. The 70.4% figure comes from a three-turn
 task with one fact handed over in the first message. A second task shape — eight
 files, a constant hidden among decoys in each, a total not computable until the
-last read — was built to break it, and it did break it: paper mode reads all
-eight files and does not finish.
+last read — was built to break it, and it did, repeatedly, for reasons that
+turned out to be bugs in this repository rather than facts about the method.
 
-The loop itself is fixed, and it was worth fixing for reasons that are not
-about the number. The step loop belonged to the model, so a model that emitted a
-correct patch and stopped had satisfied its instruction completely; three
-prompts compensating for that did nothing. The runtime now owns step
-advancement, the action reaches the model through Oₜ, and the host's own system
-prompt is left alone — all three were bugs, and the same task went from 1–2
-tool calls to 21.
+The runtime's step request had been rejected by the host on every call since it
+was written. `SessionPromptInput` declares `readonly text: {…}["text"]`, and that
+indexing reads as an object; it is the string field itself. So the runtime had
+never once driven a turn, and everything measured before that fix described a
+mechanism that was not running. With the payload corrected, the same
+four-file fixture accumulates exactly — 11, 33, 66, each patch arithmetically
+right — where before the state never moved past `{0, 0}`.
 
-What is left is per-step state discipline, and it is not a prompt problem: while
-reading, these models emit `["reasoning", "tool-call"]` with no text at all, so
-there is no moment in which a state patch can be written. 21 tool calls produce
-3 text blocks. The read phase is batched and the patch arrives at the end, from
-whatever Oₜ happens to hold.
+The last failure was not in the code either. The state said `files: 2` and not
+*which* two, and in paper mode there is no transcript to recover that from: the
+model re-read a file, listed a directory, and stopped. Recording a set instead
+of a count — the smallest change §4.1 says a spec author makes — made the same
+task answer correctly.
 
 The paper's own §7 also notes that a bounded prompt does not help when the task
 is defined over the historical trajectory, and nothing here measures a long
