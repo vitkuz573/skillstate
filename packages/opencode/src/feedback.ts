@@ -61,6 +61,7 @@
  * is not prescribed by the paper.
  */
 
+import { invalidPatchObservation } from '@skillstate/core';
 import type { SinkOutcome, SinkRejection } from './response-sink.js';
 
 /**
@@ -117,12 +118,6 @@ const FEEDBACK_BY_REASON: Readonly<Record<SinkRejection, PendingFeedback>> = {
  * means no attempt was made and a synthetic observation describing zero
  * attempts would be a sentence about nothing.
  */
-export function invalidPatchObservation(attempts: number, lastError: string | undefined): PendingFeedback {
-  if (attempts < 1) return '';
-  const reason = lastError === undefined || lastError.length === 0 ? 'no valid patch was produced' : lastError;
-  return `Invalid state patch after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${reason}`;
-}
-
 /**
  * The correction text for one rejection.
  *

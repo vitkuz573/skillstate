@@ -421,7 +421,7 @@ export class SkillStateRuntime {
       const newObservation: Observation =
         accepted === null
           ? {
-              content: `Invalid state patch after ${attempts} attempts: ${lastError}`,
+              content: invalidPatchObservation(attempts, lastError),
               timestamp: this.now(),
               source: 'skillstate',
             }
@@ -561,4 +561,19 @@ export class SkillStateRuntime {
 
     return results;
   }
+}
+
+/**
+ * §6.4's synthetic observation. One definition, used by the runtime and the
+ * host adapter alike — the two used to build this string separately, and they
+ * did not agree: `k = 0` is a legal configuration, and the copy in this file
+ * wrote "1 attempts".
+ */
+export function invalidPatchObservation(attempts: number, lastError: string | undefined): string {
+  // Empty for zero attempts, not a sentence about zero attempts. The caller
+  // falls back to the running correction when this is empty, so returning a
+  // string here would silence a real reason with a report of nothing.
+  if (attempts < 1) return '';
+  const reason = lastError === undefined || lastError.length === 0 ? 'no valid patch was produced' : lastError;
+  return `Invalid state patch after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${reason}`;
 }

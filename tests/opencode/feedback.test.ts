@@ -12,12 +12,8 @@
  */
 
 import { describe as group, it, expect } from 'vitest';
-import {
-  FeedbackQueue,
-  applyFeedback,
-  feedbackFor,
-  invalidPatchObservation,
-} from '@skillstate/opencode';
+import { invalidPatchObservation } from '@skillstate/core';
+import { FeedbackQueue, applyFeedback, feedbackFor } from '@skillstate/opencode';
 import type { SinkOutcome, SinkRejection } from '@skillstate/opencode';
 
 const SPEC_REASONS: SinkRejection[] = [
