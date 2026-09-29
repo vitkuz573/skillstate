@@ -214,7 +214,7 @@ describe('a compaction does not lose the notes', () => {
 
     // Before compaction the notes are in the transcript AND in the fragment.
     const beforeSystem: Array<{ type: string; text: string }> = [];
-    context({
+    await context({
       sessionID: 'ses_root',
       system: beforeSystem,
       messages: [],
@@ -230,7 +230,7 @@ describe('a compaction does not lose the notes', () => {
 
     // The very next agent-loop request re-injects the notes.
     const afterSystem: Array<{ type: string; text: string }> = [];
-    context({
+    await context({
       sessionID: 'ses_root',
       system: afterSystem,
       messages: [{ role: 'user', content: 'compaction summary …' }],

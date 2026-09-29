@@ -986,6 +986,107 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(readState(projectDir)['step']).toBe(1);
   });
 
+  it('recovers a patch from the transcript before the next request', async () => {
+    // The race this closes. `session.text.ended` arrives on an async iterator
+    // the host does not wait for, so the next model request used to be served
+    // a Sigma that had not moved — and a model shown {"total": 0} immediately
+    // after writing 11 has no way to build on its own work. The transcript the
+    // context hook is handed already carries the patch, so it is applied there.
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({ projectDir });
+    cleanups.push(await harness.start());
+    const hook = harness.hooks.get('context')!;
+
+    const system: ContextEvent['system'] = [];
+    const messages: PaperContextEvent['messages'] = [
+      { id: 'msg_u', role: 'user', content: [{ type: 'text', text: 'go' }] },
+      {
+        id: 'msg_a',
+        role: 'assistant',
+        content: [
+          {
+            type: 'text',
+            text: '```json\n{"state_patch":{"step":9},"action":"read more"}\n```',
+          },
+        ],
+      },
+    ];
+    await hook({ sessionID: 'ses_root', system, messages, options: {} } as ContextEvent);
+
+    expect(readState(projectDir)['step']).toBe(9);
+    // And the prompt the model gets must show it — in paper mode that is a
+    // message, not a system part, since A.4 replaces the whole context.
+    expect(promptOf(messages)).toContain('"step":9');
+  });
+
+  it('ignores assistant messages that carry no patch at all', async () => {
+    // The shape a model actually produces while it is working: reasoning and a
+    // tool call, no text. `recover` must walk past these rather than treat the
+    // empty content as a response, and must not mark them seen — otherwise the
+    // durable path would be blocked for a message that never claimed a patch.
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({ projectDir });
+    cleanups.push(await harness.start());
+    const hook = harness.hooks.get('context')!;
+    await hook({
+      sessionID: 'ses_root',
+      system: [],
+      messages: [
+        { id: 'msg_u', role: 'user', content: 'go' },
+        { id: 'msg_a', role: 'assistant', content: 'a bare string, not parts' },
+        { id: 'msg_b', role: 'assistant', content: [{ type: 'reasoning' }, { type: 'text', text: '' }] },
+      ],
+      options: {},
+    } as unknown as ContextEvent);
+    expect(readState(projectDir)['step']).toBe(1);
+  });
+
+  it('applies a recovered patch once, however often the host asks', async () => {
+    // The event for the same message still arrives afterwards. If both paths
+    // merged it, an accumulator would double its own total — a worse failure
+    // than the race being fixed.
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_a',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":9},"action":"read more"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    const hook = harness.hooks.get('context')!;
+    const messages = [
+      { id: 'msg_u', role: 'user', content: [{ type: 'text', text: 'go' }] },
+      {
+        id: 'msg_a',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '```json\n{"state_patch":{"step":9},"action":"read more"}\n```' },
+        ],
+      },
+    ];
+    for (let i = 0; i < 3; i += 1) {
+      // A FRESH array each time: applyPaperContext mutates the one it is
+      // handed in place, so reusing it would hand the second call a transcript
+      // containing only the A.4 prompt and prove nothing about dedup.
+      await hook({
+        sessionID: 'ses_root',
+        system: [],
+        messages: messages.map((m) => ({ ...m })),
+        options: {},
+      } as unknown as ContextEvent);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(readState(projectDir)['step']).toBe(9);
+  });
+
   function readState(projectDir: string): Record<string, unknown> {
     const file = path.join(projectDir, '.skillstate', 'skillstate.json');
     return JSON.parse(fs.readFileSync(file, 'utf-8')).state as Record<string, unknown>;

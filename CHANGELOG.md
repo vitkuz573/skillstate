@@ -92,6 +92,46 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
+**Fixed: a read-after-write race that served the model a state that had not
+moved.** The `context` hook learns of a patch from `session.text.ended`, which
+arrives on an async iterator the host does not wait for. The host starts its
+next model request as soon as its own agent loop turns, and that request
+re-enters the hook — which reads Σ — before the event has been processed.
+
+Measured on a four-file task: the patch reached disk, and the very next request
+was served `{"total": 0}` while the file said 11. The model, shown a state that
+had not moved, re-read files it had already read and overwrote its own total.
+That reads exactly like a model that cannot accumulate, and it took a
+diagnostic to tell the two apart — a model writing back a stale total and a
+model never shown a fresh one are opposite bugs.
+
+The transcript the hook is handed already contains the assistant text the model
+just emitted, so `PaperStateSink.recover` applies it there and now. The durable
+path is unchanged: the event still arrives, finds the message already marked,
+and declines — a patch is never merged twice, which for an accumulator would be
+a worse failure than the race being fixed.
+
+**Fixed: the action the runtime asked for was deleted before the model saw
+it.** `session.prompt` carries the text, and `applyPaperContext` clears
+`event.messages` — so the runtime was asking into a hole. The action now travels
+in Oₜ, the paper's channel for the environment's reply, where a rejected
+patch's correction already goes. The runtime itself is new: an applied patch
+with a non-terminal action requests the next step, which is the half of
+Algorithm 1 that was missing and was compensated for, unsuccessfully, with
+three prompts.
+
+Together, on the same eight-file task: **1–2 tool calls → 21, and context
+requests 3 → 11**, with the model reading cfg1 through cfg8 in order.
+
+**Still not true, and stated plainly: the task does not complete.** The model
+reads all eight files and emits three text blocks for 21 tool calls — it batches
+the whole read phase into a handful of turns and writes its one patch at the
+end, from whatever Oₜ happens to hold. Its working shape while reading is
+`["reasoning", "tool-call"]` with no text at all, so there is nothing for
+`recover` to recover and Σ legitimately stays empty for the whole read phase.
+The loop is now structural and it turns; the per-step state discipline is not
+achieved, because these models do not offer it a per-step moment to happen in.
+
 **Also measured, and it did not fix the bug: `HOST_ACTION_NOTE`.** The
 breadth run — a second task shape, eight files, each hiding a constant among
 decoys — exposed a real defect. On the eight-file task paper mode applied

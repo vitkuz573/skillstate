@@ -155,6 +155,35 @@ export interface PaperStateSinkOptions {
 
 const NOT_A_TEXT_BLOCK: SinkOutcome = { applied: false, rejection: 'not_a_text_block' };
 
+/** The key the recovery path claims a message under, shared with `ingest`. */
+function recoveredKey(messageID: string): string {
+  return `${messageID}:recovered`;
+}
+
+/**
+ * The most recent assistant text in a transcript, or `undefined`.
+ *
+ * Scans backwards because the newest is the one being recovered, and because
+ * a transcript can hold several assistant messages whose earlier patches are
+ * long since applied. Only text parts count: a reasoning or tool-call part
+ * carries no patch, and treating one as a response would reject a message that
+ * was never a rejection.
+ */
+function lastAssistantText(
+  messages: ReadonlyArray<{ id: string; role: string; content: unknown }>,
+): { id: string; text: string } | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
+    for (const part of message.content as Array<{ type?: unknown; text?: unknown }>) {
+      if (part?.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+        return { id: message.id, text: part.text };
+      }
+    }
+  }
+  return undefined;
+}
+
 function reject(rejection: SinkRejection, detail?: string): SinkOutcome {
   return detail === undefined ? { applied: false, rejection } : { applied: false, rejection, detail };
 }
@@ -187,12 +216,61 @@ export class PaperStateSink {
    * every rejected block, come back as an outcome; only a state write that
    * itself fails is reported as `write_failed`, still without throwing.
    */
+  /**
+   * Apply a patch the transcript is already carrying, before the next request.
+   *
+   * ── Why this exists: a read-after-write race with the host ──────────────
+   *
+   * {@link ingest} learns of a patch from `session.text.ended`, delivered on
+   * an async iterator. The host does not wait for this plugin's loop: it
+   * starts the next model request as soon as its own agent loop turns, and
+   * that request re-enters the `context` hook — which reads Σ — before the
+   * event has been processed.
+   *
+   * Measured on a four-file task: the patch reached disk, and the very next
+   * request was served `{"total": 0}` while the file said 11. The model, shown
+   * a state that had not moved, re-read files it had already read and
+   * overwrote its own total. That reads exactly like a model that cannot
+   * accumulate, and it took a diagnostic to tell the two apart.
+   *
+   * The transcript handed to the context hook already contains the assistant
+   * text the model just emitted, so the patch is available here and now, with
+   * no dependence on event timing. The durable path is unchanged: the event
+   * still arrives and {@link ingest} still applies it — it simply finds the
+   * message already marked and declines, so the same patch is never applied
+   * twice.
+   */
+  async recover(sessionID: string, messages: ReadonlyArray<{ id: string; role: string; content: unknown }>): Promise<SinkOutcome> {
+    const latest = lastAssistantText(messages);
+    if (latest === undefined) return NOT_A_TEXT_BLOCK;
+
+    const key = recoveredKey(latest.id);
+    if (this.seen.has(key)) return reject('duplicate');
+    return this.apply(key, sessionID, latest.text);
+  }
+
   async ingest(event: unknown): Promise<SinkOutcome> {
     if (!isTextEnded(event)) return NOT_A_TEXT_BLOCK;
     const { sessionID, assistantMessageID, ordinal, text } = event.data;
 
     const key = `${assistantMessageID}:${ordinal}`;
-    if (this.seen.has(key)) return reject('duplicate');
+    // The recovery path marks the same message under a different suffix, and
+    // it runs first. Without this check the patch would be merged twice, which
+    // is worse than the race it fixes: an accumulator would double its own
+    // total.
+    if (this.seen.has(key) || this.seen.has(recoveredKey(assistantMessageID))) {
+      return reject('duplicate');
+    }
+
+    return this.apply(key, sessionID, text);
+  }
+
+  /**
+   * Parse, validate and merge one response. Shared by both entry points so the
+   * durable path and the recovery path cannot drift on what counts as a valid
+   * patch — a second copy of this is a second set of rules to keep in step.
+   */
+  private async apply(key: string, sessionID: string, text: string): Promise<SinkOutcome> {
     this.remember(key);
 
     const parsed = this.transformer.parseResponse(text);

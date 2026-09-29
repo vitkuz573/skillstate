@@ -330,8 +330,17 @@ export const SkillStatePlugin = Plugin.define({
     // state survives without this plugin ever touching the summariser's
     // input. The same holds in paper mode, where the compaction summary is
     // discarded along with the rest of the transcript.
-    await ctx.session.hook('context', (event) => {
+    await ctx.session.hook('context', async (event) => {
       const scope = scopeFor(event.sessionID);
+      // Read-after-write against the host. The patch the model just emitted is
+      // already in this transcript, and the host does not wait for the event
+      // loop to deliver it, so waiting for `session.text.ended` serves the
+      // next request a Sigma that has not moved. Recovering it here is what
+      // makes the state the model is shown match the state on disk.
+      await sink?.recover(
+        event.sessionID,
+        event.messages as unknown as ReadonlyArray<{ id: string; role: string; content: unknown }>,
+      );
       const state = store.read(scope);
 
       if (mode === 'paper') {
