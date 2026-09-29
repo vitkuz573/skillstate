@@ -953,7 +953,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -979,7 +979,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1065,7 +1065,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1098,7 +1098,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
             },
           },
-          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
         ],
       });
       cleanups.push(await harness.start());
@@ -1199,7 +1199,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
             },
           },
-          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
         ],
       });
       cleanups.push(await harness.start());
@@ -1225,7 +1225,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
               text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
             },
           },
-          { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
         ],
       });
       cleanups.push(await second.start());
@@ -1259,7 +1259,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1284,9 +1284,9 @@ describe('the plugin closes the paper transition from the event stream', () => {
       prompts,
       events: [
         null as never,
-        'session.idle' as never,
-        { type: 'session.idle' } as never,
-        { type: 'session.idle', data: { sessionID: 42 } } as never,
+        'session.step.ended' as never,
+        { type: 'session.step.ended' } as never,
+        { type: 'session.step.ended', data: { sessionID: 42 } } as never,
         {
           type: 'session.text.ended',
           data: {
@@ -1296,7 +1296,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":1}}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1322,7 +1322,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":9},"action":"read more"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1371,7 +1371,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":2},"action":"read the file"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1517,7 +1517,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":5},"action":"continue"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1622,7 +1622,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
             text: '```json\n{"state_patch":{"step":2},"action":"x"}\n```',
           },
         },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
       ],
     });
     cleanups.push(await harness.start());
@@ -1639,7 +1639,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       events: [
         { type: 'session.text.ended', data: { sessionID: 'ses_root', assistantMessageID: 'a', ordinal: 0, text: 'no json here' } },
-        { type: 'session.idle', data: { sessionID: 'ses_root', outcome: 'succeeded' } },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
         sessionCreated('ses_child', 'ses_root'),
         {
           type: 'session.text.ended',

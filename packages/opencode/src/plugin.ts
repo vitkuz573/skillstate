@@ -126,17 +126,21 @@ export const CONTINUE_ACTION = 'continue';
 const lastAction = new Map<string, string>();
 
 /**
- * Whether an event says the session has finished a turn.
+ * Whether an event says the host has finished a step.
  *
- * `session.idle` is the host's own statement that the agent loop is done, with
- * the outcome attached, so a failed or interrupted turn is visible rather than
- * inferred from silence.
+ * `session.step.ended`, measured — not `session.idle`, which is what the SDK
+ * type reads like and which the host never emits. Recorded every event type the
+ * plugin receives for one run: 2x `session.step.ended`, 2x `session.text.ended`,
+ * and zero of `session.idle`. So the trigger that was supposed to turn the loop
+ * never fired once, and the loop could not turn. The SDK exports
+ * `SessionMessageIdle`, which is a different thing entirely and reads like an
+ * event name because it is not one.
  */
-function isIdle(event: unknown): event is { type: 'session.idle'; data: { sessionID: string } } {
+function isStepEnded(event: unknown): event is { type: 'session.step.ended'; data: { sessionID: string } } {
   if (typeof event !== 'object' || event === null) return false;
   const typed = event as { type?: unknown; data?: { sessionID?: unknown } };
   return (
-    typed.type === 'session.idle' &&
+    typed.type === 'session.step.ended' &&
     typeof typed.data?.sessionID === 'string'
   );
 }
@@ -156,6 +160,23 @@ function recordPromptFailure(error: unknown): void {
       path,
       `${JSON.stringify({ promptFailure: message })}\n`,
     );
+  } catch {
+    // Diagnostics must never break the agent loop.
+  }
+}
+
+/**
+ * Record every event type the plugin actually receives.
+ *
+ * @non-paper diagnostics, same file. The advance is triggered by one event
+ * type and one, and a trigger that never fires is indistinguishable from one
+ * that is wired wrong — so the arrival counts have to be visible. Cheap, and
+ * it would have saved guessing.
+ */
+export function recordEvent(path: string | undefined, type: string): void {
+  if (path === undefined || path.length === 0) return;
+  try {
+    fs.appendFileSync(path, `${JSON.stringify({ event: type })}\n`);
   } catch {
     // Diagnostics must never break the agent loop.
   }
@@ -388,21 +409,25 @@ export const SkillStatePlugin = Plugin.define({
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          sessions.ingestEvent(event);
-          // A sink failure is a value, never a throw — an unhandled
-          // rejection here would end the loop and silently stop both the
-          // registry and the sink for the rest of the process's life.
-          //
-          // The outcome is NOT discarded. Every rejection reason is queued as
-          // corrective feedback for the next prompt, because a model whose
-          // patch was refused and never told about it would otherwise be
-          // re-shown the identical context and keep failing silently.
-          if (sink !== undefined) {
-            const outcome = await sink.ingest(event);
-            if (feedback !== undefined && isTextEnded(event)) {
+          try {
+            recordEvent(
+              process.env['SKILLSTATE_DEBUG_PROMPT'],
+              (event as { type?: unknown }).type as string,
+            );
+            sessions.ingestEvent(event);
+            // A sink failure is a value, never a throw — an unhandled
+            // rejection here would end the loop and silently stop both the
+            // registry and the sink for the rest of the process's life.
+            //
+            // The outcome is NOT discarded. Every rejection reason is queued as
+            // corrective feedback for the next prompt, because a model whose
+            // patch was refused and never told about it would otherwise be
+            // re-shown the identical context and keep failing silently.
+            const outcome = sink === undefined ? undefined : await sink.ingest(event);
+            if (outcome !== undefined && feedback !== undefined && isTextEnded(event)) {
               feedback.record(event.data.sessionID, outcome);
             }
-            if (isTextEnded(event)) {
+            if (outcome !== undefined && isTextEnded(event)) {
               const key = scopeFor(event.data.sessionID);
               if (outcome.applied) {
                 turnsSinceWrite.set(key, 0);
@@ -429,14 +454,14 @@ export const SkillStatePlugin = Plugin.define({
             // The feedback queue carries that reason; it just never got reached,
             // because the loop stopped before the next turn.
             //
-            // Fired on `idle`, NOT on a completed text block. A text block ends
+            // Fired on `session.step.ended`, NOT on a completed text block. A text block ends
             // when the model's response ends, which is not the same thing: a
             // model that narrates and then calls a tool has ended a text block
             // and is nowhere near done. Advancing there ordered the next step
             // while the current one was still running, and the continuation was
             // consumed by a request that got superseded — measured, the
             // `[next step]` marker never reached the model at all.
-            if (mode === 'paper' && isIdle(event)) {
+            if (mode === 'paper' && isStepEnded(event)) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
               // Deferred out of the event loop: asking the server to start a
@@ -447,6 +472,11 @@ export const SkillStatePlugin = Plugin.define({
               }, 0);
               lastAction.delete(sessionID);
             }
+          } catch {
+            // Per EVENT, not per stream. The outer catch ends the loop, and the
+            // loop is the only source of the registry and the sink — so one
+            // malformed event used to end both for the lifetime of the process,
+            // silently. Found by a test that fed the loop a bare `null`.
           }
         }
       } catch {
