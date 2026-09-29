@@ -225,6 +225,35 @@ export class RuntimeDriver {
   }
 
   /**
+   * What the runtime did at the end of the last step, for Oₜ.
+   *
+   * A REPORT, not an order, and the distinction is the whole of this method.
+   *
+   * The model's own action used to ride here. §2 forbids it — "the agent
+   * receives only Oₜ — never prior observations or actions" — and with it in
+   * place the model obeyed a stored order rather than choosing: 54 `read` calls
+   * for thirty files, and one grep used three times as a side errand, where a
+   * control with no step driver read one file, ran ONE grep and finished in six
+   * calls. The order was its own past action, so it never looked for a better
+   * way than the one already written down.
+   *
+   * Simply removing it was also wrong, and measurably so. The runtime re-prompts
+   * when a turn produced a patch but no tool call, and with nothing in Oₜ
+   * saying why, the model looped instead of converging: 98 text blocks against
+   * a baseline of 43, and 7.9M prompt tokens against 1.6M. It read 41 files
+   * rather than 53, so the re-reads did halve — and the run never finished.
+   *
+   * So the environment says what it did. Factual, not imperative, and the model
+   * still chooses its own next action, which is the division the paper draws:
+   * `execute(aₜ, Σ_{t+1})` is the runtime's, and choosing aₜ is the model's.
+   */
+  stepReport(sessionID: string): string | undefined {
+    const step = this.#steps.get(sessionID);
+    if (step === undefined) return undefined;
+    return `step ${step} ended; your state patch was applied; nothing was executed.`;
+  }
+
+  /**
    * Take the action this session was last asked to perform, if any.
    *
    * Taken exactly once per step, so a prompt built twice for one turn cannot

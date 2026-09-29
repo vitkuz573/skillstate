@@ -676,6 +676,18 @@ function paperProject(state?: Record<string, unknown>): string {
  * would reject `step` — correctly, which is what
  * `rejects a key the built-in schema does not declare` covers.
  */
+function waitUntil(predicate: () => boolean, what: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 2_000;
+    const tick = (): void => {
+      if (predicate()) resolve();
+      else if (Date.now() > deadline) reject(new Error(`timed out waiting for ${what}`));
+      else setTimeout(tick, 5);
+    };
+    tick();
+  });
+}
+
 function paperProjectWithSpec(state?: Record<string, unknown>): string {
   const dir = paperProject(state);
   fs.writeFileSync(path.join(dir, 'skill-spec.json'), JSON.stringify(SPEC));
@@ -1894,9 +1906,10 @@ describe('Oₜ carries the environment reply, never the model\'s own action', ()
     else process.env['SKILLSTATE_CONTINUATION'] = continuationFlag;
     try {
       const projectDir = paperProjectWithSpec({ step: 1 });
+      const asked: string[] = [];
       const harness = createPluginHarness({
         projectDir,
-        prompts: [],
+        prompts: asked,
         events: [
           {
             type: 'session.text.ended',
@@ -1911,7 +1924,16 @@ describe('Oₜ carries the environment reply, never the model\'s own action', ()
         ],
       });
       cleanups.push(await harness.start());
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      // Wait on the driver having asked, not on a timer. The step counter is
+      // set AFTER the prompt returns, so a fixed delay is a race — and the
+      // first version of this test lost it while the `=1` variant passed,
+      // because the pending action is recorded BEFORE the prompt.
+      await waitUntil(() => asked.length > 0, 'the driver to ask for the next step');
+      // `asked` is pushed from inside the prompt call, and `advance` sets the
+      // step counter only after that call returns — so the condition above is
+      // satisfied one microtask too early. Let the driver's own continuation
+      // finish before building the prompt that has to observe it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
       // The SAME instance must build the prompt: the pending action lives on the
       // RuntimeDriver that `setup` created, and a second plugin would start with
       // an empty one. `runContext` spins up a fresh harness, which is why the
@@ -1933,9 +1955,79 @@ describe('Oₜ carries the environment reply, never the model\'s own action', ()
     }
   }
 
-  it('does not put the action there by default', async () => {
+  it('reports what the runtime did, rather than ordering the model', async () => {
+    // Both extremes have been measured and both are wrong. With the action
+    // there, the model obeys a stored order. With nothing there, the model
+    // loops: the runtime re-prompts after a turn that produced a patch but no
+    // tool call, and with nothing saying why it ran 98 text blocks where the
+    // baseline had 43.
     const prompt = await observationIn(undefined);
+    expect(prompt).toContain('your state patch was applied');
+    // It says what happened. It does not say what to do.
+    expect(prompt).not.toContain('read src/cfg2.ts');
+    expect(prompt).not.toMatch(/do (this|it) now/i);
+  });
+
+  it('puts nothing in Oₜ when the action was asked for but there is none', async () => {
+    // The order path with nothing to order. A turn that ended without a patch
+    // leaves no action to carry, and an empty string must not be rendered as an
+    // order — the marker would then be a command with no object.
+    delete process.env['SKILLSTATE_CONTINUATION'];
+    process.env['SKILLSTATE_CONTINUATION'] = '1';
+    try {
+      const projectDir = paperProjectWithSpec({ step: 1 });
+      const messages = longTranscript();
+      const payload: ContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages,
+        options: {},
+        agent: 'build',
+        model: { providerID: 'x', id: 'y' },
+        tools: {},
+      };
+      const harness = createPluginHarness({ projectDir });
+      cleanups.push(await harness.start());
+      await harness.hooks.get('context')!(payload);
+      const prompt = promptOf(payload.messages);
+      expect(prompt).not.toContain('[next step');
+      expect(prompt).not.toContain('[runtime]');
+    } finally {
+      delete process.env['SKILLSTATE_CONTINUATION'];
+    }
+  });
+
+  it('puts nothing in Oₜ when the driver is switched off, whatever the flag says', async () => {
+    process.env['SKILLSTATE_CONTINUATION'] = '1';
+    process.env['SKILLSTATE_DRIVE'] = '0';
+    try {
+      const projectDir = paperProjectWithSpec({ step: 1 });
+      const messages = longTranscript();
+      const payload: ContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages,
+        options: {},
+        agent: 'build',
+        model: { providerID: 'x', id: 'y' },
+        tools: {},
+      };
+      const harness = createPluginHarness({ projectDir });
+      cleanups.push(await harness.start());
+      await harness.hooks.get('context')!(payload);
+      // No driver means no report and no order, so the observation channel
+      // carries the environment's reply and nothing else.
+      expect(promptOf(payload.messages)).not.toContain('[next step');
+    } finally {
+      delete process.env['SKILLSTATE_CONTINUATION'];
+      delete process.env['SKILLSTATE_DRIVE'];
+    }
+  });
+
+  it('puts nothing in Oₜ at all when told to', async () => {
+    const prompt = await observationIn('0');
     expect(prompt).not.toContain('[next step');
+    expect(prompt).not.toContain('your state patch was applied');
     expect(prompt).not.toContain('read src/cfg2.ts');
   });
 

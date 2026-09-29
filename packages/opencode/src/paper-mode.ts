@@ -372,6 +372,8 @@ export interface PaperPromptOptions {
    * diff of guesses is worth less than the mistake that is here.
    */
   continuation?: string;
+  /** Whether `continuation` is the environment's report or an order. */
+  continuationKind?: 'report' | 'order';
 }
 
 /** What {@link buildPaperPrompt} decided, for tests and diagnostics. */
@@ -406,7 +408,16 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   // host-derived source and timestamp; only the rendered content changes.
   let content = observed.content;
   if (options.continuation !== undefined) {
-    content = applyObservation(content, CONTINUATION_MARKER, options.continuation);
+    // The marker is chosen here, beside the text, because a report labelled
+    // with an order's marker is an order wearing a report's clothes. That
+    // happened: `[next step - do it now ...]` in front of "step 1 ended; your
+    // state patch was applied" told the model to hurry something that was
+    // already over.
+    content = applyObservation(
+      content,
+      options.continuationKind === 'report' ? REPORT_MARKER : ORDER_MARKER,
+      options.continuation,
+    );
   }
   if (options.feedback !== undefined) {
     content = applyFeedback(content, options.feedback);
@@ -472,8 +483,14 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
  * later run shows the narration back, this string is the first thing to change
  * again, and the step trace is what will say so.
  */
+export const REPORT_MARKER = '[runtime]';
+
+/** @deprecated kept only so the order path names the same constant it always did. */
 export const CONTINUATION_MARKER =
-  '[next step — do it now in this turn, use as many tool calls as it takes, and do not describe it first]';
+  '[next step — do this now, do not describe it first]';
+
+/** The same, under the name the call site reads it by. */
+export const ORDER_MARKER = CONTINUATION_MARKER;
 
 /**
  * The one thing the host's own loop needs the model to know.

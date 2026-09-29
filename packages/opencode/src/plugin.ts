@@ -350,6 +350,7 @@ export function dumpStepTrace(
  * typo in an environment variable should leave the ceiling where the code says
  * it is, not quietly become some other number that then gets measured.
  */
+
 export function maxStepsFromEnv(): number | undefined {
   const raw = process.env['SKILLSTATE_MAX_STEPS'];
   if (raw === undefined || raw.length === 0) return undefined;
@@ -715,7 +716,27 @@ export const SkillStatePlugin = Plugin.define({
             : feedback?.takeUnlessInvalidated(event.sessionID, invalidation.attempts, invalidation.lastError);
         // The action the runtime is carrying out, which has to reach the model
         // through Oₜ because the messages it was sent in are cleared here.
-        const continuation = runtime?.takeContinuation(event.sessionID);
+        // What rides in Oₜ, and `SKILLSTATE_CONTINUATION` chooses between three
+        // things, because both extremes have been measured and both are wrong:
+        //
+        //   unset (default)  the environment's REPORT of what the runtime did
+        //   '1'              the action the model itself proposed, as an order
+        //   '0'              nothing at all
+        //
+        // §2 forbids the middle one — "the agent receives only Oₜ, never prior
+        // observations or actions" — and with it the model obeyed its own stored
+        // order: 54 reads for thirty files where a control used one grep. The
+        // empty end loses too: the runtime re-prompts when a turn produced a
+        // patch but no tool call, and with nothing saying why, the model looped
+        // — 98 text blocks against 43, 7.9M tokens against 1.6M. See
+        // `RuntimeDriver.stepReport`.
+        const continuationFlag = process.env['SKILLSTATE_CONTINUATION'];
+        const [continuationText, continuationKind] =
+          continuationFlag === '0'
+            ? ([undefined, 'report'] as const)
+            : continuationFlag === '1'
+              ? ([runtime?.takeContinuation(event.sessionID) ?? '', 'order'] as const)
+              : ([runtime?.stepReport(event.sessionID) ?? '', 'report'] as const);
         const raw = event.messages as unknown as PaperContextEvent['messages'];
         dumpPromptShape(process.env['SKILLSTATE_DEBUG_PROMPT'], raw, state);
         applyPaperContext(
@@ -741,12 +762,9 @@ export const SkillStatePlugin = Plugin.define({
             // driver read one file, ran ONE grep and finished in six calls. The
             // order was its own past action, so it never looked for a better
             // way than the one it had already written down.
-            //
-            // Off by default, therefore, and the env var restores the old
-            // behaviour for anyone who wants to measure what it cost.
-            ...(continuation === undefined || process.env['SKILLSTATE_CONTINUATION'] !== '1'
+            ...(continuationText === undefined || continuationText.length === 0
               ? {}
-              : { continuation }),
+              : { continuation: continuationText, continuationKind }),
             ...(correction === undefined ? {} : { feedback: correction }),
           }),
           HOST_ACTION_NOTE,
