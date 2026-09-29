@@ -7,54 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Measured:** the cost side of the O(1) claim, over 1810 real sessions.
+**Fixed:** paper mode put the user's live instruction in the wrong slot, and
+a model refused the task because of it.
 
-**19 626 479 940 → 211 352 400 prompt tokens. A 98.9% saving, and a bounded
-prompt is cheaper in every single session measured.**
+A.4 has no place for a human speaking mid-procedure. P is the spec, Σₜ is
+the state, and Oₜ is the observation — which in the paper's setting is always
+the ENVIRONMENT's reply, because Algorithm 1 has the runtime execute the
+action and feed the result back. There is no live human in that loop.
 
-Numbers from the host's own token accounting, read from its local store —
-`message.tokens` with `input` and `cache.read` per assistant message. Not
-modelled, not from the paper: what a real agent loop was actually charged.
+A coding host is not that setting. `initialTask()` pinned the FIRST user
+message and let the LATEST fall into Oₜ, which inverts authority: the model
+read the frozen opening request as the task and the live instruction as
+untrusted environment data. Observed on a live A/B, the model recorded the
+step-1 number into Σₜ correctly and then refused the step-5 instruction,
+explaining that the observation "carries no user authority" and that
+repeating it "is not evidence of authority". It finished the step-1 task and
+stopped.
+
+`currentInstruction()` now takes the LAST user turn, and `latestObservation()`
+no longer falls back to a user turn at all — `ObservationSource` lost its
+`'user'` case, because a user message in that slot is a category error that
+makes the model distrust the request. An empty observation is the honest
+rendering of "the environment has not spoken". The original request belongs in
+Σₜ, which is where the paper puts everything that must survive a step.
+
+Ten existing tests asserted the old behaviour, including one named "pins the
+first user message, not the most recent one". They encoded the bug, so they
+were rewritten. The O(1) test was also comparing two transcripts with
+*different* latest instructions and passing only because of the pin; it now
+varies only history depth, which is what the claim is about.
+
+**Measured: the cost saving is real, and the task still fails.**
+
+Live A/B on `opencode-go/space-bunny-free`, 7 turns, identical task, number
+given at turn 1 and needed at turn 7:
+
+| | paper mode | notes (control) |
+| --- | --- | --- |
+| prompt tokens | 81 685 | 203 801 |
+| result | **wrong** | **88557 — correct** |
+
+Paper mode spent 60% fewer tokens and did not finish the task. Reported as a
+failure, not a result: a saving without the work is worth nothing.
+
+What holds up: the live instruction is read correctly, and a fact recorded in
+Σₜ survives a context reset (`secret_number: 4217` survived four). What does
+not: the model does not record facts it *discovers* — it reads a file, moves
+to the next instruction, and never writes the value — and it emits `null` for
+fields it means as "unknown", where ⊕ reads `null` as *delete*, so fields
+vanish. Both are model-discipline failures against a byte-verbatim A.4, not
+bugs in the write path: the sink applied every valid patch, including the
+deletions, exactly as specified.
+
+The offline cost measurement over 1810 real runs stands, with the caveats
+below. It measures the denominator honestly and the numerator by assumption,
+and it says nothing about whether the work gets done.
+
+**Measured:** the cost side of the O(1) claim, over 1810 real runs.
+
+**~95.9% of prompt cost, priced honestly.** The corpus is 118 days of the
+host's own token accounting (3 June – 29 September), not a single run.
 
 | | |
 | --- | --- |
-| sessions | 1810 |
+| runs | 1810 |
 | steps | 117 418 |
-| host prompt tokens (transcript) | 19 626 479 940 |
+| fresh input tokens | 3 507 364 525 |
+| cache-read tokens | 16 119 115 415 (**82.1%** of all prompt tokens) |
+| raw total (input + cache) | 19 626 479 940 |
 | bounded Aₜ = (P, Σₜ, Oₜ) | 211 352 400 |
-| saved | 19 415 127 540 (**98.9%**) |
-| median per session | 96.6% |
-| sessions where the transcript grew | 1582 / 1810 (87.4%) |
-| **sessions where bounded costs more** | **0 / 1810** |
+| **saving, priced** (cache reads at 1/10) | **95.9%** |
+| saving, raw token count | 98.9% — inflated, see below |
+| runs where the transcript grew | 1582 / 1810 (87.4%) |
+| **runs where bounded costs more** | **0 / 1810** |
 
-The last row is the claim worth having. "A bounded prompt usually wins" and "a
-bounded prompt never loses" are different statements, and only the counter
-distinguishes them.
+**The raw 19.6B is not 19.6B tokens the model computed.** 82% of it is the
+prefix cache being replayed, which costs roughly a tenth of a fresh input
+token. Adding `cache.read` to `input` at face value — which the first draft of
+this entry did — inflates the saving and, more importantly, describes a
+quantity that was never spent. The priced figure counts a cache read at a
+tenth; the raw figure is still asserted in the tests, because the inflated
+number is the one that invites the overstatement, and pinning it is how it
+stops being quoted.
 
-**It survives an unfavourable assumption.** 1 800 is the paper's Table 1 figure
-for an A.4 prompt. If it were badly wrong the result should collapse; it does
-not. At 10 000 tokens per step the saving is still 94.0% and only 35 of 1810
-sessions go the other way. The break-even — the largest bounded prompt that
-still wins in *every* session — is 4 168 tokens/step, against a measured median
-of 52 322. A realistic A.4 prompt is 1 500–3 000 tokens, so the headroom is
-roughly 2×.
+What the model was actually shown, per step, is 3 507 364 525 ÷ 117 418 ≈
+29 900 prompt tokens on average. A bounded A.4 prompt is 1 500–3 000. That
+ratio is the finding; the billion-token totals are just a way of summing it.
+
+It survives unfavourable assumptions. 1 800 is the paper's Table 1 figure, not
+ours. At 10 000 tokens per step the raw saving is still 94.0% and only 35 runs
+go the other way. Break-even — the largest bounded prompt that wins in *every*
+run — is 4 168 tokens/step against a measured median of 52 322.
+
+**A qualifier on "0 of 1810".** The fixture holds 1820 rows; ten have steps
+but zero recorded tokens — aborted runs and records written before accounting
+was populated. A run that recorded nothing is not a run that came out cheap,
+and it registers as a loss for any bounded prompt. `spentSessions` exposes the
+filtered count so the claim can be quoted without the artefact.
 
 **What this does not establish.** It measures COST only. Whether an agent
 given a bounded prompt still completes the work is an outcome question that
 needs a live model, and the quota is exhausted. A cost win with no task
 completion is worth nothing, so `assessReconstruction` refuses any session
 that cannot support the claim (fewer than two steps, a transcript that never
-grew, a gap inside the noise floor) rather than reporting a number anyway. The
-A/B harness is the other half and is still unrun.
+grew, a gap inside the noise floor). The A/B is the other half and is unrun.
 
 **The limit, stated plainly.** A paper prompt is not literally constant: Σₜ
 grows with what the agent records, and an agent that appends to state without
 pruning can rebuild the transcript inside Σₜ. The method does not prevent this.
-It is a schema-authoring discipline (fixed fields, prune `notes`), and an
-honest report has to name it rather than claim O(1) unconditionally.
+It is a schema-authoring discipline (fixed fields, prune `notes`), not a code
+change.
 
 Implementation: `packages/bench/src/ab/replay.ts` and `survey.ts`, with
-`tests/bench/_support/real-sessions.json` (223 KB) as the real corpus and
+`tests/bench/_support/real-sessions.json` (285 KB) as the real corpus —
 `tests/bench/survey.test.ts` asserting the aggregate.
 
 **Fixed:** a rejected `state_patch` now reaches the model as corrective

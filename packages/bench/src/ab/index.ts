@@ -59,8 +59,19 @@ export { formatArmTable, formatVerdict } from './report.js';
 export { serverSessionUsage, serverUsageReader } from './opencode-usage.js';
 export type { ServerFetcher } from './opencode-usage.js';
 
-export { DEFAULT_BOUNDED_PROMPT_TOKENS, assessReconstruction, promptTokensOf, reconstruct } from './replay.js';
-export type { HostSession, ReconstructOptions, ReconstructResult, StepUsage } from './replay.js';
+export {
+  DEFAULT_BOUNDED_PROMPT_TOKENS,
+  DEFAULT_CACHE_READ_DISCOUNT,
+  assessReconstruction,
+  promptTokensOf,
+  reconstruct,
+} from './replay.js';
+export type {
+  HostSession,
+  ReconstructOptions,
+  ReconstructResult,
+  StepUsage,
+} from './replay.js';
 
 export { breakEvenPromptTokens, formatSurvey, survey } from './survey.js';
 export type { Survey, SurveyOptions } from './survey.js';

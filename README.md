@@ -805,38 +805,66 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 
 ## Does the host integration actually save tokens?
 
-**Unproven. Do not take the tagline's word for it.**
+**Measured for cost, and the task still fails. Read this section before
+quoting any number from it.**
 
-The runtime's own prompt is O(1) per step — a flat ~1.8k characters
-regardless of progress, which is what the paper claims and what
-`tests/core/runtime-footprint.test.ts` asserts. That is a property of
-`PromptTransformer.formatPaper` and it holds.
+Two separate questions, and they have different answers.
 
-What is **not** established is the token economy of the *host integration*.
-An A/B run on OpenCode 2.0.19 — identical git archive, task, model and turn
-count, one arm plain and one arm with the plugin — produced this:
+### What the transcripts cost (measured, offline)
 
-| | input | cache read | output |
-| --- | --- | --- | --- |
-| A, plain opencode | 42 364 → **71 590** | 468 283 → **1 272 390** | 2 667 → **4 793** |
-| B, + plugin | 25 727 | 336 259 | 1 439 |
+Over 1810 real runs in the host's own store — 118 days, 117 418 steps, no
+model required:
 
-The two numbers in each A cell are the same session measured mid-run and at
-the end, which is itself the finding: run-to-run variance in a
-non-deterministic setup is larger than any effect being looked for, and
-`AUDIT.md` came out byte-identical in both arms.
+| | |
+| --- | --- |
+| fresh input tokens | 3 507 364 525 |
+| cache-read tokens | 16 119 115 415 (82.1% of prompts) |
+| raw total | 19 626 479 940 |
+| bounded Aₜ at 1 800 tokens/step | 211 352 400 |
+| saving, cache reads priced at 1/10 | **95.9%** |
+| runs where the transcript grew | 1582 / 1810 |
+| runs where a bounded prompt costs more | **0 / 1810** |
 
-More to the point: **the state file was never written.** The model never
-called `skillstate_update` or `skillstate_read`. The system fragment tells it
-to skip the tools when the work needs no cross-turn memory, and on a linear
-audit task it did exactly that. The apparent 39–64% saving was the model
-taking a different path, not skillstate.
+The average step showed the model **29 900 prompt tokens**. A bounded A.4
+prompt is 1 500–3 000. That ratio is the finding.
 
-So: the tools carry no measurable overhead when unused, and the value
-proposition remains unmeasured. A fair test needs a task that genuinely
-survives a context reset. Until that exists, the honest position is that
-this repository demonstrates a working O(1) *runtime*, not a demonstrated
-token *saving*.
+Two things this table is NOT. The 19.6B is not 19.6B tokens computed — 82% is
+the prefix cache replayed at a tenth of the price, and adding it to `input` at
+face value inflates the saving. And the 1 800 denominator is the paper's
+Table 1 figure, not a measurement of ours; the numerator is real, the
+denominator is an assumption.
+
+Reproduce: `tests/bench/survey.test.ts` over
+`tests/bench/_support/real-sessions.json`.
+
+### Whether it still does the work (measured, and it does not)
+
+A real A/B on `opencode-go/space-bunny-free`, 7 turns, one task, identical in
+both arms. The task requires a number given at turn 1 to survive to turn 7:
+
+| | paper mode | notes (control) |
+| --- | --- | --- |
+| prompt tokens | 81 685 | 203 801 |
+| task result | **wrong** | **88557 — correct** |
+| state written | yes, and `secret_number: 4217` survived 4 context resets | n/a |
+
+**Paper mode spent 60% fewer tokens and did not complete the task.** A saving
+is worth nothing without the work, so this is a failure, not a result.
+
+What works: the live instruction is read correctly, and facts recorded in
+Σₜ survive a context reset. What does not: the model does not record facts it
+*discovers*. It reads `src/mod3.ts`, moves to the next instruction, and never
+writes `v3` — so the value is gone. It also emits `null` for fields it means
+as "unknown", and `null` in ⊕ means *delete*, so fields disappear.
+
+An earlier iteration of this same experiment failed differently: the model
+classified the user's own live instruction as untrusted, because it was
+rendered into A.4's observation slot, which the paper reserves for the
+environment's reply. That is fixed — the live turn now travels in P.
+
+The honest position: the O(1) *runtime* works and the cost saving is real and
+large. The host integration's *reliability* is not established, and one live
+run says it is currently not good enough to default anyone onto.
 
 ## Development
 

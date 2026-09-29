@@ -48,8 +48,27 @@ export interface Survey {
   readonly boundedPromptTokens: number;
   /** `host − bounded`, summed. */
   readonly savedTokens: number;
-  /** `saved / host`. Null when the host spent nothing. */
+  /** `saved / host`, as a raw token count. Inflated; see {@link savedEffectiveFraction}. */
   readonly savedFraction: number | null;
+  /** Fresh, uncached input tokens across the corpus. */
+  readonly freshInputTokens: number;
+  /** Cache-read tokens across the corpus. */
+  readonly cacheReadTokens: number;
+  /** Cache reads as a share of all prompt tokens. */
+  readonly cacheShare: number;
+  /**
+   * The corpus priced in input-equivalent tokens, cache reads discounted.
+   *
+   * The number to quote. The raw total counts a cache read as equal to a
+   * fresh input token, and on a cache-heavy corpus that inflates a saving by
+   * roughly an order of magnitude.
+   */
+  readonly hostEffectiveTokens: number;
+  /**
+   * The saving priced properly. Always ≤ {@link savedFraction}, and the
+   * defensible one.
+   */
+  readonly savedEffectiveFraction: number | null;
   /** Per-session saving fractions, for a median. */
   readonly perSession: readonly number[];
   /** Median per-session saving. */
@@ -62,8 +81,17 @@ export interface Survey {
    * The strongest number in the survey: a bounded prompt that never loses is
    * a different claim from one that usually wins, and only the counter can
    * distinguish them.
+   *
+   * CAVEAT when quoting it: this counts every session, including rows that
+   * recorded zero tokens — aborted runs and records written before
+   * accounting was populated. Such a session is not "a run that came out
+   * cheap", it is a run that never happened, and it will register as a loss
+   * for any bounded prompt. Filter on {@link spentSessions} before claiming
+   * "never loses", or the number is smaller and more honest.
    */
   readonly boundedLosesCount: number;
+  /** Sessions where the host recorded any token spend at all. */
+  readonly spentSessions: number;
   /** Per-session results, largest saving first. */
   readonly results: readonly ReconstructResult[];
 }
@@ -105,6 +133,9 @@ export function survey(
   const hostPromptTokens = results.reduce((sum, r) => sum + r.hostPromptTokens, 0);
   const boundedPromptTokens = results.reduce((sum, r) => sum + r.boundedPromptTokens, 0);
   const savedTokens = hostPromptTokens - boundedPromptTokens;
+  const freshInputTokens = results.reduce((sum, r) => sum + r.freshInputTokens, 0);
+  const cacheReadTokens = results.reduce((sum, r) => sum + r.cacheReadTokens, 0);
+  const hostEffectiveTokens = results.reduce((sum, r) => sum + r.hostEffectiveTokens, 0);
   const perSession = results
     .map((r) => r.savedFraction)
     .filter((f): f is number => f !== null)
@@ -124,10 +155,21 @@ export function survey(
     boundedPromptTokens,
     savedTokens,
     savedFraction: hostPromptTokens === 0 ? null : savedTokens / hostPromptTokens,
+    freshInputTokens,
+    cacheReadTokens,
+    cacheShare: hostPromptTokens === 0 ? 0 : cacheReadTokens / hostPromptTokens,
+    hostEffectiveTokens,
+    savedEffectiveFraction:
+      hostEffectiveTokens === 0
+        ? null
+        : (hostEffectiveTokens - boundedPromptTokens) / hostEffectiveTokens,
     perSession,
     medianSavedFraction,
     grewCount: results.filter((r) => r.hostSlope > 0).length,
     boundedLosesCount: results.filter((r) => r.savedTokens < 0).length,
+    spentSessions: results.filter(
+      (r) => r.hostPromptTokens > 0,
+    ).length,
     results: [...results].sort((a, b) => b.savedTokens - a.savedTokens),
   };
 }
@@ -172,12 +214,22 @@ export function formatSurvey(surveyResult: Survey): string {
   return [
     `sessions            : ${surveyResult.sessions}`,
     `steps total         : ${surveyResult.steps.toLocaleString('en-US')}`,
-    `host prompt tokens  : ${surveyResult.hostPromptTokens.toLocaleString('en-US')}`,
-    `bounded A_t tokens  : ${surveyResult.boundedPromptTokens.toLocaleString('en-US')}`,
-    `saved               : ${surveyResult.savedTokens.toLocaleString('en-US')} (${pct(surveyResult.savedFraction)})`,
+    '',
+    '  raw token count (inflated - counts a cache read as a fresh input):',
+    `    fresh input      : ${surveyResult.freshInputTokens.toLocaleString('en-US')}`,
+    `    cache read       : ${surveyResult.cacheReadTokens.toLocaleString('en-US')} (${(surveyResult.cacheShare * 100).toFixed(1)}% of prompts)`,
+    `    host total       : ${surveyResult.hostPromptTokens.toLocaleString('en-US')}`,
+    `    bounded A_t      : ${surveyResult.boundedPromptTokens.toLocaleString('en-US')}`,
+    `    raw saving       : ${pct(surveyResult.savedFraction)}`,
+    '',
+    '  priced in input-equivalent tokens (cache reads discounted) - QUOTE THIS:',
+    `    host effective   : ${Math.round(surveyResult.hostEffectiveTokens).toLocaleString('en-US')}`,
+    `    bounded A_t      : ${surveyResult.boundedPromptTokens.toLocaleString('en-US')}`,
+    `    real saving      : ${pct(surveyResult.savedEffectiveFraction)}`,
+    '',
     `median per session  : ${pct(surveyResult.medianSavedFraction)}`,
     `transcript grew     : ${surveyResult.grewCount}/${surveyResult.sessions}`,
-    `bounded loses       : ${surveyResult.boundedLosesCount}/${surveyResult.sessions}`,
+    `bounded loses       : ${surveyResult.boundedLosesCount}/${surveyResult.spentSessions} real runs`,
   ].join('\n');
 }
 

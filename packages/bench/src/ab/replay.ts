@@ -51,6 +51,26 @@ export interface StepUsage {
   readonly output: number;
 }
 
+/**
+ * What a cache read is worth relative to a fresh input token.
+ *
+ * `1/10` is the usual published rate for prompt caching, and it is a DEFAULT,
+ * not a measurement: the real multiplier is the provider's, and this repo has
+ * no access to anyone's invoice. The number exists because adding `cache.read`
+ * to `input` at face value is the single easiest way to overstate a token
+ * saving, and that is worth a knob rather than a silent assumption.
+ *
+ * A cache read is NOT free: the model is shown the same text either way, and
+ * the paper's claim is about what the model is exposed to. The discount
+ * reflects PRICE, not attention.
+ */
+export const DEFAULT_CACHE_READ_DISCOUNT = 0.1;
+
+/** Fresh input plus cache reads, i.e. everything the model was shown. */
+export function promptTokensOf(step: StepUsage): number {
+  return step.input + step.cacheRead;
+}
+
 /** Options for {@link reconstruct}. */
 export interface ReconstructOptions {
   /**
@@ -72,6 +92,14 @@ export interface ReconstructOptions {
    * number that looks flat.
    */
   readonly stateTokens?: number;
+  /**
+   * What a cache read costs relative to a fresh input token.
+   *
+   * Defaults to {@link DEFAULT_CACHE_READ_DISCOUNT}. Overridable because the
+   * real multiplier is the provider's, and a number nobody can change is a
+   * number nobody should trust.
+   */
+  readonly cacheReadDiscount?: number;
 }
 
 /**
@@ -108,6 +136,26 @@ export interface ReconstructResult {
   readonly savedTokens: number;
   /** `saved / host`, as a fraction. Null when the host spent nothing. */
   readonly savedFraction: number | null;
+  /** Fresh, uncached input tokens the host charged for. */
+  readonly freshInputTokens: number;
+  /** Cache-read tokens the host charged for. */
+  readonly cacheReadTokens: number;
+  /**
+   * The session priced in input-equivalent tokens, with cache reads
+   * discounted.
+   *
+   * The honest denominator. `hostPromptTokens` adds a cache read to a fresh
+   * input as if they cost the same, which they do not, and a token saving
+   * quoted from that sum is inflated by roughly an order of magnitude on a
+   * cache-heavy corpus.
+   */
+  readonly hostEffectiveTokens: number;
+  /**
+   * The saving priced properly: `(effective − bounded) / effective`.
+   *
+   * Always smaller than {@link savedFraction}, and the one to quote.
+   */
+  readonly savedEffectiveFraction: number | null;
   /** Host prompt tokens per step, in order. */
   readonly hostPerStep: readonly number[];
   /** Bounded prompt tokens per step, in order. */
@@ -131,8 +179,13 @@ export interface ReconstructResult {
 }
 
 /** Total prompt tokens for one step: fresh input plus cache reads. */
-export function promptTokensOf(step: StepUsage): number {
-  return step.input + step.cacheRead;
+export function freshInputTokens(session: HostSession): number {
+  return session.steps.reduce((sum, step) => sum + step.input, 0);
+}
+
+/** Total cache-read tokens for a session. */
+export function cacheReadTokens(session: HostSession): number {
+  return session.steps.reduce((sum, step) => sum + step.cacheRead, 0);
 }
 
 /**
@@ -154,6 +207,13 @@ export function reconstruct(
   const hostPromptTokens = hostPerStep.reduce((a, b) => a + b, 0);
   const boundedPromptTokens = boundedPerStep.reduce((a, b) => a + b, 0);
   const savedTokens = hostPromptTokens - boundedPromptTokens;
+  const fresh = freshInputTokens(session);
+  const cached = cacheReadTokens(session);
+  const discount = options.cacheReadDiscount ?? DEFAULT_CACHE_READ_DISCOUNT;
+  // What the session cost in INPUT-EQUIVALENT tokens: cache reads are counted
+  // at their price, not at face value. This is the number that survives a
+  // billing argument; the raw total does not.
+  const hostEffectiveTokens = fresh + cached * discount;
 
   return {
     sessionID: session.sessionID,
@@ -163,6 +223,13 @@ export function reconstruct(
     boundedPromptTokens,
     savedTokens,
     savedFraction: hostPromptTokens === 0 ? null : savedTokens / hostPromptTokens,
+    freshInputTokens: fresh,
+    cacheReadTokens: cached,
+    hostEffectiveTokens,
+    savedEffectiveFraction:
+      hostEffectiveTokens === 0
+        ? null
+        : (hostEffectiveTokens - boundedPromptTokens) / hostEffectiveTokens,
     hostPerStep,
     boundedPerStep,
     // Slope across the whole session: last step minus first. A transcript's
