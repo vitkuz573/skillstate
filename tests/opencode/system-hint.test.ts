@@ -217,3 +217,70 @@ describe('buildStateHint — never overrides the model', () => {
     ]);
   });
 });
+
+describe('a shipped schema, and a state that ignores it', () => {
+  // The defect this line was added for, in the shape it actually took: a
+  // thirty-file run in notes mode left the schema-declared `total` and `done`
+  // at their defaults and wrote all thirty files under `accumulate`, a
+  // namespace the model invented. Nothing said so. A reader checking `done`
+  // found an empty list and concluded the arm had done nothing.
+  const SPEC = {
+    id: 'accumulate',
+    name: 'Accumulate',
+    version: '1.0.0',
+    instructions: 'Accumulate the values.',
+    schema: {
+      total: { type: 'number' as const, default: 0, description: 'running sum' },
+      done: { type: 'array' as const, default: [] as unknown[], description: 'files read' },
+    },
+  };
+
+  function projectWithSpec(withSpec: boolean): string {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ss-spec-')));
+    dirs.push(dir);
+    if (withSpec) fs.writeFileSync(path.join(dir, 'skill-spec.json'), JSON.stringify(SPEC));
+    fs.mkdirSync(path.join(dir, '.skillstate'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [], accumulate: { total: 1523, done: [1, 2, 3] } } }),
+    );
+    return dir;
+  }
+
+  it('stays silent when the state matches the spec', () => {
+    const hint = buildStateHint({
+      state: { total: 12, done: ['a.ts'] },
+      statePath: 'p',
+      initialized: true,
+      declaredFields: ['total (number)', 'done (array)'],
+    });
+    expect(hint).not.toContain('skill-spec.json');
+  });
+
+  it('says so when the model wrote elsewhere, naming the declared fields', () => {
+    const hint = buildStateHint({
+      state: { total: 0, done: [], accumulate: { total: 1523 } },
+      statePath: 'p',
+      initialized: true,
+      declaredFields: ['total (number)', 'done (array)'],
+    });
+    expect(hint).toContain('skill-spec.json');
+    expect(hint).toContain('`total (number)`');
+    // It names what it found, not just what it expected — a warning that does
+    // not say which key is wrong leaves the model to guess.
+    expect(hint).toContain('`accumulate`');
+  });
+
+  it('does not fire for a project that ships no spec at all', () => {
+    // The line is paid for on every turn it appears, and its standing test is
+    // that the hint stays under a tenth of the conversation. A project with no
+    // `skill-spec.json` has declared nothing, so there is nothing to say.
+    const hint = buildStateHint({
+      state: { decisions: ['a'] },
+      statePath: 'p',
+      initialized: true,
+      declaredFields: [],
+    });
+    expect(hint).not.toContain('skill-spec.json');
+  });
+});

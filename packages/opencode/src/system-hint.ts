@@ -92,6 +92,21 @@ export interface StateHintOptions {
    */
   scope?: string;
   /**
+   * The fields a project `skill-spec.json` declares, when one is present.
+   *
+   * Notes mode does not ENFORCE a schema — §4.1 scopes the schema to a spec P,
+   * and notes mode has no P because it never formats an A.4 prompt. What it
+   * must not do is stay silent, and it was: a project shipped a schema, a model
+   * read it, ignored it, and wrote thirty files under a namespace it invented
+   * while the declared fields sat at their defaults. Nothing said so, and the
+   * state looked populated to a reader checking the wrong key.
+   *
+   * So the fields are stated, not enforced. A model that follows them writes
+   * the state where the spec says; one that does not has been told where the
+   * spec says, which is the difference between an override and an oversight.
+   */
+  declaredFields?: readonly string[];
+  /**
    * True when the project is INITIALIZED — a state file exists for it.
    *
    * This is the whole difference between an optional side channel and a
@@ -165,12 +180,30 @@ export function buildStateHint(options: StateHintOptions): string {
 
   const initialized = options.initialized === true;
   const turns = options.turnsSinceWrite ?? 0;
+  const declared = options.declaredFields ?? [];
+  // Only speak when the state and the spec actually DISAGREE. A line naming
+  // the declared fields on every turn of every project would cost prompt budget
+  // to say something that is true, and the hint has a standing test that it
+  // must stay under a tenth of the conversation it rides along with. The case
+  // worth spending characters on is the one measured: a model that wrote
+  // everything under a namespace it invented while the declared fields sat at
+  // their defaults.
+  const undeclared = Object.keys(state).filter((k) => !declared.some((d) => d.startsWith(`${k} `)));
+  const schemaLine =
+    declared.length === 0 || undeclared.length === 0
+      ? ''
+      : `\nThis project\'s \`skill-spec.json\` declares the state fields ${declared
+          .map((f) => `\`${f}\``)
+          .join(', ')}. The state currently holds ${undeclared
+          .slice(0, 6)
+          .map((k) => `\`${k}\``)
+          .join(', ')}, which the spec does not declare. Write declared fields at the TOP LEVEL under their own names; a later reader looking for \`${declared[0]!.split(' ')[0]}\` will not find it one level down.`;
   const lines = [
     '<skillstate-project-notes>',
     purposeLine(initialized, statePath),
     '',
     renderStateForHint(state),
-    `${toolLine}${mergeLine}`,
+    `${toolLine}${mergeLine}${schemaLine}`,
     initialized
       ? 'Record what you establish here as you go — plans made, decisions taken, file paths, values read, and what is left — so it is still here after a reset. The notes are not the task: keep doing what the user asked.'
       : 'Use them only to carry facts across turns — plans already made, decisions already taken, file paths, and what is left to do. The notes are a side channel, not the task: keep doing what the user asked, and skip these tools entirely when the work needs no cross-turn memory.',

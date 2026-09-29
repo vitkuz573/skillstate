@@ -396,13 +396,39 @@ export const SkillStatePlugin = Plugin.define({
 
     const mode: PluginMode = resolvePluginMode({ directory }).mode;
     const specs = new SpecResolver();
-    // Resolved once at setup: P is fixed for the life of the process, and
-    // the sink validates every patch against it.
-    const spec = mode === 'paper' ? specs.resolve(directory).spec : undefined;
-    const sink = spec === undefined ? undefined : new PaperStateSink({ store, spec, scopeFor });
-    // One pending correction per session. Exists in paper mode only, because
-    // in notes mode there is no `state_patch` for the host to reject.
-    const feedback = spec === undefined ? undefined : new FeedbackQueue();
+    // Resolved in BOTH modes now, and the difference is what each one does
+    // with it. Paper mode formats P into the prompt and validates every patch
+    // against the schema; notes mode has no P to format and does not enforce,
+    // which §4.1's scoping of the schema to a spec P allows. But loading it
+    // only in paper mode meant a project shipping a schema in notes mode had
+    // it silently ignored: a model wrote thirty files under a namespace it
+    // invented while the declared fields sat at their defaults, and nothing
+    // said otherwise.
+    const resolution = specs.resolve(directory);
+    const spec = resolution.spec;
+    // Only a spec the PROJECT SHIPPED counts as a declaration. A `builtin`
+    // source means we fell back to a generic default, and announcing that to
+    // the model as "this project declares these fields" would be a false claim
+    // about a file the project does not have — and it would fire on every
+    // project without one, comparing their notes against a default's field
+    // names and reporting a mismatch that is an artefact of our own fallback.
+    const declaredFields =
+      resolution.source === 'file' && spec !== undefined
+        ? Object.entries(spec.schema).map(([key, field]) => `${key} (${field.type})`)
+        : [];
+    const sink = mode !== 'paper' || spec === undefined
+      ? undefined
+      : new PaperStateSink({ store, spec, scopeFor });
+    // One pending correction per session. Exists in paper mode only, because in
+    // notes mode there is no `state_patch` for the host to reject — the model
+    // calls a tool instead, and the tool reports its own rejections.
+    //
+    // Keyed on the MODE, not on `spec`. Loading a spec in notes mode (so its
+    // declared fields can be named to the model) made `spec` defined there, and
+    // an empty feedback queue in notes mode is a queue nothing ever writes to
+    // and `take` would drain — correct by accident, and one refactor away from
+    // not being.
+    const feedback = mode !== 'paper' || spec === undefined ? undefined : new FeedbackQueue();
     // Turns taken per scope without the state changing, for the drift notice.
     const turnsSinceWrite = new Map<string, number>();
     // Applied patches per scope, so the drift diagnostic can show whether a
@@ -707,6 +733,7 @@ export const SkillStatePlugin = Plugin.define({
         state,
         statePath: path.relative(store.projectDirectory, store.pathFor(scope)),
         scope,
+        declaredFields,
         // A state file on disk is the definition of an initialized project:
         // the user ran `skillstate init`, or something wrote one.
         initialized: store.exists(scope),
