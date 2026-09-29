@@ -104,6 +104,26 @@ import { registerTools } from './tools.js';
 export const PLUGIN_ID = 'skillstate';
 
 /**
+ * Record a failed step request, so "the host declined" is not a guess.
+ *
+ * @non-paper diagnostics. Enabled by `SKILLSTATE_DEBUG_PROMPT`, appended to
+ * the same file, tagged so it cannot be mistaken for a prompt record.
+ */
+function recordPromptFailure(error: unknown): void {
+  const path = process.env['SKILLSTATE_DEBUG_PROMPT'];
+  if (path === undefined || path.length === 0) return;
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  try {
+    fs.appendFileSync(
+      path,
+      `${JSON.stringify({ promptFailure: message })}\n`,
+    );
+  } catch {
+    // Diagnostics must never break the agent loop.
+  }
+}
+
+/**
  * Whether the host has just executed a tool for this request.
  *
  * A tool result in the transcript is the observable edge of "an action ran".
@@ -272,6 +292,7 @@ export const SkillStatePlugin = Plugin.define({
     // intact and the model's own loop is the point, so forcing a report turn
     // there would tax a mode that has no problem to solve.
     const boundary = new StepBoundary();
+    const stepBoundaryEnabled = process.env['SKILLSTATE_STEP_BOUNDARY'] === '1';
     // The step loop. Present in paper mode only, where the context is
     // replaced and the model therefore cannot fall back on the transcript to
     // keep going; see runtime.ts for why this belongs in code.
@@ -285,10 +306,13 @@ export const SkillStatePlugin = Plugin.define({
                   text: { text },
                 } as unknown as Parameters<typeof ctx.session.prompt>[0]);
                 return true;
-              } catch {
-                // The session has ended, or the host is shutting down. Either
-                // way there is no next step to request, and a throw here
-                // would end the event loop for the rest of the process.
+              } catch (error) {
+                // Swallowed for a reason — a throw here would end the event
+                // loop for the rest of the process — but not silently. This
+                // path was invisible for the whole time `session.prompt` did
+                // not start a turn, and an invisible failure here is
+                // indistinguishable from a host that simply declined.
+                recordPromptFailure(error);
                 return false;
               }
             },
@@ -379,10 +403,17 @@ export const SkillStatePlugin = Plugin.define({
       // loop to deliver it, so waiting for `session.text.ended` serves the
       // next request a Sigma that has not moved. Recovering it here is what
       // makes the state the model is shown match the state on disk.
-      await sink?.recover(
+      const recovered = await sink?.recover(
         event.sessionID,
         event.messages as unknown as ReadonlyArray<{ id: string; role: string; content: unknown }>,
       );
+      // A patch recovered here is an applied patch, so the model has accounted
+      // for its step and may act again. Leaving the phase alone would demand a
+      // second report turn for the same patch — the model would be told to
+      // account for something it had already reported.
+      if (recovered?.applied === true) {
+        boundary.patchApplied(event.sessionID);
+      }
       const state = store.read(scope);
 
       if (mode === 'paper') {
@@ -396,12 +427,27 @@ export const SkillStatePlugin = Plugin.define({
         // A tool result in the incoming transcript means the host has just
         // executed an action for this session. That is the observable edge of
         // §5.1's `execute(aₜ, Σₜ₊₁)`, and it is what moves the session from
-        // `act` to `report`: the next request must account for what it just
-        // did, not do something else.
+        // `act` to `report`.
+        //
+        // OFF BY DEFAULT, and the reason is a measurement rather than a
+        // preference. The premise — that a model asked again with no tools
+        // available can only answer in text, and that text is where a patch
+        // lives — is false for the models tested here. Measured on the
+        // eight-file task with the boundary on: two text blocks, NEITHER
+        // containing a `state_patch`, and the model writing prose instead
+        // ("the saved execution state is still {total:0, files:0}… I will
+        // restart from src/cfg1.ts"). It had done the accounting it was asked
+        // for, in words, and Σ never moved. With the boundary off the same
+        // task reaches cfg8; with it on it stops at cfg1.
+        //
+        // So the mechanism is kept, correct and tested, behind
+        // SKILLSTATE_STEP_BOUNDARY=1, and the default stays the behaviour that
+        // measurably goes further. Turning it on is a claim to be measured, not
+        // a setting to leave flipped.
         if (hasToolResult(target.messages)) {
           boundary.actionTaken(event.sessionID);
         }
-        if (boundary.reportRequired(event.sessionID)) {
+        if (stepBoundaryEnabled && boundary.reportRequired(event.sessionID)) {
           target.tools = {};
         }
         // A session that has saved nothing yet has no Σₜ to show, and

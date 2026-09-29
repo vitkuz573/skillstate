@@ -92,6 +92,45 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
+**The paper's step boundary, implemented, measured, and left OFF.** §5.1 gives the
+runtime `execute(aₜ, Σₜ₊₁)` and chains Oₜ into Oₜ₊₁: one observation per step.
+This integration had been delegating execution to the host's agent loop and
+letting the runtime only re-prompt, which handed the model an unbounded inner
+loop. It used it — 21 tool calls, 3 text blocks, one patch written at the end
+from whatever observation happened to be current.
+
+`SkillStateRuntime`, which owns that loop properly, exists at
+`packages/core/src/runtime.ts:218`, tested and used by `bench` and `cli`, and
+was never wired into this plugin. A comment here called the missing runtime a
+host limitation; it was an unwired dependency, and the difference is that one
+is fixed by connecting it.
+
+The boundary itself uses a capability that was present and unused:
+`SessionContext.tools` is handed to the `context` hook on every model request,
+so requests can alternate — one may act, the next gets no tools at all. That is
+§5.1's alternation with the host standing in for both `llm` and `execute`.
+
+**It does not work, and the default is off.** The premise — that a model asked
+again with nothing to call can only answer in text, and that the patch lives
+there — is false for the models tested. Measured with the boundary on: two text
+blocks, neither containing a `state_patch`, and the model writing prose instead
+("the saved execution state is still `{"total":0,"files":0}`… I will restart
+from `src/cfg1.ts`"). It performed the accounting in words and Σ never moved.
+With the boundary off the same task reaches cfg8; with it on it stops at cfg1.
+
+So it ships behind `SKILLSTATE_STEP_BOUNDARY=1`, correct and tested, and the
+default stays the behaviour that measurably goes further.
+
+**Also measured: `session.prompt` did start a turn — after being moved off the
+event loop.** Called inline from the handler reporting that turn's own
+completion, the host accepted the request and no turn ever began: context
+requests on the eight-file task went 2 → 4 once the call was deferred, with no
+error. An earlier reading of eleven context requests as "the runtime is driving"
+was wrong — those were the host's own loop. And the `catch` that swallowed the
+outcome is gone: a refused step request now records `{"promptFailure": …}` to
+the debug log, because a failure that is indistinguishable from a host declining
+is how a dead call path survives a day of work passing its own tests.
+
 **Fixed: a read-after-write race that served the model a state that had not
 moved.** The `context` hook learns of a patch from `session.text.ended`, which
 arrives on an async iterator the host does not wait for. The host starts its

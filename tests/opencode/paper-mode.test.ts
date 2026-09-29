@@ -1072,6 +1072,164 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(prompts).toEqual(['ses_root']);
   });
 
+  it('records a refused step request instead of swallowing it', async () => {
+    // The failure that hid for a long time. `session.prompt` can return
+    // without opening a turn, and a bare `catch { return false }` makes that
+    // indistinguishable from a host that simply declined — which is how a dead
+    // call path survived a day of work with the runtime "succeeding" in tests.
+    // The refusal has to leave a trace.
+    const debugLog = path.join(os.tmpdir(), `ss-dbg-${process.pid}-${Date.now()}.jsonl`);
+    process.env['SKILLSTATE_DEBUG_PROMPT'] = debugLog;
+    try {
+      const projectDir = paperProjectWithSpec({ step: 0 });
+      const harness = createPluginHarness({
+        projectDir,
+        promptRefuses: true,
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+            },
+          },
+        ],
+      });
+      cleanups.push(await harness.start());
+      await waitFor(
+        () =>
+          fs.existsSync(debugLog) &&
+          fs.readFileSync(debugLog, 'utf-8').includes('promptFailure'),
+        'the refusal to be recorded',
+      );
+      expect(fs.readFileSync(debugLog, 'utf-8')).toContain('session is busy');
+    } finally {
+      delete process.env['SKILLSTATE_DEBUG_PROMPT'];
+    }
+  });
+
+  it('withholds tools in report when the boundary is switched on', async () => {
+    // The mechanism itself, exercised end to end. It is off by default
+    // because the model does not answer a tool-less turn with a patch — but
+    // the wiring has to be tested in the state it ships in, or the flag is
+    // untested code in a default-off path.
+    process.env['SKILLSTATE_STEP_BOUNDARY'] = '1';
+    try {
+      const projectDir = paperProjectWithSpec({ step: 1 });
+      const harness = createPluginHarness({ projectDir });
+      cleanups.push(await harness.start());
+      const hook = harness.hooks.get('context')!;
+
+      // A tool result means an action just ran, so this request must report.
+      const afterAction: PaperContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages: [
+          { id: 'm1', role: 'user', content: [{ type: 'text', text: 'go' }] },
+          { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'reading' }] },
+          { id: 'm3', role: 'tool', content: [{ type: 'tool-result', result: { value: 'x' } }] },
+        ],
+      } as unknown as PaperContextEvent;
+      (afterAction as unknown as { tools: Record<string, unknown> }).tools = { read: {} };
+      await hook(afterAction as never);
+      expect(afterAction.tools).toEqual({});
+
+      // With a patch applied the next request may act again.
+      const afterPatch: PaperContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages: [
+          { id: 'm1', role: 'user', content: [{ type: 'text', text: 'go' }] },
+          {
+            id: 'm4',
+            role: 'assistant',
+            content: [
+              {
+                type: 'text',
+                text: '```json\n{"state_patch":{"step":2},"action":"read next"}\n```',
+              },
+            ],
+          },
+        ],
+      } as unknown as PaperContextEvent;
+      (afterPatch as unknown as { tools: Record<string, unknown> }).tools = { read: {} };
+      await hook(afterPatch as never);
+      expect(afterPatch.tools).toEqual({ read: {} });
+
+      // A tool message that is not an array, or carries no result part, is
+      // not an action. Treating either as one would demand a report turn the
+      // model has no reason to give.
+      const oddTool: PaperContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages: [{ id: 'm9', role: 'tool', content: 'a bare string' }],
+      } as unknown as PaperContextEvent;
+      (oddTool as unknown as { tools: Record<string, unknown> }).tools = { read: {} };
+      await hook(oddTool as never);
+      expect(oddTool.tools).toEqual({ read: {} });
+    } finally {
+      delete process.env['SKILLSTATE_STEP_BOUNDARY'];
+    }
+  });
+
+  it('records a non-Error refusal, and never lets the record break the loop', async () => {
+    // Two edges of the same diagnostic. A thrown string is still a refusal and
+    // must be legible; and an unwritable path must cost nothing but the log,
+    // because this runs inside the agent loop.
+    const oddLog = path.join(os.tmpdir(), `ss-odd-${process.pid}-${Date.now()}.jsonl`);
+    process.env['SKILLSTATE_DEBUG_PROMPT'] = oddLog;
+    try {
+      const projectDir = paperProjectWithSpec({ step: 0 });
+      const harness = createPluginHarness({
+        projectDir,
+        promptThrowsString: true,
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
+            },
+          },
+        ],
+      });
+      cleanups.push(await harness.start());
+      await waitFor(
+        () => fs.existsSync(oddLog) && fs.readFileSync(oddLog, 'utf-8').includes('promptFailure'),
+        'the refusal to be recorded',
+      );
+      expect(fs.readFileSync(oddLog, 'utf-8')).toContain('a bare string, not an Error');
+
+      // Same path, now unwritable. The run must survive it.
+      process.env['SKILLSTATE_DEBUG_PROMPT'] = '/nonexistent-dir/deeper/dbg.jsonl';
+      const again = paperProjectWithSpec({ step: 0 });
+      const second = createPluginHarness({
+        projectDir: again,
+        promptThrowsString: true,
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":1},"action":"read more"}\n```',
+            },
+          },
+        ],
+      });
+      cleanups.push(await second.start());
+      await waitFor(() => readState(again)['step'] === 1, 'the patch to land');
+      expect(readState(again)['step']).toBe(1);
+    } finally {
+      delete process.env['SKILLSTATE_DEBUG_PROMPT'];
+    }
+  });
+
   it('applies a recovered patch once, however often the host asks', async () => {
     // The event for the same message still arrives afterwards. If both paths
     // merged it, an accumulator would double its own total — a worse failure

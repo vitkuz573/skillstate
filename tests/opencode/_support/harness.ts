@@ -84,6 +84,8 @@ export interface HarnessOptions {
   prompts?: string[];
   /** Make `session.prompt` throw, as a host does for an ended session. */
   promptRefuses?: boolean;
+  /** Throw a bare string, so the non-`Error` branch of the diagnostic is real. */
+  promptThrowsString?: boolean;
 }
 
 /** The fake context plus the recordings the tests assert on. */
@@ -163,6 +165,7 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
       prompt: async (input: { sessionID: string }) => {
         prompts.push(input.sessionID);
         if (options.promptRefuses === true) throw new Error('session is busy');
+        if (options.promptThrowsString === true) throw 'a bare string, not an Error';
         return { id: 'msg_stub' } as never;
       },
     },
