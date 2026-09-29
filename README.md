@@ -901,6 +901,30 @@ model ignored the notice" and "the notice was never built" look identical from
 outside, which is exactly the ambiguity that sent the `tool-result` hunt after
 the model for a long time.
 
+`SKILLSTATE_DEBUG_STEPS=<path>` was added later, after a 30-file run answered
+`1523` correctly with its state at 25/30. Twenty-five patches were emitted and
+all twenty-five landed, so nothing was lost — which left three indistinguishable
+stories: the loop stopped driving, the model abandoned the protocol, or the step
+ceiling fired. The trace appends one line per turn with `{step, attempt, applied,
+done, total, drove, note}` and settled it: the driver was live on every single
+step, and the model had been narrating on 63% of them. `done` and `total` print
+`-1` and `null` rather than `0` when the state has no such field, because a trace
+reporting zero would be read as "the model did nothing" when the truth is "there
+was nothing there to count".
+
+Two switches exist so the cost trade-off is a measurement rather than an
+argument:
+
+| variable | default | what it changes |
+| --- | --- | --- |
+| `SKILLSTATE_MAX_STEPS=<n>` | 64 | the runtime-driven step ceiling; a malformed value is ignored rather than clamped, so a typo leaves the ceiling where the code says it is |
+| `SKILLSTATE_DRIVE=0` | driving on | paper's context replacement with the host's own batching left alone — 2.9× cheaper on the eight-file task, and a real option rather than a diagnostic |
+
+Note the direction. Driving the loop is the paper's mechanism and is the
+default: §5.1 line 12 has the runtime own execution. `SKILLSTATE_DRIVE=0` is the
+deviation, kept because it is the configuration that batches, and the
+difference between the two is the single largest cost effect measured here.
+
 One thing a unit test cannot tell you, and which is worth knowing before you
 trust any of the above: **does a mutation of `event.system` reach the model at
 all?** The unit tests prove the plugin pushes onto the array; only a live run
