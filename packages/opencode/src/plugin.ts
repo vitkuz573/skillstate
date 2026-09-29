@@ -94,7 +94,7 @@ import { FeedbackQueue } from './feedback.js';
 import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
-import { RuntimeDriver } from './runtime.js';
+import { INVALID_PATCH, RuntimeDriver } from './runtime.js';
 import { StepBoundary } from './step-boundary.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
@@ -124,6 +124,13 @@ export const CONTINUE_ACTION = 'continue';
  * next step is correct.
  */
 const lastAction = new Map<string, string>();
+/**
+ * Sessions whose step spent all `k + 1` attempts, for §6.4's synthetic
+ * observation. Session-scoped rather than global because the attempt budget is
+ * per session: one session stalling must not put an invalidation in front of
+ * another's next prompt.
+ */
+const invalidations = new Map<string, { readonly attempts: number; readonly lastError: string | undefined }>();
 
 /**
  * Whether an event says the host has finished a step.
@@ -539,6 +546,12 @@ export const SkillStatePlugin = Plugin.define({
                 runtime === undefined
                   ? undefined
                   : runtime.record(sessionID, last !== undefined);
+              if (verdict?.result === INVALID_PATCH) {
+                invalidations.set(sessionID, {
+                  attempts: verdict.attempt,
+                  lastError: feedback?.peek(sessionID),
+                });
+              }
               if (runtime !== undefined) {
                 // Deferred out of the event loop: asking the server to start a
                 // turn from inside the handler reporting that turn is re-entrant,
@@ -649,7 +662,16 @@ export const SkillStatePlugin = Plugin.define({
         if (Object.keys(state).length === 0) return;
         // Taken exactly once: `take` clears on read, so calling it twice would
         // show the correction to nobody.
-        const correction = feedback?.take(event.sessionID);
+        // §6.4: a step that spent all `k + 1` attempts produces a synthetic
+        // observation instead of the running correction, and the sentinel action
+        // is never executed. The invalidation is recorded by `record` on the
+        // turn that exhausted it, so this is where the model finally hears it.
+        const invalidation = invalidations.get(event.sessionID);
+        invalidations.delete(event.sessionID);
+        const correction =
+          invalidation === undefined
+            ? feedback?.take(event.sessionID)
+            : feedback?.takeUnlessInvalidated(event.sessionID, invalidation.attempts, invalidation.lastError);
         // The action the runtime is carrying out, which has to reach the model
         // through Oₜ because the messages it was sent in are cleared here.
         const continuation = runtime?.takeContinuation(event.sessionID);

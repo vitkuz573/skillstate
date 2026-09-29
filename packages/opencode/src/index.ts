@@ -80,7 +80,13 @@ export type {
 export { DEFAULT_DEDUPE_CAPACITY, PaperStateSink, isTextEnded } from './response-sink.js';
 export type { PaperStateSinkOptions, SinkOutcome, SinkRejection } from './response-sink.js';
 /** Corrective feedback for a rejected patch, carried in the A.4 observation. */
-export { FeedbackQueue, applyFeedback, applyObservation, feedbackFor } from './feedback.js';
+export {
+  FeedbackQueue,
+  applyFeedback,
+  applyObservation,
+  feedbackFor,
+  invalidPatchObservation,
+} from './feedback.js';
 export type { PendingFeedback } from './feedback.js';
 /** `SKILLSTATE_DEBUG_PROMPT` diagnostic — what the host actually handed us. */
 export { dumpPromptShape, dumpDrift } from './plugin.js';

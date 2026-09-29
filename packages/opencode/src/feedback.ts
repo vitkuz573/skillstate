@@ -105,6 +105,25 @@ const FEEDBACK_BY_REASON: Readonly<Record<SinkRejection, PendingFeedback>> = {
 };
 
 /**
+ * §6.4: the synthetic observation a failed step produces.
+ *
+ * Verbatim in shape from the paper — `Invalid state patch after N attempts:
+ * <last error>` — and the reason it exists rather than a retry continuing is
+ * that a step which has spent its attempts is a different event from one which
+ * is still trying. The model needs to know the step is over and the state was
+ * not written, or it has no way to tell a stalled loop from a slow one.
+ *
+ * Returns `''` when there is nothing to report, because `attempts` below one
+ * means no attempt was made and a synthetic observation describing zero
+ * attempts would be a sentence about nothing.
+ */
+export function invalidPatchObservation(attempts: number, lastError: string | undefined): PendingFeedback {
+  if (attempts < 1) return '';
+  const reason = lastError === undefined || lastError.length === 0 ? 'no valid patch was produced' : lastError;
+  return `Invalid state patch after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${reason}`;
+}
+
+/**
  * The correction text for one rejection.
  *
  * Returns `''` for a reason with no entry rather than throwing or returning
@@ -170,6 +189,30 @@ export class FeedbackQueue {
   /** Peek without consuming. For diagnostics and tests. */
   peek(sessionID: string): PendingFeedback | undefined {
     return this.pending.get(sessionID);
+  }
+
+  /**
+   * Take the pending correction only if no synthetic observation is owed.
+   *
+   * §6.4: when every attempt fails, the step's observation is the synthetic
+   * `Invalid state patch after N attempts: <last error>` — not the running
+   * correction, and not nothing. Delivering both would show the model two
+   * complaints, one of which is stale by definition: the correction belongs to
+   * the attempt that just ended, while the synthetic observation reports the
+   * whole step.
+   *
+   * The correction is still cleared when it is dropped. Holding it would put
+   * the same reason in front of the model a second time, on the next step,
+   * where it would be describing a step that is over.
+   */
+  takeUnlessInvalidated(sessionID: string, attempts: number, lastError: string | undefined): PendingFeedback | undefined {
+    const message = this.pending.get(sessionID);
+    this.pending.delete(sessionID);
+    // `||` and not `??`: a synthetic observation for zero attempts is the empty
+    // string, and `'' ?? message` keeps the empty string. That would silence a
+    // real correction with a sentence about nothing, which is the one outcome
+    // this method exists to avoid.
+    return invalidPatchObservation(attempts, lastError) || message;
   }
 
   /** Forget everything (test isolation, plugin reload). */

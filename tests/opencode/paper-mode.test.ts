@@ -1809,3 +1809,53 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(JSON.parse(fs.readFileSync(sub, 'utf-8')).state).toEqual({ step: 7 });
   });
 });
+
+describe('§6.4 end to end: a step that spent every attempt', () => {
+  // §6.4 verbatim: a synthetic observation of the form
+  // `Invalid state patch after N attempts: <last error>` is produced, and the
+  // sentinel action is never executed. Driven through the plugin rather than
+  // the queue alone, because the thing that can go wrong is the two never
+  // meeting: a correction recorded on one turn and an observation owed on the
+  // next.
+  function threeFailures(): unknown[] {
+    const events: unknown[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      events.push({
+        type: 'session.text.ended',
+        data: {
+          sessionID: 'ses_root',
+          assistantMessageID: `msg_${i}`,
+          ordinal: i,
+          text: 'no json block at all, just prose',
+        },
+      });
+      events.push({ type: 'session.step.ended', data: { sessionID: 'ses_root' } });
+    }
+    return events;
+  }
+
+  it('tells the model the step is over, and how many attempts it took', async () => {
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures() });
+    cleanups.push(await harness.start());
+    // The queue is drained and the invalidation recorded before the next prompt.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const { messages } = await runContext(projectDir, longTranscript());
+    const prompt = promptOf(messages);
+    expect(prompt).toContain('Invalid state patch after 3 attempts');
+    expect(prompt).toContain('no JSON block');
+  });
+
+  it('leaves the state untouched while the attempts are spent', async () => {
+    // The rollback guarantee: a rejected patch has no path into Σ, so there is
+    // nothing to undo. Three failures must leave the file exactly as it was.
+    const projectDir = paperProjectWithSpec({ step: 7 });
+    const before = fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8');
+    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures() });
+    cleanups.push(await harness.start());
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const after = fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8');
+    expect(after).toBe(before);
+  });
+});

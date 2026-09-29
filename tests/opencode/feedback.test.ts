@@ -12,7 +12,12 @@
  */
 
 import { describe as group, it, expect } from 'vitest';
-import { FeedbackQueue, applyFeedback, feedbackFor } from '@skillstate/opencode';
+import {
+  FeedbackQueue,
+  applyFeedback,
+  feedbackFor,
+  invalidPatchObservation,
+} from '@skillstate/opencode';
 import type { SinkOutcome, SinkRejection } from '@skillstate/opencode';
 
 const SPEC_REASONS: SinkRejection[] = [
@@ -208,5 +213,70 @@ group('applyFeedback', () => {
     expect(applyFeedback('', 'your patch was invalid')).toBe(
       '[state patch rejected] your patch was invalid',
     );
+  });
+});
+
+group('§6.4 — the synthetic observation a failed step produces', () => {
+  // §6.4 verbatim: "A synthetic observation of the form
+  // `Invalid state patch after N attempts: <last error>` is produced, and the
+  // sentinel action is never executed."
+  it('uses the paper\'s exact shape', () => {
+    expect(invalidPatchObservation(3, 'the JSON block did not parse')).toBe(
+      'Invalid state patch after 3 attempts: the JSON block did not parse',
+    );
+  });
+
+  it('says "attempt" in the singular for one attempt', () => {
+    // k = 0 is a legal configuration, and "1 attempts" would be a number
+    // disagreeing with its own noun.
+    expect(invalidPatchObservation(1, 'no block')).toBe('Invalid state patch after 1 attempt: no block');
+  });
+
+  it('says so plainly when there is no reason to report', () => {
+    // A model that narrated rather than emitting a block leaves no rejection
+    // reason behind, and "after 3 attempts: " with nothing after it tells the
+    // model nothing at all.
+    expect(invalidPatchObservation(3, undefined)).toBe(
+      'Invalid state patch after 3 attempts: no valid patch was produced',
+    );
+    expect(invalidPatchObservation(3, '')).toContain('no valid patch was produced');
+  });
+
+  it('produces nothing when no attempt was made', () => {
+    // A sentence about zero attempts is a sentence about nothing, and it would
+    // be delivered as though something had failed.
+    expect(invalidPatchObservation(0, 'x')).toBe('');
+    expect(invalidPatchObservation(-1, 'x')).toBe('');
+  });
+
+  it('replaces the running correction, rather than stacking on it', () => {
+    // Two complaints would be one too many: the correction belongs to the
+    // attempt that just ended, the synthetic observation reports the whole
+    // step. The correction is still consumed, or the next step opens with a
+    // reason describing a step that is over.
+    const queue = new FeedbackQueue();
+    queue.record('ses_1', { applied: false, rejection: 'malformed_json' });
+    const delivered = queue.takeUnlessInvalidated('ses_1', 3, 'malformed_json');
+    expect(delivered).toContain('Invalid state patch after 3 attempts');
+    expect(delivered).not.toContain('[state patch rejected]');
+    expect(queue.take('ses_1')).toBeUndefined();
+  });
+
+  it('delivers the plain correction when the step was not invalidated', () => {
+    // The queue holds the message; the `[state patch rejected]` marker is added
+    // when it is rendered, so what matters here is that the reason survives.
+    const queue = new FeedbackQueue();
+    queue.record('ses_1', { applied: false, rejection: 'no_block' });
+    expect(queue.takeUnlessInvalidated('ses_1', 0, undefined)).toContain('no JSON block');
+  });
+
+  it('keeps two sessions apart', () => {
+    // The attempt budget is per session, so one session stalling must not put
+    // an invalidation in front of another's next prompt.
+    const queue = new FeedbackQueue();
+    queue.record('ses_a', { applied: false, rejection: 'no_block' });
+    queue.record('ses_b', { applied: false, rejection: 'no_block' });
+    expect(queue.takeUnlessInvalidated('ses_a', 3, 'x')).toContain('Invalid state patch');
+    expect(queue.takeUnlessInvalidated('ses_b', 0, undefined)).toContain('no JSON block');
   });
 });
