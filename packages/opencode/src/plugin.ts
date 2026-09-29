@@ -95,12 +95,34 @@ import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
 import { RuntimeDriver } from './runtime.js';
+import { StepBoundary } from './step-boundary.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
 import { registerTools } from './tools.js';
 
 /** Stable plugin id — scopes plugin storage and identifies it in `/api/plugin`. */
 export const PLUGIN_ID = 'skillstate';
+
+/**
+ * Whether the host has just executed a tool for this request.
+ *
+ * A tool result in the transcript is the observable edge of "an action ran".
+ * There is no event that says so in a shape this plugin can trust — and an
+ * event the host does not wait for is what caused the read-after-write race
+ * fixed in `response-sink.ts`, so the transcript is the more reliable of the
+ * two here as well as the more available one.
+ */
+function hasToolResult(messages: ReadonlyArray<{ role: string; content: unknown }>): boolean {
+  const last = messages[messages.length - 1];
+  if (last === undefined || last.role !== 'tool') return false;
+  if (!Array.isArray(last.content)) return false;
+  return last.content.some(
+    (part) =>
+      typeof part === 'object' &&
+      part !== null &&
+      String((part as { type?: unknown }).type).startsWith('tool-result'),
+  );
+}
 
 /** How much of an observation the diagnostic records. */
 const DEBUG_OBSERVATION_CHARS = 400;
@@ -246,6 +268,10 @@ export const SkillStatePlugin = Plugin.define({
     // notice was followed by a write — the only half of the claim that is
     // actually about the model.
     const stateWrites = new Map<string, number>();
+    // §5.1's alternation. Paper mode only: in notes mode the transcript is
+    // intact and the model's own loop is the point, so forcing a report turn
+    // there would tax a mode that has no problem to solve.
+    const boundary = new StepBoundary();
     // The step loop. Present in paper mode only, where the context is
     // replaced and the model therefore cannot fall back on the transcript to
     // keep going; see runtime.ts for why this belongs in code.
@@ -306,13 +332,29 @@ export const SkillStatePlugin = Plugin.define({
               const key = scopeFor(event.data.sessionID);
               turnsSinceWrite.set(key, 0);
               stateWrites.set(key, (stateWrites.get(key) ?? 0) + 1);
+              // The model has accounted for the step, so the next request may
+              // act again. A rejected patch leaves the phase alone on purpose:
+              // §6.3 re-asks for the same step rather than letting the model
+              // act before it has recorded anything.
+              boundary.patchApplied(event.data.sessionID);
               // ── The runtime owns the step ────────────────────────────────
               // An applied patch whose action is not terminal means the
               // procedure has more steps, and the model has just told us
-              // what the next one is. Requesting it is the plugin's half of
-              // Algorithm 1 — the half that was missing, and whose absence
-              // was patched over with three prompts that did not work.
-              await runtime?.advance(event.data.sessionID, outcome.action);
+              // what the next one is.
+              //
+              // Deferred out of the event loop on purpose. Measured: called
+              // inline, the host accepted the request and no turn ever began —
+              // the run simply ended after the patch, with the runtime
+              // convinced it had advanced. Asking the server to start a turn
+              // from inside the handler that is reporting that turn's own
+              // completion is re-entrant, and the request is dropped. Yielding
+              // first is not a politeness; it is the difference between the
+              // loop turning and it not.
+              const sessionID = event.data.sessionID;
+              const action = outcome.action;
+              setTimeout(() => {
+                void runtime?.advance(sessionID, action);
+              }, 0);
             }
           }
         }
@@ -344,6 +386,24 @@ export const SkillStatePlugin = Plugin.define({
       const state = store.read(scope);
 
       if (mode === 'paper') {
+        // ── §5.1's step boundary ──────────────────────────────────────────
+        // One request may act; the next must account for it. `tools` is
+        // handed to this hook on every model request, so the cycle is
+        // enforced by withholding the tools rather than by asking in prose.
+        // See step-boundary.ts for why delegation to the host's agent loop
+        // is not the same thing.
+        const target = event as unknown as PaperContextEvent;
+        // A tool result in the incoming transcript means the host has just
+        // executed an action for this session. That is the observable edge of
+        // §5.1's `execute(aₜ, Σₜ₊₁)`, and it is what moves the session from
+        // `act` to `report`: the next request must account for what it just
+        // did, not do something else.
+        if (hasToolResult(target.messages)) {
+          boundary.actionTaken(event.sessionID);
+        }
+        if (boundary.reportRequired(event.sessionID)) {
+          target.tools = {};
+        }
         // A session that has saved nothing yet has no Σₜ to show, and
         // replacing the context with an empty state block before the agent
         // has done anything would only lose the task. Stay inert.

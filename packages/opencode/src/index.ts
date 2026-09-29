@@ -86,6 +86,8 @@ export type { PendingFeedback } from './feedback.js';
 export { dumpPromptShape, dumpDrift } from './plugin.js';
 /** The runtime that owns the paper-mode step loop. */
 export { RuntimeDriver, DEFAULT_MAX_STEPS } from './runtime.js';
+/** §5.1's one-observation-per-step boundary, enforced by withholding tools. */
+export { StepBoundary, isTerminalAction } from './step-boundary.js';
 export type { RuntimeDriverOptions, RuntimeStep } from './runtime.js';
 /** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
 export {

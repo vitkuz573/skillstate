@@ -116,6 +116,30 @@ export interface PaperContextEvent {
     metadata?: unknown;
   }>;
   system?: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  /**
+   * The tools the host will offer the model for THIS request.
+   *
+   * ── Why the plugin touches this at all ─────────────────────────────────
+   *
+   * §5.1 gives the runtime one `execute(aₜ, Σₜ₊₁)` per step and one
+   * observation per step: the model states an action, the runtime runs it, and
+   * the result comes back as the next Oₜ. There is no loop in that design for
+   * a model to do twenty things inside, because the model is never given one.
+   *
+   * Delegating execution to the host's agent loop — which is what this
+   * integration does — gives the model exactly that loop, and it uses it: 21
+   * tool calls, 3 text blocks, and a single state patch written at the end
+   * from whatever observation happened to be current. Measured, repeatedly, on
+   * two models.
+   *
+   * So the step boundary is enforced here instead. Alternating requests get
+   * tools and then do not: one request may act, the next must report. A model
+   * that has just run an action and is asked again with no tools available can
+   * only answer in text — which is where `state_patch` lives. That reproduces
+   * §5.1's alternation with the host as both the `llm` and the `execute`, and
+   * it needs no capability the plugin does not already have.
+   */
+  tools?: Record<string, unknown>;
 }
 
 /**

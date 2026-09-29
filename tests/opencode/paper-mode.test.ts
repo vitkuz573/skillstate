@@ -1041,6 +1041,37 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(readState(projectDir)['step']).toBe(1);
   });
 
+  it('requests the next step off the event loop, not inside it', async () => {
+    // Measured: called inline, the host accepted the request and no turn ever
+    // began — the run ended after the patch while the runtime believed it had
+    // advanced. Asking the server to start a turn from inside the handler
+    // reporting that turn's own completion is re-entrant, and the request is
+    // dropped. A test that calls the hook and checks immediately cannot see
+    // this; the assertion has to cross a real timer.
+    const prompts: string[] = [];
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      prompts,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    // Still nothing: the request is queued, not made.
+    expect(prompts).toEqual([]);
+    await waitFor(() => prompts.length > 0, 'the deferred step request');
+    expect(prompts).toEqual(['ses_root']);
+  });
+
   it('applies a recovered patch once, however often the host asks', async () => {
     // The event for the same message still arrives afterwards. If both paths
     // merged it, an accumulator would double its own total — a worse failure
