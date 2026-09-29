@@ -353,11 +353,23 @@ export interface PaperPromptOptions {
    * before the model could see it. The model was left holding (P, Σₜ, Oₜ) and
    * a state that had moved, with nothing saying why it was being asked again.
    *
-   * Oₜ is the paper's channel for the environment's reply, and a runtime
-   * requesting the next step is exactly that: something the environment did,
-   * not part of the operator's specification. So it goes where a rejected
-   * patch's correction already goes, for the same reason, and A.4 stays
-   * byte-identical.
+   * It went into Oₜ because a runtime requesting the next step looked like
+   * something the environment did, and Oₜ is the environment's channel. That
+   * reasoning was wrong in a way only measurement found. §2 says the agent
+   * receives "only Oₜ — never prior observations or ACTIONS", and this put an
+   * action there. The model started answering "I'll read cfg3.ts next, as
+   * directed by the observation" and then reading cfg3.ts: it obeyed a stored
+   * order instead of choosing, made 54 reads for thirty files, and used grep
+   * three times as a side errand where a control with no step driver read one
+   * file, ran ONE grep and finished in six calls. The order was its own past
+   * action, so it never looked for a better way than the one already written
+   * down.
+   *
+   * OFF by default now. The gap this was built for is real and still open — a
+   * re-prompted model sees no reason it was re-prompted — but the answer is the
+   * environment REPORTING what happened, not the model being told what to do.
+   * Kept because the honest fix to that gap has not been measured yet, and a
+   * diff of guesses is worth less than the mistake that is here.
    */
   continuation?: string;
 }
