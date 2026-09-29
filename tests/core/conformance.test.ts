@@ -104,6 +104,42 @@ group('§10.2 conformance harness', () => {
     );
   });
 
+  it('1b. A.4 is byte-identical to the template in the paper document itself', () => {
+    // Check 1 pins the prompt against a literal written in this file. That
+    // literal is a transcription, and a transcription can be edited to match a
+    // change in the code — which is how a byte-verbatim requirement quietly
+    // stops being byte-verbatim.
+    //
+    // So the template is re-read from `state.md` §5.2 at test time and the two
+    // are compared. Editing both the code and the literal above still fails
+    // here, because the document is the third party and it is not ours.
+    //
+    // Skipped rather than failed when the document is absent, so the published
+    // package — which does not ship a paper — still runs this suite.
+    const paperPath = path.resolve(__dirname, '..', '..', 'state.md');
+    if (!fs.existsSync(paperPath)) {
+      // The published package does not ship the paper. Skipping is honest here;
+      // failing would make the suite depend on a file the consumer never has.
+      return;
+    }
+    const source = fs.readFileSync(paperPath, 'utf-8');
+    const fenced = /````text\n([\s\S]*?)\n````/.exec(source);
+    expect(fenced, '§5.2 template fence not found in state.md').not.toBeNull();
+
+    const fromPaper = fenced![1]!
+      .replace('⟨instructions⟩', 'INSTRUCT')
+      .replace('⟨state⟩', '{"mood":"calm","count":2}')
+      .replace('⟨observation content⟩', 'OBSERVATION');
+
+    const produced = new PromptTransformer().formatPaper(
+      { ...SPEC, instructions: 'INSTRUCT' },
+      { mood: 'calm', count: 2 },
+      { ...obs('OBSERVATION'), content: 'OBSERVATION' },
+    );
+
+    expect(produced).toBe(fromPaper);
+  });
+
   it('2. ⊕ exhaustiveness — the §3.2 examples, including non-mutation', () => {
     // "Run the §3.2 examples and assert exact equality of the results,
     // including nested delete, array replacement, and non-mutation of the
