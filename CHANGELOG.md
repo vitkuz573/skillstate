@@ -92,6 +92,53 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
+**Also measured, and it did not fix the bug: `HOST_ACTION_NOTE`.** The
+breadth run — a second task shape, eight files, each hiding a constant among
+decoys — exposed a real defect. On the eight-file task paper mode applied
+correct patches and then **stopped after the first file**, three runs in a row.
+The state machinery was fine; the loop never turned.
+
+The cause is in A.4: it tells the model to emit `{state_patch, action}` and
+never says who executes `action`, because in the paper a runtime does.
+Algorithm 1 has the runtime run aₜ and feed Oₜ₊₁ back. In OpenCode the executor
+is the host's agent loop, which the model cannot know about, so it writes
+`"action": "read src/cfg2.ts"` and waits for something that will never come.
+
+`HOST_ACTION_NOTE` states the fact — the action is a label, the loop turns on a
+real tool call — in the system slot, which `applyPaperContext` already replaced
+and had left as an unused `systemPrefix` parameter. It is deliberately not in
+P: P is Appendix A.4 kept byte-identical, and a correction injected there would
+move with the state it is meant to accompany.
+
+**It did not work.** Measured, twice:
+
+| model | system note | discipline moved into P |
+| --- | --- | --- |
+| `big-pickle` | stopped after cfg1 | — |
+| `space-bunny-free` | stopped after cfg2 | stopped after cfg3 |
+
+Two free models, three placements, the same dead end — one file further each
+time the instruction was moved closer to A.4's directive, and never a
+complete run. So the note is kept, with the same caveat as the drift notice:
+it states a true fact about the wiring and it is not known to help.
+
+Worth being blunt about what that means for the claim. A 70.4% saving measured
+on a task the model *completes* does not extend to tasks where the loop stalls,
+and a model that stalls after one file is not paying paper mode's per-step cost
+at all. The number is still what it was measured to be, on the task it was
+measured on. It is not a general result, and the honest summary is that paper
+mode's O(1) mechanism depends on the model being willing to drive its own loop,
+which the free models available here are not.
+
+**A note on what is now known about the host.** Two prompt-level additions
+measured as doing nothing, which raised a fair question: is `event.system`
+read at all after a plugin mutates it? A unit test cannot answer that — it
+proves the plugin pushed onto the array, not that the host used it. Planting a
+marker in the state file and asking the model to quote it back returns the
+marker verbatim, so the channel is live and those were real results about the
+model. Recorded in the README because the next person to add a prompt and see
+it ignored will want to check this before blaming the model twice.
+
 **Also measured: the counter counts MODEL REQUESTS, not turns.** The model
 batches tool calls — 20 reads took 6 requests, 40 reads took 12, 70 reads took
 27. A threshold described in "turns" is off by roughly 3×, so the constant is

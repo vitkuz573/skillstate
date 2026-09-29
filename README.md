@@ -890,6 +890,21 @@ observation is visible on sight. Use `opencode run --standalone` for it: the
 plugin lives in a background server, so environment variables set on the CLI
 never reach it.
 
+`SKILLSTATE_DEBUG_DRIFT=<path>` answers the other half — not what the host
+sent, but what the model did about what we sent — appending
+`{scope, turns, notice, writes}` per model request. It exists because "the
+model ignored the notice" and "the notice was never built" look identical from
+outside, which is exactly the ambiguity that sent the `tool-result` hunt after
+the model for a long time.
+
+One thing a unit test cannot tell you, and which is worth knowing before you
+trust any of the above: **does a mutation of `event.system` reach the model at
+all?** The unit tests prove the plugin pushes onto the array; only a live run
+proves the host reads it. It does — planting a marker in the state file and
+asking the model to quote it back returns the marker verbatim. So when a
+prompt-level addition measures as doing nothing, that is a result about the
+model, not about a dead channel.
+
 Two real prompt-layer bugs were found the same way and are fixed: the live
 user instruction was rendered into A.4's observation slot, which the paper
 reserves for the environment's reply, so a model treated the user's own
