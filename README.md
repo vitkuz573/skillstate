@@ -678,14 +678,18 @@ project's record** rather than an optional side channel, and — after
 `DRIFT_NOTICE_AFTER_TURNS` model requests with no change — that the file has
 not moved.
 
-**Be clear about what that second half is worth.** It was measured, and on the
-weakest model in the catalogue it did nothing: a 70-file run, notice sent at
-request 12, 26 requests after it, zero writes. A model told a fact about its own
-silence keeps being silent. The notice is kept because it is honest and cheap,
-not because it is proven to help. If you need the state to be load-bearing
-rather than merely available, that is what [paper mode](#two-modes) is for: it
-replaces the context, so a model that ignores the state loses access to its own
-work instead of merely failing to record it.
+**Be clear about what that second half is worth.** It was measured twice, on
+two models, and it did nothing: a 40-file run, notice sent at request 12, 30
+requests after it, zero writes — while the model answered the task correctly
+throughout. A model told a fact about its own silence keeps being silent, and
+this one never calls `skillstate_update` in a long read-only run. The notice is
+kept because it is honest and cheap, not because it is proven to help.
+
+Notes mode is therefore advisory, and honestly so. If you need the state to be
+load-bearing rather than merely available, that is what [paper
+mode](#two-modes) is for: it replaces the context with `(P, Σₜ, Oₜ)`, so the
+runtime owns the step and a model that ignores the state has nothing to fall
+back on.
 
 State resolves from the plugin's own `ctx.location.project.canonical`, not
 from `process.cwd()` — one OpenCode v2 server serves many projects, so the
