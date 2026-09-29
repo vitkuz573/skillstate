@@ -673,6 +673,20 @@ notes are a side channel rather than the task. It contains no "you must", no
 "always", and no output format, because that framing is what turned a
 persistence aid into a prompt override the first time round.
 
+For a project that *has* a state file, the fragment says the state **is the
+project's record** rather than an optional side channel, and — after
+`DRIFT_NOTICE_AFTER_TURNS` model requests with no change — that the file has
+not moved.
+
+**Be clear about what that second half is worth.** It was measured, and on the
+weakest model in the catalogue it did nothing: a 70-file run, notice sent at
+request 12, 26 requests after it, zero writes. A model told a fact about its own
+silence keeps being silent. The notice is kept because it is honest and cheap,
+not because it is proven to help. If you need the state to be load-bearing
+rather than merely available, that is what [paper mode](#two-modes) is for: it
+replaces the context, so a model that ignores the state loses access to its own
+work instead of merely failing to record it.
+
 State resolves from the plugin's own `ctx.location.project.canonical`, not
 from `process.cwd()` — one OpenCode v2 server serves many projects, so the
 process cwd is simply the wrong answer. The plugin is inert when the project

@@ -871,7 +871,7 @@ describe('the plugin in notes mode (the default)', () => {
 
     // Silence long enough to drift.
     for (let i = 0; i < DRIFT_NOTICE_AFTER_TURNS; i += 1) await call();
-    expect(await call()).toContain('turns have passed without a change');
+    expect(await call()).toContain('has not changed across');
   });
 
 });

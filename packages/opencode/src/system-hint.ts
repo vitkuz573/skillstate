@@ -63,14 +63,20 @@ export function renderStateForHint(state: Record<string, unknown>): string {
 }
 
 /**
- * How many turns may pass with the state untouched before the drift notice
- * fires.
+ * How many MODEL REQUESTS may pass with the state untouched before the drift
+ * notice fires.
+ *
+ * **"Requests", not "turns".** Measured on the weakest model in the
+ * catalogue: 20 file reads took 6 requests, 40 reads took 12, 70 reads took
+ * 27. The model batches tool calls, so a request is worth several file reads
+ * and a threshold described in "turns" is off by a factor of three. The
+ * number here is the unit the hook can actually count.
  *
  * 12 is chosen from the corpus rather than taste: the average run in the
- * host's own store showed the model ~29,900 prompt tokens per step, so a
- * dozen silent steps is roughly 350k tokens re-sent for a record that never
- * moved. Low enough to catch a drift early, high enough that an agent
- * legitimately reading five files in a row does not get nagged.
+ * host's own store showed the model ~29,900 prompt tokens per request, so a
+ * dozen silent requests is roughly 350k tokens re-sent for a record that
+ * never moved. High enough that an agent reading five files in a row is not
+ * nagged.
  */
 export const DRIFT_NOTICE_AFTER_TURNS = 12;
 
@@ -132,7 +138,7 @@ function purposeLine(initialized: boolean, statePath: string): string {
  * is wallpaper, and after the second copy nobody reads it.
  */
 export function driftNotice(turnsSinceWrite: number): string {
-  return `Note: ${turnsSinceWrite} turns have passed without a change to this state file.`;
+  return `Note: this state file has not changed across the last ${turnsSinceWrite} steps of work.`;
 }
 
 /**

@@ -37,7 +37,7 @@ were rewritten. The O(1) test was also comparing two transcripts with
 *different* latest instructions and passing only because of the pin; it now
 varies only history depth, which is what the claim is about.
 
-**Added: an initialized project is described as a record, and drift is noticed.**
+**Added: an initialized project is described as a record.**
 
 The failure this addresses: a user runs `skillstate init` precisely because the
 work needs cross-turn memory, and a model that then stops writing drifts back
@@ -60,16 +60,49 @@ fragment asserts is *true*:
   projects, two correct descriptions; collapsing them would be the opposite
   fix.
 
-Plus **drift detection**. After `DRIFT_NOTICE_AFTER_TURNS` (12) turns without
-a state change the fragment says so once: *"N turns have passed without a
-change to this state file."* The threshold comes from the corpus, not taste —
-the average run showed the model ~29,900 prompt tokens per step, so a dozen
-silent steps is roughly 350k tokens re-sent for a record that never moved. The
-counter is per scope and reset by the sink on every applied patch, because a
-counter that only climbs turns the notice into wallpaper.
+**Measured, and it did not work: telling a model about its own silence does not
+stop it.** Drift detection was added alongside this — after
+`DRIFT_NOTICE_AFTER_TURNS` model requests without a state change, the fragment
+says so — and then measured on the weakest model in the catalogue, which is the
+only model where "it should have worked" is a defensible assumption:
 
-It is feedback, not an order: a measured fact about what happened, which cannot
-displace the task the way the v1 injection did.
+| run | work | model requests | notice fired at | writes, ever | answer |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 8 files | 10 | never (short) | 0 | correct |
+| 2 | 20 files | 6 | never (short) | 0 | correct |
+| 3 | 40 files | 12 | request 12 — the last one | 0 | correct |
+| 4 | 70 files | 37 | request 12 | **0** | correct |
+
+Run 4 is the one that settles it: 26 model requests *after* the notice, and the
+state file was never written once. The notice was well-formed, the diagnostic
+confirms it was sent, and the model ignored it. A factual nudge about its own
+behaviour is not a control. The drift is real — zero writes on every read-only
+run, every model, every length — and the textual fix for it is not.
+
+What this says about the design is more useful than the failure: **enforcement
+cannot be a sentence in a prompt.** It has to be structural, and the structural
+version already exists — paper mode replaces the context with `(P, Σₜ, Oₜ)`, so
+a model that ignores the state does not merely fail to record, it loses access
+to its own work. In notes mode the transcript is intact and there is nothing
+stopping a model from reading the files again and paying for it. That is the
+honest difference between the two modes: not "paper saves more", but "paper
+cannot be walked away from".
+
+The notice is kept — it is honest, it costs a few tokens, and it may still help
+a model that does attend to its context — but it is documented as an
+unproven nudge rather than a fix, because that is what it is.
+
+**Also measured: the counter counts MODEL REQUESTS, not turns.** The model
+batches tool calls — 20 reads took 6 requests, 40 reads took 12, 70 reads took
+27. A threshold described in "turns" is off by roughly 3×, so the constant is
+documented in the unit the hook can count and the notice says "steps" rather
+than "turns".
+
+`SKILLSTATE_DEBUG_DRIFT=<path>` is what made this measurable: it appends
+`{scope, turns, notice, writes}` per request, which is the only way to tell
+*the notice was sent and ignored* from *the notice was never built*. Without
+it, run 3 — where the notice fired on the final request — and run 4 look
+identical, and the experiment would have concluded nothing.
 
 **Removed:** `packages/dsh` and the stash holding it. The DeepSeek Harness
 integration was never finished and is gone rather than left hanging.

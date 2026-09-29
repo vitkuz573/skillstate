@@ -168,7 +168,7 @@ describe('buildStateHint — never overrides the model', () => {
       initialized: true,
       turnsSinceWrite: DRIFT_NOTICE_AFTER_TURNS,
     });
-    expect(text).toContain(`${DRIFT_NOTICE_AFTER_TURNS} turns have passed without a change`);
+    expect(text).toContain(`last ${DRIFT_NOTICE_AFTER_TURNS} steps`);
     // Feedback, not an order. "you must write" would break the invariant;
     // "this has not moved" cannot displace the task.
     expect(text).not.toMatch(/\byou must\b|\balways\b|\bnever\b/i);
@@ -181,7 +181,7 @@ describe('buildStateHint — never overrides the model', () => {
       initialized: true,
       turnsSinceWrite: DRIFT_NOTICE_AFTER_TURNS - 1,
     });
-    expect(text).not.toContain('turns have passed');
+    expect(text).not.toContain('has not changed across');
   });
 
   it('does not nag an uninitialized project about drift', () => {
@@ -191,12 +191,12 @@ describe('buildStateHint — never overrides the model', () => {
       statePath: 'p.json',
       turnsSinceWrite: 500,
     });
-    expect(text).not.toContain('turns have passed');
+    expect(text).not.toContain('has not changed across');
   });
 
   it('defaults to no drift count when none is supplied', () => {
     const text = buildStateHint({ state: { goal: 'x' }, statePath: 'p.json', initialized: true });
-    expect(text).not.toContain('turns have passed');
+    expect(text).not.toContain('has not changed across');
   });
 
   it('never mentions the CTF spec, the accidental v1 default', () => {
