@@ -1878,3 +1878,70 @@ describe('§6.4 end to end: a step that spent every attempt', () => {
     expect(after).toBe(before);
   });
 });
+
+describe('Oₜ carries the environment reply, never the model\'s own action', () => {
+  // §2, verbatim: "The agent receives only Oₜ — never prior observations or
+  // actions."
+  //
+  // The runtime asked for the next step by putting the model's last action into
+  // Oₜ, which is an action in the channel reserved for the environment's reply.
+  // The model complied: "I'll read cfg3.ts next, as directed by the
+  // observation", and then read cfg3.ts. Fifty-four read calls for thirty files,
+  // and one grep used three times as a side errand.
+
+  async function observationIn(continuationFlag: string | undefined): Promise<string> {
+    if (continuationFlag === undefined) delete process.env['SKILLSTATE_CONTINUATION'];
+    else process.env['SKILLSTATE_CONTINUATION'] = continuationFlag;
+    try {
+      const projectDir = paperProjectWithSpec({ step: 1 });
+      const harness = createPluginHarness({
+        projectDir,
+        prompts: [],
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":2},"action":"read src/cfg2.ts"}\n```',
+            },
+          },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
+        ],
+      });
+      cleanups.push(await harness.start());
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // The SAME instance must build the prompt: the pending action lives on the
+      // RuntimeDriver that `setup` created, and a second plugin would start with
+      // an empty one. `runContext` spins up a fresh harness, which is why the
+      // first version of this test could not see a continuation at all.
+      const messages = longTranscript();
+      const payload: ContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages,
+        options: {},
+        agent: 'build',
+        model: { providerID: 'x', id: 'y' },
+        tools: {},
+      };
+      await harness.hooks.get('context')!(payload);
+      return promptOf(payload.messages);
+    } finally {
+      delete process.env['SKILLSTATE_CONTINUATION'];
+    }
+  }
+
+  it('does not put the action there by default', async () => {
+    const prompt = await observationIn(undefined);
+    expect(prompt).not.toContain('[next step');
+    expect(prompt).not.toContain('read src/cfg2.ts');
+  });
+
+  it('still puts it there when asked, so the cost of the old behaviour is measurable', async () => {
+    const prompt = await observationIn('1');
+    expect(prompt).toContain('[next step');
+    expect(prompt).toContain('read src/cfg2.ts');
+  });
+});

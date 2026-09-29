@@ -724,23 +724,27 @@ export const SkillStatePlugin = Plugin.define({
             spec: spec!,
             state,
             messages: raw,
-            // §5.1 line 12: `O_{t+1} ← execute(aₜ, Σ_{t+1})`. Oₜ is the
-            // RESULT of the model's last action, not the next action as an
-            // order. Putting the action there was this implementation's answer
-            // to a real gap — the model was being re-prompted with nothing
-            // saying why — and it turned the environment's channel into a
-            // command channel, and the model obeyed the command.
+            // §2, on Observation: "The agent receives only Oₜ — never prior
+            // observations or ACTIONS."
             //
-            // Measured, from the transcripts. With the action in Oₜ the model
-            // says "I'll read cfg3.ts next, as directed by the observation"
-            // and reads cfg3.ts. It made 54 `read` calls for thirty files and
+            // That is not an interpretation and it is not a preference. Putting
+            // the model's own previous action into Oₜ is putting an action into
+            // the channel the paper reserves for the environment's reply, and
+            // this implementation did it to close a real gap — the model was
+            // re-prompted with nothing saying why.
+            //
+            // It worked too well, which is how it was found. The model began
+            // answering "I'll read cfg3.ts next, as directed by the
+            // observation" and then reading cfg3.ts. It obeyed a stored order
+            // instead of choosing, made 54 `read` calls for thirty files, and
             // used grep three times as a side errand. A control with no step
-            // driver read one file, ran ONE grep, and finished in six calls.
+            // driver read one file, ran ONE grep and finished in six calls. The
+            // order was its own past action, so it never looked for a better
+            // way than the one it had already written down.
             //
-            // So the action is reported as having happened, not prescribed.
-            // `SKILLSTATE_CONTINUATION` restores the old wording for anyone who
-            // wants the old behaviour to measure.
-            ...(continuation === undefined || process.env['SKILLSTATE_CONTINUATION'] === '0'
+            // Off by default, therefore, and the env var restores the old
+            // behaviour for anyone who wants to measure what it cost.
+            ...(continuation === undefined || process.env['SKILLSTATE_CONTINUATION'] !== '1'
               ? {}
               : { continuation }),
             ...(correction === undefined ? {} : { feedback: correction }),
