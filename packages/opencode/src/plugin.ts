@@ -89,7 +89,8 @@ import { resolvePluginMode } from './mode.js';
 import type { PluginMode } from './mode.js';
 import { applyPaperContext, buildPaperPrompt } from './paper-mode.js';
 import type { PaperContextEvent } from './paper-mode.js';
-import { PaperStateSink } from './response-sink.js';
+import { FeedbackQueue } from './feedback.js';
+import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
 import { ProjectStateStore } from './state-store.js';
@@ -139,6 +140,9 @@ export const SkillStatePlugin = Plugin.define({
     // the sink validates every patch against it.
     const spec = mode === 'paper' ? specs.resolve(directory).spec : undefined;
     const sink = spec === undefined ? undefined : new PaperStateSink({ store, spec, scopeFor });
+    // One pending correction per session. Exists in paper mode only, because
+    // in notes mode there is no `state_patch` for the host to reject.
+    const feedback = spec === undefined ? undefined : new FeedbackQueue();
 
     await ctx.tool.transform((editor) => {
       registerTools(editor, { store, sessions, scopeFor });
@@ -160,7 +164,17 @@ export const SkillStatePlugin = Plugin.define({
           // A sink failure is a value, never a throw — an unhandled
           // rejection here would end the loop and silently stop both the
           // registry and the sink for the rest of the process's life.
-          if (sink !== undefined) await sink.ingest(event);
+          //
+          // The outcome is NOT discarded. Every rejection reason is queued as
+          // corrective feedback for the next prompt, because a model whose
+          // patch was refused and never told about it would otherwise be
+          // re-shown the identical context and keep failing silently.
+          if (sink !== undefined) {
+            const outcome = await sink.ingest(event);
+            if (feedback !== undefined && isTextEnded(event)) {
+              feedback.record(event.data.sessionID, outcome);
+            }
+          }
         }
       } catch {
         // The stream ends when the plugin unloads or the server goes away.
@@ -184,13 +198,21 @@ export const SkillStatePlugin = Plugin.define({
         // A session that has saved nothing yet has no Σₜ to show, and
         // replacing the context with an empty state block before the agent
         // has done anything would only lose the task. Stay inert.
+        //
+        // Note the feedback is deliberately NOT taken here: this early return
+        // happens before any prompt is built, so consuming the correction
+        // would drop it without ever showing it to the model.
         if (Object.keys(state).length === 0) return;
+        // Taken exactly once: `take` clears on read, so calling it twice would
+        // show the correction to nobody.
+        const correction = feedback?.take(event.sessionID);
         applyPaperContext(
           event as unknown as PaperContextEvent,
           buildPaperPrompt({
             spec: spec!,
             state,
             messages: event.messages as unknown as PaperContextEvent['messages'],
+            ...(correction === undefined ? {} : { feedback: correction }),
           }),
         );
         return;

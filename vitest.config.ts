@@ -19,6 +19,7 @@ const alias = [
   { find: /^@skillstate\/codex$/, replacement: src('codex') },
   { find: /^@skillstate\/mcp$/, replacement: src('mcp') },
   { find: /^@skillstate\/cli$/, replacement: src('cli') },
+  { find: /^@skillstate\/bench\/ab-cli$/, replacement: src('bench', 'ab-cli.ts') },
   { find: /^@skillstate\/bench$/, replacement: src('bench') },
 ];
 

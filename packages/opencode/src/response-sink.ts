@@ -103,7 +103,14 @@ interface TextEndedEvent {
   };
 }
 
-function isTextEnded(event: unknown): event is TextEndedEvent {
+/**
+ * Whether an event is a completed assistant text block.
+ *
+ * Exported so a consumer that needs the session id from the same event does
+ * not re-implement this shape check — a second copy of the guard would be a
+ * second thing to keep in step with the event's actual fields.
+ */
+export function isTextEnded(event: unknown): event is TextEndedEvent {
   if (typeof event !== 'object' || event === null) return false;
   const type = (event as { type?: unknown }).type;
   if (type !== 'session.text.ended') return false;

@@ -80,6 +80,7 @@ import type {
   ProceduralSpec,
   SkillState,
 } from '@skillstate/core';
+import { applyFeedback } from './feedback.js';
 
 /** The parts of the host's `context` event this module reads and writes. */
 export interface PaperContextEvent {
@@ -218,6 +219,15 @@ export interface PaperPromptOptions {
   spec: ProceduralSpec;
   state: SkillState;
   messages: Array<{ role: string; content: unknown }>;
+  /**
+   * A correction for a patch the integration rejected on the previous step,
+   * prepended to Oₜ by {@link applyFeedback}.
+   *
+   * It goes into the observation rather than the instructions because it is a
+   * fact about the environment, not part of the operator's specification. See
+   * `feedback.ts` for why that distinction matters.
+   */
+  feedback?: string;
 }
 
 /** What {@link buildPaperPrompt} decided, for tests and diagnostics. */
@@ -244,13 +254,20 @@ export interface PaperPrompt {
 export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   const { spec, state, messages } = options;
   const task = initialTask(messages);
-  const observation = latestObservation(messages);
+  const observed = latestObservation(messages);
+  // A rejected patch is itself an observation, so the correction rides in Oₜ
+  // and the A.4 template is untouched. The `observed` object keeps the
+  // host-derived source and timestamp; only the rendered content changes.
+  const observation: PaperObservation =
+    options.feedback === undefined
+      ? observed
+      : { ...observed, content: applyFeedback(observed.content, options.feedback) };
   const effective = proceduralSpecWithTask(spec, task);
   return {
     prompt: transformer.formatPaper(effective, state, observation),
     task,
     observation,
-    observationSource: observation.source,
+    observationSource: observed.source,
     discardedMessages: messages.length,
   };
 }

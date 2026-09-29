@@ -75,8 +75,11 @@ export type {
   PaperPromptOptions,
 } from './paper-mode.js';
 /** The Σₜ sink that closes the paper transition in the OpenCode host. */
-export { DEFAULT_DEDUPE_CAPACITY, PaperStateSink } from './response-sink.js';
+export { DEFAULT_DEDUPE_CAPACITY, PaperStateSink, isTextEnded } from './response-sink.js';
 export type { PaperStateSinkOptions, SinkOutcome, SinkRejection } from './response-sink.js';
+/** Corrective feedback for a rejected patch, carried in the A.4 observation. */
+export { FeedbackQueue, applyFeedback, feedbackFor } from './feedback.js';
+export type { PendingFeedback } from './feedback.js';
 /** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
 export {
   DEFAULT_PLUGIN_MODE,

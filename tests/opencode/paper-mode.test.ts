@@ -141,6 +141,56 @@ describe('A.4 is byte-exact', () => {
     );
   });
 
+  // ── Corrective feedback rides in Oₜ, never in P ────────────────────────
+  //
+  // A rejected state patch is a fact about the environment, so it belongs in
+  // the observation. Putting it in the instructions would (a) drift the prompt
+  // from A.4 and (b) inject a behavioural instruction into the one surface
+  // that is supposed to be the operator's spec.
+
+  it('carries a correction into the observation line', () => {
+    const built = buildPaperPrompt({
+      spec: SPEC,
+      state: { step: 1 },
+      messages: [tool('the test run finished')],
+      feedback: 'your previous response contained no JSON block',
+    });
+    expect(built.prompt).toContain(
+      'Latest Observation: [state patch rejected] your previous response contained no JSON block\nthe test run finished',
+    );
+  });
+
+  it('leaves the instructions byte-identical to A.4 when correcting', () => {
+    // The correction must not bleed into P. If it did, the prompt would no
+    // longer be A.4 and P would stop being the operator's specification.
+    const state = { step: 1 };
+    const messages = [tool('obs')];
+    const plain = buildPaperPrompt({ spec: SPEC, state, messages });
+    const corrected = buildPaperPrompt({
+      spec: SPEC,
+      state,
+      messages,
+      feedback: 'your patch was rejected',
+    });
+    // Everything before the observation line is unchanged.
+    const before = (prompt: string): string =>
+      prompt.slice(0, prompt.indexOf('Latest Observation:'));
+    expect(before(corrected.prompt)).toBe(before(plain.prompt));
+  });
+
+  it('keeps the observation source and timestamp from the host message', () => {
+    // Only the rendered content changes; the provenance does not, because a
+    // correction did not become the tool's output.
+    const built = buildPaperPrompt({
+      spec: SPEC,
+      state: {},
+      messages: [tool('obs')],
+      feedback: 'rejected',
+    });
+    expect(built.observationSource).toBe('tool');
+    expect(built.observation.timestamp).toBeGreaterThan(0);
+  });
+
   it('renders the state as compact JSON, not pretty-printed', () => {
     const built = buildPaperPrompt({
       spec: SPEC,
@@ -595,6 +645,202 @@ describe('the plugin closes the paper transition from the event stream', () => {
     await waitFor(() => readState(projectDir).step === 2, 'the patch to reach Σₜ');
 
     expect(readState(projectDir)).toEqual({ step: 2 });
+  });
+
+  // ── The regression this section exists for ──────────────────────────────
+  //
+  // `plugin.ts` used to discard the `SinkOutcome`, so a rejected patch
+  // produced a byte-identical next prompt. These tests assert the correction
+  // actually reaches the model, which is the whole point of the queue.
+
+  it('tells the model its patch was rejected on the next prompt', async () => {
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_bad',
+            ordinal: 0,
+            // No JSON fence at all: the model forgot the contract.
+            text: 'All finished, nothing more to do.',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    // The rejection is a value, not an error, so wait for it to be recorded.
+    await waitFor(
+      () => readState(projectDir).step === 1,
+      'the state to be left alone',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const payload: ContextEvent = {
+      sessionID: 'ses_root',
+      system: [],
+      messages: [user('the task'), tool('the test run finished')],
+      options: {},
+      agent: 'build',
+      model: { providerID: 'x', id: 'y' },
+      tools: {},
+    };
+    await harness.hooks.get('context')!(payload);
+
+    const prompt = promptOf(payload.messages);
+    expect(prompt).toContain('[state patch rejected]');
+    expect(prompt).toContain('no JSON block');
+    // And the tool result is still there, after the correction — the order the
+    // events actually happened in.
+    expect(prompt.indexOf('[state patch rejected]')).toBeLessThan(
+      prompt.indexOf('the test run finished'),
+    );
+  });
+
+  it('shows the correction once, not on every later prompt', async () => {
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_bad',
+            ordinal: 0,
+            text: 'no fence here',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const next = async (): Promise<string> => {
+      const payload: ContextEvent = {
+        sessionID: 'ses_root',
+        system: [],
+        messages: [user('the task'), tool('obs')],
+        options: {},
+        agent: 'build',
+        model: { providerID: 'x', id: 'y' },
+        tools: {},
+      };
+      await harness.hooks.get('context')!(payload);
+      return promptOf(payload.messages);
+    };
+
+    expect(await next()).toContain('[state patch rejected]');
+    // A correction that repeats forever is wallpaper: it stops carrying
+    // information and hides whether the failure is ongoing.
+    expect(await next()).not.toContain('[state patch rejected]');
+  });
+
+  it('does not show a correction from one session to another', async () => {
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_bad',
+            ordinal: 0,
+            text: 'no fence',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const payload: ContextEvent = {
+      sessionID: 'ses_other',
+      system: [],
+      messages: [user('a different task'), tool('obs')],
+      options: {},
+      agent: 'build',
+      model: { providerID: 'x', id: 'y' },
+      tools: {},
+    };
+    await harness.hooks.get('context')!(payload);
+    expect(promptOf(payload.messages)).not.toContain('[state patch rejected]');
+  });
+
+  it('shows no correction when the patch was applied', async () => {
+    const projectDir = paperProjectWithSpec({ step: 1 });
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_ok',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":5},"action":"continue"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await waitFor(() => readState(projectDir).step === 5, 'the patch to reach Σₜ');
+
+    const payload: ContextEvent = {
+      sessionID: 'ses_root',
+      system: [],
+      messages: [user('the task'), tool('obs')],
+      options: {},
+      agent: 'build',
+      model: { providerID: 'x', id: 'y' },
+      tools: {},
+    };
+    await harness.hooks.get('context')!(payload);
+    expect(promptOf(payload.messages)).not.toContain('[state patch rejected]');
+  });
+
+  it('keeps the correction out of notes mode, which has no patch to reject', async () => {
+    // Notes mode never sees a `state_patch`, so a correction there would be
+    // reporting a failure that did not happen.
+    const projectDir = makeProject();
+    const stateDir = path.join(projectDir, '.skillstate');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { decisions: ['x'] } }),
+    );
+    const harness = createPluginHarness({
+      projectDir,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_bad',
+            ordinal: 0,
+            text: 'no fence',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const payload: ContextEvent = {
+      sessionID: 'ses_root',
+      system: [],
+      messages: [user('the task'), tool('obs')],
+      options: {},
+      agent: 'build',
+      model: { providerID: 'x', id: 'y' },
+      tools: {},
+    };
+    await harness.hooks.get('context')!(payload);
+    const rendered = JSON.stringify(payload.messages) + JSON.stringify(payload.system);
+    expect(rendered).not.toContain('[state patch rejected]');
   });
 
   it('leaves Σₜ alone when the response is malformed', async () => {
