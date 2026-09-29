@@ -996,34 +996,48 @@ they are labelled accordingly. A live two-arm comparison cannot easily produce
 instances of one runtime; the core's `TokenTracker` measures the triad properly
 and the conformance suite pins that it does.
 
-**There are two numbers, and quoting only the flattering one is the error this
-project keeps undoing.**
+**The n=3 result does not support a token saving on this task, and the
+headline says so.**
 
-| at 30 files, both 30/30, both correct | value | paper is |
+| 30 files, n=3, all six runs 30/30 and correct | run 1 | run 2 | run 3 | median |
+| --- | --- | --- | --- | --- |
+| paper — prompt tokens | 2,211,504 | 1,211,662 | 1,613,699 | **1,613,699** |
+| notes — prompt tokens | 96,827 | 148,160 | 1,780,955 | **148,160** |
+
+Paper is **ten times more expensive at the median**. Against the control's best
+run it is 12.5× more expensive than paper's own best. There is no slicing of
+this data on which paper wins.
+
+**Why the control is sometimes so cheap: it is a strategy, not a mechanism.**
+Two of the three notes runs read one file and then ran **one grep** across
+`src/` for the `REAL_` constants — 6 and 9 tool calls — and both declared the
+deviation in their own output: *"I did not read the files one at a time, and I
+emitted one consolidated state patch instead of 30."* The third read all thirty
+one at a time, 65 calls, 1,780,955 tokens, costing roughly what paper cost. The
+control's cost is what the model chose to spend, and it chose a cheaper way two
+times out of three.
+
+**What survives is a bound, not a saving.**
+
+| uncached input per request | range | spread |
 | --- | --- | --- |
-| billed prompt tokens (input + cache_read) | 1,607,539 vs 2,015,473 | **1.25× cheaper** |
-| uncached input per request | 149,801 vs 1,342,356 | **8.96× cheaper** |
+| paper | 121,609 – 130,133 | **1.07×** |
+| notes | 36,413 – 1,240,321 | **34.06×** |
 
-**1.25× is the headline**, because it is what the run actually paid. §7's eq. 8
-predicts `(T+1)/2`, which at the measured T = 38 steps is **19.5×**. The gap is
-fifteen-fold and it has a name — cache pricing. Paper's prompt is 91% cache
-reads (a bounded context that repeats gets served from cache); the control's is
-33% (a history that keeps changing cannot be). The control re-sends nine times
-more fresh text, so on the quantity eq. 5 and eq. 8 actually describe — the size
-of the prompt — the mechanism delivers ~9×. It is the *billed* total that
-compresses, because the control's oversize history is largely cache-served.
+Paper's per-step cost is genuinely bounded; the control's varies by a factor of
+34 on the same task. That is the paper's shape, and it is a claim about
+**dispersion**. It is not a claim about cost, and the two must not be swapped —
+the control's best case beats paper's worst by an order of magnitude.
 
-The paper calls `(T+1)/2` an upper bound and not a deployment claim, for exactly
-this reason. This measurement is consistent with that caveat rather than against
-it. The compression belongs to OpenCode's prompt caching, not to the mechanism: a
-host billing cache reads at parity with fresh input would show the paper's
-ratios. We have not measured this provider's cache-read price, so no figure here
-is converted into money.
+**Three earlier figures in this file are withdrawn.** They reported 2.09×, then
+1.25×, then 8.96× on uncached input. All three were real arithmetic on real
+numbers, and all three were computed against a control that happened to read
+file-by-file that day. The 2.09× also compared an incomplete run against a
+complete one. None survived n=3. The pattern across the three is worth more than
+any of them: a saving figure quoted before the replicate is a hypothesis.
 
-An earlier figure in this file said 2.09×. It compared paper's median run, which
-finished 25 of 30 files, against the control's, which finished 30 — not the same
-work. With §5.1's retry loop in place paper completes all thirty, and the
-like-for-like number is the 1.25× above.
+The 70.4% figure earlier in this file stands for its own three-turn task and is
+unmeasured beyond it. It is not evidence about this one.
 
 Scaling from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the
 control **+735%**. The two numbers locate it — the control's
