@@ -120,6 +120,34 @@ paper's context replacement with the host's own batching left alone. It is also
 the cheapest paper configuration by 2.9×, which makes it an option rather than a
 diagnostic.
 
+**The crossover, measured.** Thirty files of forty lines each — 1,200 lines of
+observation, so the control's history has something to grow into. The lever is
+observation size, not file count: tiny files make a tiny transcript, which would
+rig the comparison in paper's favour by making the control's history too small
+to hurt.
+
+| arm | prompt tokens | of which input | tool calls | answer | state |
+| --- | --- | --- | --- | --- | --- |
+| paper — bounded context | **966,072** | 90,721 | 45 | correct | 25/30 |
+| notes — transcript | 2,052,736 | 1,502,583 | 64 | correct | 30/30 |
+
+**Paper is 2.13× cheaper at thirty files, having been 3.75× dearer at eight.**
+The two numbers say exactly where the saving comes from: the control's
+*uncached input* is 16.6× paper's, because a growing history is re-sent on every
+request, while paper's context is stable and therefore cache-local. Paper's
+`cache_read` is the higher of the two — a bounded context that repeats is cached;
+a history that keeps changing is not.
+
+Scaling from 8 files to 30 is a 3.75× larger task. Paper went 923,253 → 966,072,
+**+5%**. The control went 245,940 → 2,052,736, **+735%**. That is the O(1)
+against O(n²) claim showing up in a measurement rather than a proof, and it puts
+the crossover somewhere between 8 and 30 files.
+
+One caveat that does not resolve: paper answered correctly while its state ended
+25/30, and the control's ended 30/30 complete. At the crossover the cheap arm is
+also the one whose state lagged. Cheaper and correct, but less complete — a real
+trade, reported as one.
+
 **The paper's step boundary, implemented, behind a flag.** §5.1 gives the
 runtime `execute(aₜ, Σₜ₊₁)` and chains Oₜ into Oₜ₊₁: one observation per step.
 This integration had been delegating execution to the host's agent loop and

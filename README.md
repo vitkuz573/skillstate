@@ -931,15 +931,46 @@ turned out to be a bug in this repository rather than a fact about the method:
 - one malformed event could end the event loop and silently kill the state sink.
 
 With those fixed, a four-file accumulate task runs to completion: 11, 33, 66,
-110, each patch exact, final state naming every file, answer correct.
+110, each patch exact, final state naming every file, answer correct. The
+eight-file shape then runs 2/2 correct with a complete state.
 
-What is still open is whether that holds at n=3 per arm on the eight-file
-shape, and whether the saving survives once the state is actually used rather
-than merely written.
+**And then the sign of the result flipped, because the task was still too
+short.** On eight files, paper mode cost 923,253 prompt tokens against the
+control's 245,940 — 3.75× *dearer*, with every gate green on both sides. That is
+not a refutation of the 70.4%; it is outside its range. A saving needs a growing
+transcript to outrun a bounded prompt, and at 9–17 requests there is nothing to
+outrun.
 
-The paper's own §7 also notes that a bounded prompt does not help when the task
-is defined over the historical trajectory, and nothing here measures a long
-autonomous run.
+So the task was lengthened until one had something to outrun: 30 files of 40
+lines, 1,200 lines of observation. The lever is observation size rather than file
+count, because tiny files make a tiny transcript and would rig the comparison in
+paper's favour by making the control's history too small to hurt.
+
+| 30 files | paper | notes (control) |
+| --- | --- | --- |
+| prompt tokens | **966,072** | 2,052,736 |
+| of which uncached input | 90,721 | 1,502,583 |
+| tool calls | 45 | 64 |
+| answer | correct | correct |
+| final state | 25/30 | 30/30 |
+
+**Paper is 2.13× cheaper at 30 files, having been 3.75× dearer at 8.** Scaling
+from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the control
+**+735%**. The two numbers locate the mechanism — the control's uncached input
+is 16.6× paper's, because a growing history is re-sent every request, while
+paper's context is stable and therefore cache-local. Paper's `cache_read` is
+the *higher* of the two: a bounded context that repeats gets cached, a history
+that keeps changing does not. The saving is cache locality, not less text.
+
+One caveat does not resolve: paper answered correctly while its state ended
+25/30, and the control's ended complete. At the crossover the cheap arm is also
+the one whose state lagged — cheaper and correct, but less complete.
+
+What is still open is the same thing it was before, one scale further along:
+the crossover is bracketed between 8 and 30 files, not located, and the state
+completeness gap at the crossover is unaddressed. The paper's own §7 also notes
+that a bounded prompt does not help when the task is defined over the historical
+trajectory, and nothing here measures a long autonomous run.
 
 ## Development
 
