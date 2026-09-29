@@ -4,7 +4,7 @@
 // init` writes NO files into `~` — every piece of glue lives inside the
 // project and is committed, so a fresh clone works for the whole team:
 // - state dir `./.skillstate/skillstate.json` (per-project state + manifest);
-// - OpenCode: `"plugin": ["@skillstate/opencode"]` + `mcp.skillstate`
+// - OpenCode: `"plugins": ["@skillstate/opencode"]` AND `mcp.skillstate`
 //   spliced into the PROJECT `opencode.jsonc|json` (one timestamped backup
 //   per run; no baked env — everything resolves the state from its cwd);
 // - Claude: self-contained `.cjs` hook scripts + hook groups merged into the
@@ -98,7 +98,16 @@ export interface InstallManifest {
   /** Absolute path of the host-neutral SKILL.md (when opencode/claude wired). */
   skillPath?: string;
   hosts: {
-    opencode?: { mcp: { configPath: string; format: 'opencode-json' } };
+    opencode?: {
+      /** The project `opencode.jsonc|json` carrying the v2 `plugins` entry. */
+      config: { configPath: string };
+      /**
+       * Legacy v1 record (the MCP registration). Only ever READ, so a
+       * project initialised before the native-tools rewrite can still be
+       * uninstalled; a fresh install never writes it.
+       */
+      mcp?: { configPath: string; format: 'opencode-json' };
+    };
     claude?: {
       hooks: { configPath: string; scriptDir: string };
       mcp: { configPath: string; format: 'claude-mcp-json' };
@@ -427,9 +436,19 @@ export function removeSkillstateMcp(configText: string): { text: string; changed
 }
 
 /**
- * Splice `"@skillstate/opencode"` into the top-level `plugin` array of
- * OpenCode config text (creating the key when missing). A non-array
- * `plugin` key is left untouched and reported via `pluginSkipped`.
+ * Splice `"@skillstate/opencode"` into the top-level `plugins` array of
+ * OpenCode config text (creating the key when missing).
+ *
+ * OpenCode v2 renamed the config key from `plugin` to `plugins` and changed
+ * the entry shape; a v1 plugin does not run in v2 at all. A config written
+ * by an older skillstate therefore carries BOTH keys. This writes the v2
+ * entry and migrates the legacy one: the `plugin` array loses the
+ * skillstate string, and the key is removed when nothing else is left in
+ * it, so a project is never left with a dead v1 reference.
+ *
+ * A `plugins` key that is not an array is left untouched and reported via
+ * `pluginSkipped` — rewriting a value the installer does not understand
+ * would be worse than skipping it.
  */
 function spliceOpencodePlugin(
   text: string,
@@ -438,21 +457,54 @@ function spliceOpencodePlugin(
   if (root === null) {
     return { text, changed: false, pluginSkipped: false };
   }
-  const plugin = root.entries.find((e) => e.key === 'plugin');
-  if (plugin === undefined) {
+  // `root` is known non-null here (checked above), so every insertion point
+  // below is a real offset. Re-scanning after each mutation is required:
+  // the offsets shift as text is spliced in or out.
+  const reparse = (value: string) => findTopLevelObject(value);
+  let next = text;
+  let changed = false;
+
+  const plugins = root.entries.find((e) => e.key === 'plugins');
+  if (plugins === undefined) {
     const inserted = insertObjectEntry(
-      text,
+      next,
       root.braceStart,
-      'plugin',
+      'plugins',
       JSON.stringify(['@skillstate/opencode']),
     );
-    return { text: inserted.text, changed: inserted.changed, pluginSkipped: false };
-  }
-  if (text[plugin.valueStart] !== '[') {
+    next = inserted.text;
+    changed = inserted.changed;
+  } else if (next[plugins.valueStart] === '[') {
+    const result = insertArrayStringEntry(next, plugins.valueStart, '@skillstate/opencode');
+    next = result.text;
+    changed = result.changed;
+  } else {
     return { text, changed: false, pluginSkipped: true };
   }
-  const result = insertArrayStringEntry(text, plugin.valueStart, '@skillstate/opencode');
-  return { text: result.text, changed: result.changed, pluginSkipped: false };
+
+  // Legacy v1 `plugin` key: take our entry out, then drop the key when
+  // nothing of the user's is left in it. An empty `plugin: []` is worse
+  // than no key at all — it looks configured and loads nothing. Anything the
+  // user added stays.
+  const afterInsert = reparse(next);
+  const legacy = afterInsert?.entries.find((e) => e.key === 'plugin');
+  if (legacy !== undefined && next[legacy.valueStart] === '[') {
+    const removed = removeArrayStringEntry(next, legacy.valueStart, '@skillstate/opencode');
+    next = removed.text;
+    changed = changed || removed.changed;
+    const rootNow = reparse(next);
+    const legacyNow = rootNow?.entries.find((e) => e.key === 'plugin');
+    if (
+      rootNow !== null &&
+      rootNow !== undefined &&
+      legacyNow !== undefined &&
+      scanArray(next, legacyNow.valueStart).elements.length === 0
+    ) {
+      next = removeObjectEntry(next, rootNow.braceStart, 'plugin').text;
+      changed = true;
+    }
+  }
+  return { text: next, changed, pluginSkipped: false };
 }
 
 /** Project-local OpenCode config: existing `.jsonc`, else `.json`, else the created `.json`. */
@@ -563,8 +615,19 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
     let next = pluginResult.text;
     let changed = pluginResult.changed;
     if (pluginResult.pluginSkipped) {
-      say(`opencode: plugin key in ${configPath} is not an array — skipped plugin registration`);
+      say(`opencode: plugins key in ${configPath} is not an array — skipped plugin registration`);
     }
+    // BOTH integrations are registered, deliberately:
+    //
+    // - the `plugins` entry is the native tool path. It is typed, needs no
+    //   JSON-RPC round-trip, and is what the v2 plugin prefers;
+    // - the `mcp.skillstate` entry is the portable path. It is what every
+    //   other MCP-capable host reads, and it is the only way to reach this
+    //   state from a client that is not opencode.
+    //
+    // The two address the same file, so they can never disagree about what
+    // is saved; the native tools win on speed and typing, the MCP server
+    // wins on reach.
     const mcpResult = addSkillstateMcp(next, buildMcpEntry());
     if (mcpResult.changed) {
       next = mcpResult.text;
@@ -583,7 +646,7 @@ export async function autoInstall(options: InstallOptions): Promise<number> {
       }
     }
     say(`opencode: ${configPath} (${changed ? 'plugin + mcp registered' : 'already registered'})`);
-    manifest.hosts['opencode'] = { mcp: { configPath, format: 'opencode-json' } };
+    manifest.hosts['opencode'] = { config: { configPath } };
   }
 
   if (hosts.includes('claude')) {
@@ -855,20 +918,22 @@ async function uninstallMachine(home: string, dry: boolean, say: (line: string) 
 }
 
 /**
- * Splice the `"@skillstate/opencode"` string out of the project OpenCode
- * config's `plugin` array (leaving the rest of the JSONC intact). Returns
- * the spliced text and whether anything changed.
+ * Splice the `"@skillstate/opencode"` string out of BOTH the v2 `plugins`
+ * array and the legacy v1 `plugin` array (leaving the rest of the JSONC
+ * intact). Both are removed because a project may have been initialised by
+ * either version, and uninstall must leave neither behind.
  */
 function spliceOutOpencodePlugin(text: string): { text: string; changed: boolean } {
-  const root = findTopLevelObject(text);
-  if (root === null) {
-    return { text, changed: false };
+  let next = text;
+  let changed = false;
+  for (const key of ['plugins', 'plugin']) {
+    const entry = findTopLevelObject(next)?.entries.find((e) => e.key === key);
+    if (entry === undefined || next[entry.valueStart] !== '[') continue;
+    const removed = removeArrayStringEntry(next, entry.valueStart, '@skillstate/opencode');
+    next = removed.text;
+    changed = changed || removed.changed;
   }
-  const plugin = root.entries.find((e) => e.key === 'plugin');
-  if (plugin === undefined || text[plugin.valueStart] !== '[') {
-    return { text, changed: false };
-  }
-  return removeArrayStringEntry(text, plugin.valueStart, '@skillstate/opencode');
+  return { text: next, changed };
 }
 
 /**
@@ -879,7 +944,7 @@ function spliceOutOpencodePlugin(text: string): { text: string; changed: boolean
  */
 function dropEmptyOpencodeEntries(text: string): string {
   let next = text;
-  for (const key of ['mcp', 'plugin'] as const) {
+  for (const key of ['mcp', 'plugins', 'plugin'] as const) {
     const root = findTopLevelObject(next);
     const entry = root?.entries.find((e) => e.key === key);
     if (entry === undefined) {
@@ -895,6 +960,23 @@ function dropEmptyOpencodeEntries(text: string): string {
   return next;
 }
 
+/**
+ * The project OpenCode config path recorded in a manifest, from either the
+ * v2 `config` record or the legacy v1 `mcp` one. A manifest written before
+ * the native-tools rewrite has no `config` key, and uninstall still has to
+ * find its config to clean up.
+ */
+function opencodeConfigPathOf(host: unknown): string | undefined {
+  if (!isRecord(host)) return undefined;
+  for (const key of ['config', 'mcp'] as const) {
+    const record = host[key];
+    if (isRecord(record) && typeof record['configPath'] === 'string' && record['configPath'].length > 0) {
+      return record['configPath'];
+    }
+  }
+  return undefined;
+}
+
 /** True when a manifest `hosts` record carries well-shaped host entries. */
 function isValidHosts(hosts: unknown): hosts is InstallManifest['hosts'] {
   if (!isRecord(hosts)) {
@@ -902,7 +984,16 @@ function isValidHosts(hosts: unknown): hosts is InstallManifest['hosts'] {
   }
   const opencode = hosts['opencode'];
   if (opencode !== undefined) {
-    const mcp = isRecord(opencode) ? opencode['mcp'] : undefined;
+    // Accept the v2 record (`config.configPath`) and the legacy v1 one
+    // (`mcp.configPath`), so an uninstall can still clean up a project that
+    // was initialised before the native-tools rewrite.
+    const mcp = isRecord(opencode)
+      ? isRecord(opencode['config'])
+        ? opencode['config']
+        : isRecord(opencode['mcp'])
+          ? opencode['mcp']
+          : undefined
+      : undefined;
     if (!isRecord(mcp) || typeof mcp['configPath'] !== 'string') {
       return false;
     }
@@ -980,10 +1071,10 @@ export async function uninstall(options: UninstallOptions): Promise<number> {
 
   const hosts = manifest.hosts;
 
-  // opencode: mcp entry + plugin string spliced out of the project config.
-  const opencode = hosts['opencode'];
-  if (opencode !== undefined && fs.existsSync(opencode.mcp.configPath)) {
-    const configPath = opencode.mcp.configPath;
+  // opencode: mcp entry + plugin strings spliced out of the project config.
+  const opencodeConfigPath = opencodeConfigPathOf(hosts['opencode']);
+  if (opencodeConfigPath !== undefined && fs.existsSync(opencodeConfigPath)) {
+    const configPath = opencodeConfigPath;
     let text: string;
     try {
       text = fs.readFileSync(configPath, 'utf-8');

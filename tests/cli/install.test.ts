@@ -73,7 +73,13 @@ function initFlags(overrides: Partial<{ specPath: string; dryRun: boolean }> = {
   return { dryRun: false, ...overrides };
 }
 
-/** Host home + project with a realistic project opencode.jsonc (comments, existing mcp + plugin). */
+/**
+ * Host home + project with a realistic project opencode.jsonc: comments, an
+ * existing MCP server, and a LEGACY v1 `plugin` key. The legacy key is
+ * deliberate - it is what a config written by an older skillstate looks
+ * like, and the installer has to migrate it rather than leave a dead v1
+ * reference behind.
+ */
 function makeOpencodeHome(): {
   home: string;
   project: string;
@@ -420,24 +426,24 @@ describe('autoInstall — opencode only', () => {
     const manifest = readManifest(project);
     expect(manifest.version).toBe(2);
     expect(manifest.statePath).toBe(path.join(project, STATE_DIR_NAME, 'skillstate.json'));
-    expect(manifest.hosts['opencode']).toEqual({
-      mcp: { configPath, format: 'opencode-json' },
-    });
+    expect(manifest.hosts['opencode']).toEqual({ config: { configPath } });
     expect(manifest.hosts['claude']).toBeUndefined();
     expect(manifest.skillPath).toBe(path.join(project, '.claude', 'skills', 'skillstate', 'SKILL.md'));
 
-    // Project config: skillstate mcp added, plugin string appended, comments
-    // and existing entries intact, JSONC parses.
+    // Project config: the v2 `plugins` key carries the native plugin, the
+    // portable `mcp.skillstate` entry is registered, the user's own legacy
+    // `plugin` entry is left completely alone, and comments survive.
     const afterConfig = fs.readFileSync(configPath, 'utf-8');
-    expect(parseJsoncSafe(afterConfig)).toEqual(
-      expect.objectContaining({
-        mcp: expect.objectContaining({
-          existing: expect.objectContaining({ type: 'local' }),
-          skillstate: { type: 'local', command: ['npx', '-y', '@skillstate/mcp@^3'], enabled: true },
-        }),
-        plugin: ['some-npm-plugin', '@skillstate/opencode'],
-      }),
-    );
+    expect(parseJsoncSafe(afterConfig)).toEqual({
+      $schema: 'https://opencode.ai/config.json',
+      mcp: {
+        existing: { type: 'local', command: ['/bin/existing'] },
+        skillstate: { type: 'local', command: ['npx', '-y', '@skillstate/mcp@^3'], enabled: true },
+      },
+      plugin: ['some-npm-plugin'],
+      plugins: ['@skillstate/opencode'],
+    });
+    expect(afterConfig).toContain('// OpenCode config (test fixture)');
     expect(afterConfig).toContain('// OpenCode config (test fixture)');
 
     // One timestamped backup holding the ORIGINAL text.
@@ -459,6 +465,28 @@ describe('autoInstall — opencode only', () => {
     expect(fs.existsSync(path.join(project, 'skill-spec.json'))).toBe(true);
   });
 
+  it('migrates a legacy skillstate `plugin` entry into the v2 `plugins` key', async () => {
+    // The shape a previous install left behind: our entry in the v1 array.
+    // Re-init must move it, not duplicate it, and drop the emptied key.
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.jsonc');
+    fs.writeFileSync(
+      configPath,
+      '{"plugin": ["@skillstate/opencode"]}\n',
+      'utf-8',
+    );
+    const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    expect(code).toBe(0);
+    const parsed = parseJsoncSafe(fs.readFileSync(configPath, 'utf-8'));
+    expect(parsed).toEqual({
+      mcp: { skillstate: expect.objectContaining({ enabled: true }) },
+      plugins: ['@skillstate/opencode'],
+    });
+    // The v1 key is gone: a v1 plugin entry would not load in v2 anyway.
+    expect(parsed).not.toHaveProperty('plugin');
+  });
+
   it('creates project opencode.json when no project config exists (config detection independent of home marker)', async () => {
     const home = makeTmp();
     fs.mkdirSync(path.join(home, '.opencode', 'bin'), { recursive: true });
@@ -469,9 +497,9 @@ describe('autoInstall — opencode only', () => {
     const configPath = path.join(project, 'opencode.json');
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
       mcp: { skillstate: expect.objectContaining({ enabled: true }) },
-      plugin: ['@skillstate/opencode'],
+      plugins: ['@skillstate/opencode'],
     });
-    expect(readManifest(project).hosts['opencode']?.mcp.configPath).toBe(configPath);
+    expect(readManifest(project).hosts['opencode']?.config.configPath).toBe(configPath);
   });
 
   it('edits opencode.json when only the .json variant exists in the project', async () => {
@@ -482,19 +510,21 @@ describe('autoInstall — opencode only', () => {
     expect(code).toBe(0);
     const jsonPath = path.join(project, 'opencode.json');
     expect(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')).mcp.skillstate).toBeDefined();
-    expect(readManifest(project).hosts['opencode']?.mcp.configPath).toBe(jsonPath);
+    expect(readManifest(project).hosts['opencode']?.config.configPath).toBe(jsonPath);
   });
 
-  it('leaves a non-array plugin key untouched but still registers mcp', async () => {
+  it('leaves a non-array plugins key untouched but still registers mcp', async () => {
+    // Rewriting a value the installer does not understand would be worse
+    // than skipping it, so the malformed key survives verbatim.
     const home = makeTmp();
     const project = makeTmp();
     const configPath = path.join(project, 'opencode.jsonc');
-    fs.writeFileSync(configPath, '{"plugin": "not-an-array"}');
+    fs.writeFileSync(configPath, '{"plugins": "not-an-array"}');
     const code = await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
     expect(code).toBe(0);
     const after = fs.readFileSync(configPath, 'utf-8');
     expect(parseJsoncSafe(after)).toEqual({
-      plugin: 'not-an-array',
+      plugins: 'not-an-array',
       mcp: { skillstate: expect.objectContaining({ enabled: true }) },
     });
     expect(output()).toContain('not an array');
@@ -834,6 +864,80 @@ describe('uninstall — opencode rollback', () => {
     expect(fs.existsSync(path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME))).toBe(false);
     expect(fs.existsSync(path.join(project, STATE_DIR_NAME, 'skillstate.json'))).toBe(true);
     expect(output()).toContain('kept state');
+    expect(output()).toContain('Uninstalled.');
+  });
+
+  it('rolls back a project installed by the LEGACY (v1) manifest shape', async () => {
+    // A manifest written before the native-tools rewrite records the config
+    // path under `mcp`, not `config`. Uninstall must still find and clean
+    // the config, or a project is left with our glue and no way to remove it.
+    const home = makeTmp();
+    const project = makeTmp();
+    const configPath = path.join(project, 'opencode.json');
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    const manifest = readManifest(project);
+    const stateDir = path.join(project, STATE_DIR_NAME);
+    fs.writeFileSync(
+      path.join(stateDir, MANIFEST_FILE_NAME),
+      JSON.stringify(
+        {
+          version: 2,
+          installedAt: manifest.installedAt,
+          statePath: manifest.statePath,
+          skillPath: manifest.skillPath,
+          hosts: { opencode: { mcp: { configPath, format: 'opencode-json' } } },
+        },
+        null,
+        2,
+      ),
+    );
+    const code = await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } });
+    expect(code).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it('refuses to uninstall a manifest whose opencode record is unusable', async () => {
+    // A manifest whose opencode record carries neither a `config` nor a
+    // legacy `mcp` object is rejected. Uninstall then FAILS LOUDLY and
+    // changes nothing: silently reporting success while leaving the glue
+    // behind is the one outcome that would be a bug.
+    const home = makeTmp();
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    const manifest = readManifest(project);
+    const manifestPath = path.join(project, STATE_DIR_NAME, MANIFEST_FILE_NAME);
+    const statePath = path.join(project, STATE_DIR_NAME, 'skillstate.json');
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ ...manifest, hosts: { opencode: { nonsense: true } } }, null, 2),
+    );
+
+    const code = await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } });
+
+    expect(code).toBe(1);
+    expect(output()).toMatch(/manifest/i);
+    // Nothing was deleted: the config, the state and the manifest all stand.
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    expect(fs.existsSync(statePath)).toBe(true);
+    expect(fs.existsSync(path.join(project, 'opencode.json'))).toBe(true);
+  });
+
+  it('tolerates a manifest whose opencode config path is blank', async () => {
+    // `isValidHosts` checks the path is a string, not that it is non-empty.
+    // A blank path must not make the uninstall point at the filesystem root
+    // or throw — it is treated as "nothing recorded" and the rest of the
+    // rollback still runs.
+    const home = makeTmp();
+    const project = makeTmp();
+    await autoInstall({ cwd: project, home, flags: initFlags(), hosts: ['opencode'] });
+    const manifest = readManifest(project);
+    const stateDir = path.join(project, STATE_DIR_NAME);
+    fs.writeFileSync(
+      path.join(stateDir, MANIFEST_FILE_NAME),
+      JSON.stringify({ ...manifest, hosts: { opencode: { config: { configPath: '' } } } }, null, 2),
+    );
+    const code = await uninstall({ cwd: project, home, flags: { removeState: true, machine: false, dryRun: false } });
+    expect(code).toBe(0);
     expect(output()).toContain('Uninstalled.');
   });
 
