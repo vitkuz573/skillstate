@@ -126,12 +126,16 @@ observation size, not file count: tiny files make a tiny transcript, which would
 rig the comparison in paper's favour by making the control's history too small
 to hurt.
 
-| arm | prompt tokens | of which input | tool calls | answer | state |
+| arm, n=3 | prompt tokens, median | range | uncached input, range | correct | state |
 | --- | --- | --- | --- | --- | --- |
-| paper — bounded context | **966,072** | 90,721 | 45 | correct | 25/30 |
-| notes — transcript | 2,052,736 | 1,502,583 | 64 | correct | 30/30 |
+| paper — bounded context | **966,072** | 594,894 – 1,390,359 | 52,545 – 144,015 | 2 / 2 | 25/30, 30/30 |
+| notes — transcript | 2,015,473 | 490,262 – 2,052,736 | 241,061 – 1,502,583 | 3 / 3 | 30/30 ×3 |
 
-**Paper is 2.13× cheaper at thirty files, having been 3.75× dearer at eight.**
+A third paper run was killed by us to free the machine and is excluded rather
+than counted as a failure.
+
+**Paper is 2.09× cheaper at the median at thirty files, having been 3.75×
+dearer at eight.**
 The two numbers say exactly where the saving comes from: the control's
 *uncached input* is 16.6× paper's, because a growing history is re-sent on every
 request, while paper's context is stable and therefore cache-local. Paper's
@@ -143,10 +147,22 @@ Scaling from 8 files to 30 is a 3.75× larger task. Paper went 923,253 → 966,0
 against O(n²) claim showing up in a measurement rather than a proof, and it puts
 the crossover somewhere between 8 and 30 files.
 
+**The spread corrects an earlier claim in this file.** The three-turn table
+reports paper's spread as flat to within 60 tokens against the control's ±18%,
+and calls that the mechanism visible in one number. Here it inverts: paper's
+relative MAD is 38%, the control's 1.8%. That flatness belonged to the short
+task, not to paper mode. What survives is narrower — paper's cost is bounded
+*per step* while its step count varies (45, 68, 31 tool calls), so the total is
+less predictable; the control's grows with its transcript while its run length is
+steadier. Paper wins the total and loses the predictability, and both are true.
+
 One caveat that does not resolve: paper answered correctly while its state ended
-25/30, and the control's ended 30/30 complete. At the crossover the cheap arm is
-also the one whose state lagged. Cheaper and correct, but less complete — a real
-trade, reported as one.
+25/30, and the control's ended 30/30 complete. The cause is measured and it
+belongs to the paper's own operator — §3 rule 1 replaces arrays wholesale, so a
+model emitting `done: ["cfg9.ts"]` over a ten-element list is doing exactly what
+is specified. The state rewinds, `total` double-counts, and the run still answers
+correctly out of its own arithmetic. A guard would be a rule the paper does not
+have.
 
 **Why the state lagged, and why the step driver costs what it costs.** Both come
 from the same thing, and neither was visible until `SKILLSTATE_DEBUG_STEPS`

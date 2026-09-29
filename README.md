@@ -946,25 +946,43 @@ lines, 1,200 lines of observation. The lever is observation size rather than fil
 count, because tiny files make a tiny transcript and would rig the comparison in
 paper's favour by making the control's history too small to hurt.
 
-| 30 files | paper | notes (control) |
+| 30 files, n=3 | paper | notes (control) |
 | --- | --- | --- |
-| prompt tokens | **966,072** | 2,052,736 |
-| of which uncached input | 90,721 | 1,502,583 |
-| tool calls | 45 | 64 |
-| answer | correct | correct |
-| final state | 25/30 | 30/30 |
+| prompt tokens, median | **966,072** | 2,015,473 |
+| prompt tokens, range | 594,894 – 1,390,359 | 490,262 – 2,052,736 |
+| uncached input, range | 52,545 – 144,015 | 241,061 – 1,502,583 |
+| correct | 2 / 2 † | 3 / 3 |
+| final state | 25/30, 30/30 | 30/30, 30/30, 30/30 |
 
-**Paper is 2.13× cheaper at 30 files, having been 3.75× dearer at 8.** Scaling
-from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the control
-**+735%**. The two numbers locate the mechanism — the control's uncached input
-is 16.6× paper's, because a growing history is re-sent every request, while
-paper's context is stable and therefore cache-local. Paper's `cache_read` is
-the *higher* of the two: a bounded context that repeats gets cached, a history
-that keeps changing does not. The saving is cache locality, not less text.
+† a third paper run was killed by us to free the machine, not by a fault. It is
+excluded rather than counted as a failure.
 
-One caveat does not resolve: paper answered correctly while its state ended
-25/30, and the control's ended complete. At the crossover the cheap arm is also
-the one whose state lagged — cheaper and correct, but less complete.
+**Paper is 2.09× cheaper at the median at 30 files, having been 3.75× dearer at
+8.** Scaling from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the
+control **+735%**. The two numbers locate the mechanism — the control's
+uncached input is 16.6× paper's, because a growing history is re-sent every
+request, while paper's context is stable and therefore cache-local. Paper's
+`cache_read` is the *higher* of the two: a bounded context that repeats gets
+cached, a history that keeps changing does not. The saving is cache locality,
+not less text.
+
+**The spread corrects an earlier claim of ours.** The three-turn table above
+reports paper's spread as flat to within 60 tokens against the control's ±18%,
+and calls that the mechanism visible in one number. On the thirty-file task
+that inverts: paper's relative MAD is 38%, the control's 1.8%. The flatness was
+a property of that short task, not of paper mode. The narrower truth: paper's
+cost is bounded *per step* while its step count varies (45, 68 and 31 tool
+calls), so the total is less predictable; the control's grows with its
+transcript while its run length is steadier. Paper wins on the total and loses
+on the predictability, and both hold at once.
+
+One caveat that does not resolve: paper answered correctly while its state ended
+25/30, and the control's ended complete. The cause is measured and it belongs to
+the paper's own operator — §3 rule 1 replaces arrays wholesale, so a model
+emitting `done: ["cfg9.ts"]` over a ten-element list is doing exactly what is
+specified. The state rewinds, `total` double-counts, and the run still answers
+correctly out of its own arithmetic. A guard against that would be a rule the
+paper does not have.
 
 What is still open is the same thing it was before, one scale further along:
 the crossover is bracketed between 8 and 30 files, not located, and the state
