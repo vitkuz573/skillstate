@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import { GENERIC_PROCEDURE_SPEC } from '@skillstate/core';
 import type { ProceduralSpec } from '@skillstate/core';
 import {
+  DRIFT_NOTICE_AFTER_TURNS,
   PAPER_MESSAGE_ID,
   applyPaperContext,
   buildPaperPrompt,
@@ -830,6 +831,49 @@ describe('the plugin in notes mode (the default)', () => {
     expect(result.system).toHaveLength(1);
     expect(result.system[0]!.text).toContain('<skillstate-project-notes>');
   });
+
+  it('describes an initialized project as a record, and notices drift', async () => {
+    // The anti-drift wiring, end to end through the plugin. The user asked
+    // for this: a model that quietly stops writing drifts back to a growing
+    // transcript and pays for it in re-sent tokens, and nothing noticed.
+    // Wording is unit-tested in system-hint.test.ts; here the wiring, which
+    // is what rots silently.
+    const projectDir = makeProject();
+    const stateDir = path.join(projectDir, '.skillstate');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { goal: 'ship it' } }),
+    );
+    const harness = createPluginHarness({ projectDir, events: [] });
+    cleanups.push(await harness.start());
+    const hook = harness.hooks.get('context')!;
+
+    const call = async (): Promise<string> => {
+      const system: ContextEvent['system'] = [];
+      const payload: ContextEvent = {
+        sessionID: 'ses_root',
+        system,
+        messages: [user('the task'), tool('some output')],
+        options: {},
+        agent: 'build',
+        model: { providerID: 'x', id: 'y' },
+        tools: {},
+      };
+      await hook(payload);
+      return system.map((part) => part.text ?? '').join('\n');
+    };
+
+    // The record framing is present from the first turn, not after drift.
+    const first = await call();
+    expect(first).toContain('is the project');
+    expect(first).not.toContain('turns have passed');
+
+    // Silence long enough to drift.
+    for (let i = 0; i < DRIFT_NOTICE_AFTER_TURNS; i += 1) await call();
+    expect(await call()).toContain('turns have passed without a change');
+  });
+
 });
 
 describe('the plugin closes the paper transition from the event stream', () => {

@@ -62,6 +62,18 @@ export function renderStateForHint(state: Record<string, unknown>): string {
   )}`;
 }
 
+/**
+ * How many turns may pass with the state untouched before the drift notice
+ * fires.
+ *
+ * 12 is chosen from the corpus rather than taste: the average run in the
+ * host's own store showed the model ~29,900 prompt tokens per step, so a
+ * dozen silent steps is roughly 350k tokens re-sent for a record that never
+ * moved. Low enough to catch a drift early, high enough that an agent
+ * legitimately reading five files in a row does not get nagged.
+ */
+export const DRIFT_NOTICE_AFTER_TURNS = 12;
+
 /** Options for {@link buildStateHint}. */
 export interface StateHintOptions {
   /** The state document this session has saved. */
@@ -73,6 +85,54 @@ export interface StateHintOptions {
    * hint names the merge step so the main session can fold its notes back.
    */
   scope?: string;
+  /**
+   * True when the project is INITIALIZED — a state file exists for it.
+   *
+   * This is the whole difference between an optional side channel and a
+   * record, and the two must not be phrased the same way. Telling a model to
+   * "skip these tools when the work needs no memory" is correct advice for a
+   * scratch project and an invitation to walk away in a real one, where the
+   * user initialized skillstate precisely because the work does need it.
+   */
+  initialized?: boolean;
+  /**
+   * Turns taken since the state last changed. Set by the caller, which
+   * counts; see {@link DRIFT_NOTICE_AFTER_TURNS}.
+   */
+  turnsSinceWrite?: number;
+}
+
+/**
+ * The line that says what the state IS, which depends on whether the project
+ * was initialized.
+ *
+ * Neither version is an imperative. Both are statements about the setup, and
+ * the difference is that one describes a record the user asked for and the
+ * other describes an optional convenience. A model told to skip the tools
+ * when it judges them unnecessary will eventually judge a long task
+ * unnecessary at exactly the wrong moment; a model told the state is the
+ * project's record has a fact to work with.
+ */
+function purposeLine(initialized: boolean, statePath: string): string {
+  return initialized
+    ? `This project has an execution state at \`${statePath}\`. It is the project's record: what has been established, decided, and left to do, kept across a context reset or compaction. The conversation is not that record, and it is not kept — the state file is.`
+    : `Notes for this project are saved at \`${statePath}\` and survive a context reset or compaction.`;
+}
+
+/**
+ * The notice shown once when the state has not moved for a long stretch.
+ *
+ * This is feedback, not an instruction, and the distinction is the whole
+ * design. It states a measured fact — this many turns, no write — and
+ * nothing about what the model ought to do. That keeps the v1 failure
+ * impossible (nothing here can displace the user's task) while still
+ * telling a drifting agent that the user initialized this for a reason.
+ *
+ * It fires once per silence, not every turn: a notice that repeats forever
+ * is wallpaper, and after the second copy nobody reads it.
+ */
+function driftNotice(turnsSinceWrite: number): string {
+  return `Note: ${turnsSinceWrite} turns have passed without a change to this state file.`;
 }
 
 /**
@@ -97,13 +157,21 @@ export function buildStateHint(options: StateHintOptions): string {
       ? ''
       : '\nThis is a sub-agent session. When you finish, the main session folds your notes back with `skillstate_merge`; write them as if someone else will read them.';
 
-  return [
+  const initialized = options.initialized === true;
+  const turns = options.turnsSinceWrite ?? 0;
+  const lines = [
     '<skillstate-project-notes>',
-    `Notes for this project are saved at \`${statePath}\` and survive a context reset or compaction.`,
+    purposeLine(initialized, statePath),
     '',
     renderStateForHint(state),
     `${toolLine}${mergeLine}`,
-    'Use them only to carry facts across turns — plans already made, decisions already taken, file paths, and what is left to do. The notes are a side channel, not the task: keep doing what the user asked, and skip these tools entirely when the work needs no cross-turn memory.',
-    '</skillstate-project-notes>',
-  ].join('\n');
+    initialized
+      ? 'Record what you establish here as you go — plans made, decisions taken, file paths, values read, and what is left — so it is still here after a reset. The notes are not the task: keep doing what the user asked.'
+      : 'Use them only to carry facts across turns — plans already made, decisions already taken, file paths, and what is left to do. The notes are a side channel, not the task: keep doing what the user asked, and skip these tools entirely when the work needs no cross-turn memory.',
+  ];
+  if (initialized && turns >= DRIFT_NOTICE_AFTER_TURNS) {
+    lines.push('', driftNotice(turns));
+  }
+  lines.push('</skillstate-project-notes>');
+  return lines.join('\n');
 }

@@ -196,6 +196,8 @@ export const SkillStatePlugin = Plugin.define({
     // One pending correction per session. Exists in paper mode only, because
     // in notes mode there is no `state_patch` for the host to reject.
     const feedback = spec === undefined ? undefined : new FeedbackQueue();
+    // Turns taken per scope without the state changing, for the drift notice.
+    const turnsSinceWrite = new Map<string, number>();
 
     await ctx.tool.transform((editor) => {
       registerTools(editor, { store, sessions, scopeFor });
@@ -226,6 +228,12 @@ export const SkillStatePlugin = Plugin.define({
             const outcome = await sink.ingest(event);
             if (feedback !== undefined && isTextEnded(event)) {
               feedback.record(event.data.sessionID, outcome);
+            }
+            // An applied patch means the state moved, so the drift counter
+            // starts again. Without this it would only ever climb and the
+            // notice would become a permanent wallpaper line.
+            if (outcome.applied && isTextEnded(event)) {
+              turnsSinceWrite.set(scopeFor(event.data.sessionID), 0);
             }
           }
         }
@@ -274,10 +282,25 @@ export const SkillStatePlugin = Plugin.define({
       }
 
       if (!store.exists(scope)) return;
+      // ── Drift detection ───────────────────────────────────────────────
+      // A user who initialized skillstate did so because the work needs
+      // cross-turn memory. An agent that then quietly stops writing drifts
+      // back to a growing transcript and pays for it in re-sent tokens. The
+      // fix is to notice and say so — a measured fact, not an instruction,
+      // so it cannot displace the task the way the v1 injection did.
+      //
+      // Counted per scope and reset by the sink on every applied patch, so
+      // a sub-agent's writes do not silence the main session's counter.
+      const sinceWrite = (turnsSinceWrite.get(scope) ?? 0) + 1;
+      turnsSinceWrite.set(scope, sinceWrite);
       const hint = buildStateHint({
         state,
         statePath: path.relative(store.projectDirectory, store.pathFor(scope)),
         scope,
+        // A state file on disk is the definition of an initialized project:
+        // the user ran `skillstate init`, or something wrote one.
+        initialized: store.exists(scope),
+        turnsSinceWrite: sinceWrite,
       });
       if (hint.length === 0) return;
       event.system.push({ type: 'text', text: hint });

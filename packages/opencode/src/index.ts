@@ -40,6 +40,7 @@ export {
   buildStateHint,
   renderStateForHint,
   ADVERTISED_TOOLS,
+  DRIFT_NOTICE_AFTER_TURNS,
   MAX_INLINE_STATE_CHARS,
 } from './system-hint.js';
 export type { StateHintOptions } from './system-hint.js';

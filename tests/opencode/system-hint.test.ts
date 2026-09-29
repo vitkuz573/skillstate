@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildStateHint,
+  DRIFT_NOTICE_AFTER_TURNS,
   renderStateForHint,
   ADVERTISED_TOOLS,
   MAX_INLINE_STATE_CHARS,
@@ -126,6 +127,76 @@ describe('buildStateHint — never overrides the model', () => {
       expect(text).not.toMatch(/state_patch/);
       expect(text).not.toMatch(/do not rely on (the )?conversation/i);
     }
+  });
+
+  // ── An initialized project is a RECORD, not an option ──────────────────
+  //
+  // The user asked for this: without it a model can drift off skillstate
+  // mid-run, do everything directly, and pay for it in re-sent tokens. The
+  // fix is NOT an imperative — the invariant above forbids that, and rightly,
+  // because it is what broke v1. It is a change in what the fragment asserts
+  // is true: a record the user asked for, rather than a convenience.
+
+  it('describes an initialized project as its record, not a side channel', () => {
+    const text = buildStateHint({
+      state: { goal: 'ship 3.0.1' },
+      statePath: '.skillstate/skillstate.json',
+      initialized: true,
+    });
+    expect(text).toContain('is the project');
+    expect(text).toContain("record");
+    // The line that invited drift is gone for an initialized project.
+    expect(text).not.toContain('skip these tools entirely');
+  });
+
+  it('keeps the optional wording for a project with no state file', () => {
+    // Two projects, two correct descriptions. Collapsing them would be the
+    // opposite fix: telling a scratch project its notes are authoritative.
+    const text = buildStateHint({
+      state: { goal: 'x' },
+      statePath: '.skillstate/skillstate.json',
+      initialized: false,
+    });
+    expect(text).toContain('skip these tools entirely');
+    expect(text).not.toContain('is the project');
+  });
+
+  it('tells a drifting agent that the state has not moved, as a fact', () => {
+    const text = buildStateHint({
+      state: { goal: 'x' },
+      statePath: 'p.json',
+      initialized: true,
+      turnsSinceWrite: DRIFT_NOTICE_AFTER_TURNS,
+    });
+    expect(text).toContain(`${DRIFT_NOTICE_AFTER_TURNS} turns have passed without a change`);
+    // Feedback, not an order. "you must write" would break the invariant;
+    // "this has not moved" cannot displace the task.
+    expect(text).not.toMatch(/\byou must\b|\balways\b|\bnever\b/i);
+  });
+
+  it('says nothing about drift before the threshold', () => {
+    const text = buildStateHint({
+      state: { goal: 'x' },
+      statePath: 'p.json',
+      initialized: true,
+      turnsSinceWrite: DRIFT_NOTICE_AFTER_TURNS - 1,
+    });
+    expect(text).not.toContain('turns have passed');
+  });
+
+  it('does not nag an uninitialized project about drift', () => {
+    // Nothing to drift from: there is no record to stop writing to.
+    const text = buildStateHint({
+      state: { goal: 'x' },
+      statePath: 'p.json',
+      turnsSinceWrite: 500,
+    });
+    expect(text).not.toContain('turns have passed');
+  });
+
+  it('defaults to no drift count when none is supplied', () => {
+    const text = buildStateHint({ state: { goal: 'x' }, statePath: 'p.json', initialized: true });
+    expect(text).not.toContain('turns have passed');
   });
 
   it('never mentions the CTF spec, the accidental v1 default', () => {

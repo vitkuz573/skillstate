@@ -37,6 +37,43 @@ were rewritten. The O(1) test was also comparing two transcripts with
 *different* latest instructions and passing only because of the pin; it now
 varies only history depth, which is what the claim is about.
 
+**Added: an initialized project is described as a record, and drift is noticed.**
+
+The failure this addresses: a user runs `skillstate init` precisely because the
+work needs cross-turn memory, and a model that then stops writing drifts back
+to a growing transcript and pays for it in re-sent tokens — silently, because
+nothing was telling it to keep the record up to date.
+
+The old fragment said *"skip these tools entirely when the work needs no
+cross-turn memory"*. For a scratch project that is correct advice; for an
+initialized one it is an invitation to walk away, and the model makes that call
+at exactly the wrong moment.
+
+The fix is **not** an imperative. `tests/opencode/system-hint.test.ts` forbids
+"you must" / "always" / "never", and rightly — that is what broke v1, where an
+injected instruction displaced the user's task. What changed is what the
+fragment asserts is *true*:
+
+- an initialized project: the state **is the project's record** — what has been
+  established, decided and left to do — and the conversation is not kept;
+- an uninitialized one: unchanged, still an optional side channel. Two
+  projects, two correct descriptions; collapsing them would be the opposite
+  fix.
+
+Plus **drift detection**. After `DRIFT_NOTICE_AFTER_TURNS` (12) turns without
+a state change the fragment says so once: *"N turns have passed without a
+change to this state file."* The threshold comes from the corpus, not taste —
+the average run showed the model ~29,900 prompt tokens per step, so a dozen
+silent steps is roughly 350k tokens re-sent for a record that never moved. The
+counter is per scope and reset by the sink on every applied patch, because a
+counter that only climbs turns the notice into wallpaper.
+
+It is feedback, not an order: a measured fact about what happened, which cannot
+displace the task the way the v1 injection did.
+
+**Removed:** `packages/dsh` and the stash holding it. The DeepSeek Harness
+integration was never finished and is gone rather than left hanging.
+
 **Measured: 70.4% fewer prompt tokens, at roughly equal accuracy.**
 
 Real A/B on `opencode/big-pickle` — the weakest model in the catalogue — 7
