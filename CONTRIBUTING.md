@@ -6,9 +6,10 @@ behavior change lands test-first.
 
 ## Developing
 
-Requirements: **Node.js >= 20** and npm (npm workspaces are not used — this is
-a single package). `.npmrc` sets `engine-strict=true`, so a Node version below
-20 will be rejected at install time.
+Requirements: **Node.js >= 20** and npm with workspaces support (this is a
+monorepo: `packages/*` under a `private: true` root). `.npmrc` sets
+`engine-strict=true`, so a Node version below 20 will be rejected at install
+time.
 
 ```bash
 git clone https://github.com/vitkuz573/skillstate.git
@@ -19,8 +20,8 @@ npm ci                  # reproducible install from package-lock.json
 Verify your setup — the full local gate:
 
 ```bash
-npm run typecheck       # tsc --noEmit, must be clean
-npm test                # 745 tests should pass
+npm run typecheck       # tsc -b across the workspace, must be clean
+npm test                # the full suite
 npm run test:coverage   # 100% thresholds enforced on all four metric kinds
 npm run build           # emits dist/
 ```
@@ -125,15 +126,66 @@ gate is run by hand before every publish.
 npm run typecheck && npm test && npm run test:coverage && npm run build
 
 # 2. Add/verify the CHANGELOG.md entry under *Unreleased*, then tag:
-npm version patch|minor|major -m "chore(release): %s"
+npm version patch|minor|patch -m "chore(release): %s"
+```
 
-# 3. Publish to the public npm registry (scoped/private would need --access restricted)
-npm publish --access public
+### Publishing
+
+This is an npm **workspaces monorepo**. The root `package.json` is
+`private: true`, so a bare `npm publish` fails — each package is published
+separately with `-w`:
+
+```bash
+for p in core claude codex mcp opencode cli bench; do
+  npm publish -w @skillstate/$p --access public
+done
+```
+
+**Order is not arbitrary.** `@skillstate/core` is a dependency of every other
+package, and `cli` depends on the host adapters. Publishing a dependent before
+its dependency makes the install fail on an unresolvable version, because npm
+resolves from the registry the moment a version is out. The order above is
+topological:
+
+```
+core -> claude, codex, mcp, opencode -> cli -> bench
+```
+
+npm takes a few minutes to propagate a new version, so `npm view
+@skillstate/core version` can still report the previous one immediately after
+`npm publish` reports success. Verify with a clean install before announcing.
+
+Publishing is **irreversible** — a published version can never be replaced,
+only superseded. A mistaken release means cutting a patch version, so check
+the tarball first:
+
+```bash
+npm pack -w @skillstate/<pkg> --dry-run   # file list, sizes
 ```
 
 `npm version` runs the `prepack` script (`npm run build`) synchronously, so
 `dist/` is always freshly built into the published tarball. Never publish from
 a dirty working tree or a branch other than `main`.
+
+### Registry authentication
+
+The account has 2FA enabled, so a publish needs a token that bypasses it —
+a plain token fails with:
+
+```
+403 Forbidden - Two-factor authentication or granular access token
+with bypass 2fa enabled is required to publish packages.
+```
+
+Create one at <https://www.npmjs.com/settings/vitkuz573/access-tokens>:
+
+- **Automation** — simplest, bypasses 2FA automatically; or
+- **Granular** — scope it to `@skillstate`, set *Read and write*, and tick
+  **Bypass 2FA**.
+
+Store it in `~/.npmrc` (mode 0600), never in the repository — the tracked
+`.npmrc` holds only `engine-strict` and the registry URL, and must stay that
+way.
 
 ## Paper fidelity
 

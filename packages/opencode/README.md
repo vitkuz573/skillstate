@@ -2,11 +2,10 @@
 
 # @skillstate/opencode
 
-**OpenCode platform adapter for the @skillstate/core runtime — the only case with real O(1) prompt economy via history trimming.**
+**OpenCode v2 plugin for the @skillstate/core runtime — three native tools and one additive system fragment.**
 
 [![npm version](https://img.shields.io/npm/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
 [![node](https://img.shields.io/node/v/@skillstate/opencode)](https://www.npmjs.com/package/@skillstate/opencode)
-[![Tests](https://img.shields.io/badge/tests-873%20passing-brightgreen)](https://github.com/vitkuz573/skillstate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/vitkuz573/skillstate/blob/main/LICENSE)
 
 </div>
@@ -14,15 +13,10 @@
 ---
 
 `@skillstate/opencode` integrates the paper-exact runtime
-([`@skillstate/core`](../core)) into **OpenCode**. The integration is the
-npm plugin `SkillStatePlugin` itself, loaded directly from the PROJECT
-`opencode.json(c)` (`"plugin": ["@skillstate/opencode"]`): it hooks
-`experimental.chat.messages.transform` to **trim history before every LLM
-call** — dropping old messages and injecting only the state, which is genuine
-**O(1)** prompt footprint. The plugin is project-local and inert when the
-project has no `.skillstate/` state, and OpenCode reads the shared project
-`.claude/skills/skillstate/SKILL.md` too (Claude-compatible skill discovery),
-so one host-neutral skill file serves both hosts.
+([`@skillstate/core`](../core)) into **OpenCode v2**. The integration is the
+npm package itself, loaded from the PROJECT `opencode.json(c)` under the v2
+`plugins` key. It registers three native tools and one `context` hook, and it
+is project-local and inert when the project has no `.skillstate/` state.
 
 > **@non-paper** — no adapters exist in arXiv 2608.26263v3. This adapter is an
 > additive integration, not part of the paper.
@@ -33,55 +27,19 @@ so one host-neutral skill file serves both hosts.
 npm i @skillstate/core @skillstate/opencode
 ```
 
-Requires Node.js >= 20. TypeScript types are bundled.
+Requires Node.js >= 20 and OpenCode >= 2.0. TypeScript types are bundled, and
+`@opencode/plugin` is a real dependency — the plugin is typed against the
+host's own API rather than against hand-written local declarations.
 
-## Quick start
+## Configure OpenCode
 
-```ts
-import { OpenCodeAdapter, SkillStatePlugin, createSkillStatePlugin } from '@skillstate/opencode';
-
-const adapter = new OpenCodeAdapter();
-
-// The plugin OpenCode loads from "plugin": ["@skillstate/opencode"] —
-// the ready-made instance (the default export carries the same function):
-const plugin = SkillStatePlugin;
-
-// Need a custom configuration? Build your own instance:
-const configured = createSkillStatePlugin({ maxHistoryMessages: 5 });
-
-// Real O(1) history trimming via experimental.chat.messages.transform,
-// compaction context injection via experimental.session.compacting, and
-// state persistence via tool.execute.after. The state path is resolved per
-// session from the host cwd inside the plugin — no baked path, and every
-// state-touching hook returns early when the project has no state file.
-```
-
-## Install into OpenCode (host)
-
-Tested end-to-end against OpenCode ≥ 1.17 (`@opencode-ai/plugin` 1.15.x
-hook contracts). Everything below is PROJECT-LOCAL — nothing is written
-into `~/.config/opencode`. The one-command path is
-`npm i -g @skillstate/cli && skillstate init` in the project (it performs
-steps 1–3 for every detected host); the manual equivalent:
-
-**1. Register the npm plugin in the project `opencode.jsonc|json`** — add
-`"@skillstate/opencode"` to the `plugin` array (npm entries are
-auto-installed by OpenCode via Bun; no generated plugin file exists):
+`skillstate init` writes this for you. By hand:
 
 ```jsonc
+// opencode.json
 {
-  "plugin": [
-    "@ai-sdk/anthropic",
-    "@skillstate/opencode"
-  ]
-}
-```
-
-**2. Register the MCP server** in the same config's `mcp` object —
-`skillstate init` writes exactly this entry (`npx -y @skillstate/mcp@^3`):
-
-```jsonc
-{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["@skillstate/opencode"],
   "mcp": {
     "skillstate": {
       "type": "local",
@@ -92,84 +50,157 @@ auto-installed by OpenCode via Bun; no generated plugin file exists):
 }
 ```
 
-**3. Share the project skill** — one host-neutral
-`.claude/skills/skillstate/SKILL.md` (written by `skillstate init`) serves
-both OpenCode and Claude Code: OpenCode reads project `.claude/skills/` via
-Claude-compatible discovery. The skill's frontmatter is exactly `name` +
-`description`; the body describes the state-based execution protocol and
-names no host-specific hook/plugin events — the npm plugin injects the
-current state into context every turn, and everything else goes through the
-host-agnostic skillstate MCP tools.
+Both entries are registered on purpose:
 
-**4. Run `skillstate init` in the project** (or let it do all of the above
-at once) to create the state envelope `./.skillstate/skillstate.json` —
-the plugin resolves it from the session cwd and stays inert until it
-exists.
+- **`plugins`** — the native path. Typed schemas, structured output, no
+  JSON-RPC round-trip. This is the fast one.
+- **`mcp.skillstate`** — the portable path. Any MCP-capable host reads the
+  same state through it.
 
-Verify with `opencode debug config` (the plugin entry shows under `plugin`,
-`mcp.skillstate` under `mcp`) and `opencode debug skill` (your skill is
-listed). Hook notes for OpenCode ≥ 1.17:
-`messages.transform` receives `{ info: Message, parts: Part[] }` entries and
-must mutate `output.messages` **in place**; the plugin injects state as a
-synthetic `{ info, parts }` message.
+They address one file (`<project>/.skillstate/skillstate.json`), so they can
+never disagree about what is saved.
 
-## API / Exports
+OpenCode v1 is not supported: the config key was `plugin`, and a v1 plugin
+implementation does not run in v2 at all. `skillstate init` migrates a config
+written by an earlier version — our entry is removed from the legacy `plugin`
+array and the key is dropped when nothing of yours is left in it.
 
-Root path `@skillstate/opencode` exports the adapter and the static plugin:
+## What the plugin registers
 
-- `new OpenCodeAdapter()` — implements `PlatformAdapter` (`name = 'opencode'`);
-  a pure prompt/parse surface (`injectState`, `extractPatch`,
-  `extractAction`, `formatPrompt`) — host glue is the npm plugin itself,
-  not generated code.
-- `SkillStatePlugin` (+ default export) — the ready-made plugin instance
-  OpenCode loads from `"plugin": ["@skillstate/opencode"]`; identical to
-  `createSkillStatePlugin()`.
-- `createSkillStatePlugin({ maxHistoryMessages? })` — the static plugin
-  factory (single source of truth for the hook logic); state is resolved from
-  the session cwd on every hook call via
-  `resolveStatePathForCwd(process.cwd(), os.homedir(), agentId)`, and every
-  state-touching hook returns early when the state file does not exist
-  (hooks never create state files). Hooks:
-  `experimental.chat.messages.transform` (real history trimming),
-  `experimental.session.compacting` (inject state into compaction context),
-  `tool.execute.after` (persist `state_patch` to disk).
-- `resolveStatePathForCwd(cwd, home?, agentId?): string` — the per-project
-  state path resolution (pure path arithmetic, no filesystem access).
-- `pluginAgentId(input, messages?)` / `scopedAgentId(agentId)` /
-  `registerSessionParent(sessionId, parentId)` / `resetSessionParents()` —
-  the agent-scope plumbing (session id → `agents/` directory name).
-- `readSkillState` / `saveSkillState` / `mergePatch` / `extractPatch` — the
-  plugin's state helpers, shared by the static plugin.
-- `injectState(state, spec): string` / `formatPrompt(state, observation, spec): string`.
-- `extractPatch(response): StatePatch | null` / `extractAction(response): string | null`.
+```ts
+import SkillStatePlugin from '@skillstate/opencode';
 
-## Notes
+await SkillStatePlugin.setup(ctx);
+```
 
-- **Real O(1).** Unlike Claude Code (append-only hooks) and Codex
-  (hooks + experimental app-server fork-trim), OpenCode exposes
-  `experimental.chat.messages.transform`, so the plugin drops old messages
-  instead of just hiding them — only the last N non-system messages plus an
-  injected state message reach the LLM.
-- **The plugin is the npm package, not generated code.** Hook logic lives
-  only in `src/plugin.ts` — nothing is emitted to disk by an installer, so
-  there are no generated files to edit. **WHERE STATE LIVES** (each opencode
-  session reads AND writes the same path within its cwd — no cross-file
-  surprises):
-  - main session: `<cwd>/.skillstate/skillstate.json`
-  - sub-agent session (Task sub-agents carry `parentID` on the session):
-    `<cwd>/.skillstate/agents/<parentPrefix>-<sessionPrefix>/skillstate.json`
-  - a session started in `$HOME`: the global bucket
-    `~/.skillstate/global/...` with the same main/sub split.
-- Depends on [`@skillstate/core`](../core) for `PromptTransformer`,
-  `atomicWriteFile`, and `resolveStatePath`.
+| Registration | Detail |
+| --- | --- |
+| `ctx.tool.transform(...)` | `skillstate_read`, `skillstate_update`, `skillstate_merge` |
+| `ctx.session.hook('context')` | pushes ONE bounded fragment onto `event.system` |
+| `ctx.event.subscribe(...)` | session parent edges, for sub-agent scoping |
 
-## Related
+Nothing else. It does not register `compaction`, `generate` or `title` hooks,
+and it never touches `event.messages`.
 
-- Paper: [arXiv:2608.26263](https://arxiv.org/abs/2608.26263).
-- Core runtime: [`@skillstate/core`](../core).
-- [`state.md`](../../state.md) — design notes.
-- Other adapters: `@skillstate/claude`, `@skillstate/codex`, `@skillstate/mcp`.
+### Tools
+
+Every tool returns a discriminated result, because a tool that declares an
+`output` schema must return a value matching it — a failure path that returned
+only text is rejected by the host with "tool did not return its declared
+output", which loses the reason.
+
+```ts
+{ ok: true,  value: {...} }
+{ ok: false, error: "..." }   // e.g. a patch over the 64 KiB budget
+```
+
+| Tool | Purpose |
+| --- | --- |
+| `skillstate_read` | what this session has already saved |
+| `skillstate_update` | merge a patch — the only write path (`null` deletes a key) |
+| `skillstate_merge` | fold sub-agent notes back into the root session |
+
+Scoping is automatic: the session's own scope comes from
+`ToolContext.sessionID` plus the session registry, so the model never passes a
+session id and can never write another agent's file by guessing one.
+
+## Why the transcript is never rewritten
+
+The previous version of this plugin rewrote the conversation on every model
+request:
+
+```ts
+// removed — this is what broke it
+const trimmed = messages.filter((m) => m.info.role !== 'system').slice(-maxHistory);
+messages.length = 0;
+messages.push(...systemMessages, ...trimmed, stateMessage);
+```
+
+Two independent failures in three lines:
+
+1. `slice(-3)` **deleted the task statement, the tool results and the error
+   messages** the agent had just been given. It was reasoning about work it
+   could no longer see. Users reported that the agent "started talking
+   nonsense and would not do my tasks" — it could not, because the task was
+   no longer in the prompt.
+2. The injected message was appended **last**, as `role: "user"`. For a chat
+   model the last user message is the current instruction, so a JSON blob of
+   state displaced the user's actual request.
+
+The old test suite asserted the bug — `expect(messages).toHaveLength(1 + 3 + 1)`.
+It is replaced by `tests/opencode/context-integrity.test.ts`, which asserts the
+opposite.
+
+Three rules, each enforced by a test:
+
+| Rule | Enforced by |
+| --- | --- |
+| Never mutate `event.messages` | `context-integrity.test.ts` |
+| Never inject behavioural instructions | `system-hint.test.ts` |
+| Inert until a state file exists | `plugin.test.ts` |
+
+Measured on a live OpenCode 2.0.19, one session, five turns:
+
+```
+turn 1: messages= 3  hint=True  marker=True  override=False
+turn 3: messages= 7  hint=True  marker=True  override=False
+turn 5: messages=11  hint=True  marker=True  override=False
+```
+
+The transcript grows. Under the previous version it was pinned at 3.
+
+### The system fragment
+
+Advisory, bounded, and deliberately dull. It names the state file, renders the
+current notes (a large document is summarized to a key list plus a pointer to
+`skillstate_read`), lists the tools, and says the notes are a side channel
+rather than the task. It contains no "you must", no "always", and no output
+format — that framing is what turned a persistence aid into a prompt override.
+
+The wording is a product requirement, not prose taste, and
+`system-hint.test.ts` fails the build if that framing creeps back.
+
+## Design notes
+
+- **Per-project addressing.** State resolves from
+  `ctx.location.project.canonical`, never `process.cwd()` — one v2 server
+  serves many projects, so the process cwd is the wrong answer.
+- **Sub-agent isolation.** The parent edge comes from the real event stream
+  (`session.created` / `session.forked`, `data.parentID`). A session is
+  scoped to `<parentPrefix>-<full session id>`; the full id, not a prefix, so
+  two siblings sharing an 8-char prefix cannot collapse into one file.
+- **No premature trust.** A session not yet seen on the stream is treated as a
+  root session, which is what a single-session user expects.
+- **Durability.** Every mutation runs under the core cross-process lock and
+  lands via temp-sibling → fsync → rename. Reads never throw.
+- **Bounded prompt cost.** State above 4 KB is summarized rather than inlined,
+  and a patch above 64 KiB is refused with a reason.
+
+## The paper adapter
+
+`OpenCodeAdapter` is still exported. It is the paper-exact `PlatformAdapter`
+(A.4 prompt format) used by the benchmark — it is **not** the host
+integration, and nothing in the plugin path calls it. Note that its
+`injectState` still emits the paper's `STATE_PATCH_CONTRACT`, which is
+exactly the instruction pattern the plugin avoids.
+
+## Tests
+
+```bash
+npm test -- --project opencode
+```
+
+| File | Covers |
+| --- | --- |
+| `context-integrity.test.ts` | the transcript is never rewritten |
+| `system-hint.test.ts` | the fragment never overrides the model |
+| `session-registry.test.ts` | the v2 event shape, the session tree, eviction |
+| `state-store.test.ts` | addressing, atomicity, merge semantics |
+| `tools.test.ts` | schemas, validation, scoping, refusals |
+| `plugin.test.ts` | setup, teardown, per-project addressing |
+
+Coverage thresholds are 100% on statements, branches, functions and lines.
 
 ## License
 
-[MIT](LICENSE) © 2026 Vitaly Kuzyaev
+MIT

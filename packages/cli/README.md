@@ -79,12 +79,14 @@ harnesses later = re-running `init` (the manifest merges host records).
    `.claude/skills/skillstate/SKILL.md`: both OpenCode (which reads project
    `.claude/skills/` too) and Claude Code load this same file. Nothing is
    ever installed into `~/.config/opencode`, `~/.claude`, or `~/.codex`.
-3. For OpenCode: splices `"plugin": ["@skillstate/opencode"]` (npm plugin,
-   auto-installed by OpenCode via Bun — no generated plugin file) and the
-   `mcp.skillstate` local server (`["npx", "-y", "@skillstate/mcp@^3"]`,
-   `enabled: true`) into the PROJECT `opencode.jsonc|json` — top-level
-   comments and unknown keys preserved, a timestamped `.bak.*` backup when
-   the file changes.
+3. For OpenCode: splices the v2 `"plugins": ["@skillstate/opencode"]` entry
+   (npm plugin, auto-installed by OpenCode via Bun — no generated plugin
+   file) and the `mcp.skillstate` local server (`["npx", "-y",
+   "@skillstate/mcp@^3"]`, `enabled: true`) into the PROJECT
+   `opencode.jsonc|json` — top-level comments and unknown keys preserved, a
+   timestamped `.bak.*` backup when the file changes. A config written by an
+   earlier version is migrated: our entry leaves the legacy `plugin` array,
+   and that key is dropped when nothing of the user's is left in it.
 4. For Claude Code: writes self-contained `.cjs` hook scripts into
    `.claude/hooks/skillstate/`, merges the skillstate hook groups into the
    PROJECT `.claude/settings.json` (`UserPromptSubmit` /

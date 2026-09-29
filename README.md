@@ -183,14 +183,15 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | Host | Mechanism | State injection | O(1)? |
 | --- | --- | --- | --- |
 | **Claude Code** | project `.claude/settings.json` hook groups (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + project hook scripts + stdio project `.mcp.json` + shared project `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
-| **OpenCode** | npm plugin (`"plugin": ["@skillstate/opencode"]` in the project config) + project MCP server + shared project `SKILL.md` | real history trimming — only the last N non-system messages + injected state are sent to the LLM | **yes** |
+| **OpenCode** | npm plugin (`"plugins": ["@skillstate/opencode"]` in the project config) with **native tools**, plus the project MCP server for portable access, plus a shared project `SKILL.md` | one additive, bounded fragment on `event.system` — the transcript is never modified | additive, and deliberately so (see [Why the transcript is never rewritten](#why-the-transcript-is-never-rewritten)) |
 | **Codex** | machine-level glue (`skillstate install`): `~/.codex/hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML | state injected per prompt, re-injected after compaction, persisted per Bash tool call — project state is picked up automatically from the session cwd | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
 | **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
 
 All project glue is committed and **inert until init**: a project without
-`.skillstate/` state behaves like a vanilla host — the plugin trims/injects
-nothing, hooks inject nothing and never create state files, and the MCP tools
-return `no skillstate state in this directory — run \`skillstate init\``.
+`.skillstate/` state behaves like a vanilla host — the plugin injects no
+system fragment and creates no files, hooks inject nothing and never create
+state files, and the MCP tools return
+`no skillstate state in this directory — run \`skillstate init\``.
 
 ## Multi-agent state (release 2.2.0)
 
@@ -206,8 +207,11 @@ back explicitly:
   Ids sanitize to `[A-Za-z0-9_-]`, ≤ 64 chars; the default (`''`) is the
   main agent with the plain path.
 - **Where the agent id comes from.** Claude Code / Codex hook scripts take
-  the 8-char prefix of the hook stdin's `session_id`; the OpenCode plugin
-  uses the hook/message `sessionID` (fallback agent `default`); the MCP
+  the 8-char prefix of the hook stdin's `session_id`; the OpenCode v2 plugin
+  reads the `session.created` / `session.forked` parent edge off the server
+  event stream (`data.parentID`) and scopes a sub-agent to
+  `<parentPrefix>-<full session id>` — the full id, not a prefix, so two
+  siblings sharing an 8-char prefix cannot collapse into one file; the MCP
   server reads `SKILLSTATE_AGENT_ID` from its env or accepts a per-call
   `{ agent }` argument (default `''` = main agent).
 - **Cross-process locks.** `withStateLock(statePath, fn)` (async,
@@ -318,23 +322,83 @@ everything under the project `.claude/` directory, committed with the repo.
 
 ### opencode
 
-```ts
-import { OpenCodeAdapter, SkillStatePlugin } from '@skillstate/opencode';
+OpenCode **v2**. The host glue is the npm package itself: the project
+`opencode.json` lists it under the v2 `plugins` key and OpenCode loads the
+default export directly.
 
-const adapter = new OpenCodeAdapter();
-
-// The host glue is the npm package itself: the PROJECT opencode.json lists
-// "plugin": ["@skillstate/opencode"] and OpenCode loads SkillStatePlugin
-// directly (default export === named export === createSkillStatePlugin()).
-// It hooks experimental.chat.messages.transform (real O(1) history trimming),
-// experimental.session.compacting (state into the compaction context), and
-// tool.execute.after (persist state_patch) — resolving the state per session
-// from the host cwd, inert without state.
-const plugin = SkillStatePlugin;
-
-// Also available: adapter.injectState(state, spec), adapter.formatPrompt(state, observation, spec),
-// adapter.extractPatch(response), adapter.extractAction(response)
+```jsonc
+// opencode.json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["@skillstate/opencode"],
+  "mcp": {
+    "skillstate": {
+      "type": "local",
+      "command": ["npx", "-y", "@skillstate/mcp@^3"],
+      "enabled": true
+    }
+  }
+}
 ```
+
+Both integrations are registered on purpose. The plugin contributes **native
+tools** — typed schemas and structured output, no JSON-RPC round-trip. The
+MCP server is the portable surface: any other MCP-capable host reads the same
+state through it. They address one file, so they cannot disagree.
+
+```ts
+// What the plugin registers, in setup():
+//   ctx.tool.transform(...)  -> skillstate_read, skillstate_update, skillstate_merge
+//   ctx.session.hook('context', e => e.system.push(...))   // additive only
+//   ctx.event.subscribe(...)  -> session parent edges, for sub-agent scoping
+```
+
+Nothing else. It does not register `compaction`, `generate` or `title` hooks,
+and it never touches `event.messages`.
+
+The paper-exact `OpenCodeAdapter` is still exported as the research surface
+used by the benchmark. It is not the host integration, and nothing in the
+plugin path calls it.
+
+#### Why the transcript is never rewritten
+
+The previous version of this integration rewrote the conversation on every
+model request: it kept the system messages plus the last three non-system
+messages, dropped everything else from `event.messages`, and appended a
+synthetic `role: "user"` message carrying the state JSON.
+
+Two independent failures in three lines:
+
+1. Truncating to the last three messages **deleted the task statement, the
+   tool results and the error messages** the agent had just been given. It
+   was reasoning about work it could no longer see.
+2. The injected message was appended **last**, as `role: "user"`. For a chat
+   model the last user message is the current instruction, so a JSON blob of
+   state displaced the user's actual request.
+
+The old test suite asserted the bug — `expect(messages).toHaveLength(1 + 3 + 1)`.
+It is replaced by `tests/opencode/context-integrity.test.ts`, which asserts
+the opposite: every message of a 67-message conversation survives, the array
+object is the same reference, and the only thing the plugin contributes goes
+to `event.system`.
+
+Three rules, each enforced by a test:
+
+| Rule | Enforced by |
+| --- | --- |
+| Never mutate `event.messages` | `context-integrity.test.ts` |
+| Never inject behavioural instructions | `system-hint.test.ts` |
+| Inert until a state file exists | `plugin.test.ts` |
+
+Measured on a live OpenCode 2.0.19, one session, five turns:
+
+```
+turn 1: messages= 3  hint=True  marker=True  override=False
+turn 3: messages= 7  hint=True  marker=True  override=False
+turn 5: messages=11  hint=True  marker=True  override=False
+```
+
+The transcript grows. Under the previous version it was pinned at 3.
 
 ### codex
 
@@ -413,7 +477,9 @@ const adapter = new McpAdapter();
 const config = adapter.generateMcpConfig('/path/to/.mcp.json');
 
 // Or run an in-process server and drive it line-by-line:
-const server = new McpServer({ spec: INTERCODE_CTF_SPEC, root: '.', name: '.skillstate.json' });
+// Without an explicit spec the server uses GENERIC_PROCEDURE_SPEC — a
+// description of the storage format, never a task description.
+const server = new McpServer({ root: '.', name: '.skillstate.json' });
 const response = server.handleLine(
   JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'tools/call',
@@ -449,9 +515,12 @@ nothing lands in `~`:
   `./skill-spec.json` (from `--spec <path>` or the domain-neutral default);
 - ONE host-neutral skill at `.claude/skills/skillstate/SKILL.md` — both
   OpenCode (project `.claude/skills/` discovery) and Claude Code read it;
-- OpenCode: `"plugin": ["@skillstate/opencode"]` + an `mcp.skillstate`
-  server spliced into the project `opencode.json(c)` (comment-preserving,
-  timestamped backup; the plugin is auto-installed by OpenCode via Bun);
+- OpenCode: the v2 `"plugins": ["@skillstate/opencode"]` entry + an
+  `mcp.skillstate` server spliced into the project `opencode.json(c)`
+  (comment-preserving, timestamped backup; the plugin is auto-installed by
+  OpenCode via Bun). A config written by an earlier version is migrated: the
+  legacy `plugin` array loses our entry and the key is dropped when nothing
+  of yours is left in it;
 - Claude Code: self-contained `.cjs` hook scripts in
   `.claude/hooks/skillstate/`, hook groups merged into the project
   `.claude/settings.json` with `node "$CLAUDE_PROJECT_DIR/.../<event>.cjs"
@@ -478,7 +547,7 @@ protocol — no task-specific assumptions). Bring your own procedure with
 | `.claude/skills/skillstate/SKILL.md` | **committed** | host-neutral skill shared by OpenCode + Claude Code |
 | `.claude/hooks/skillstate/*.cjs` | **committed** | self-contained Claude hook scripts (inert without state) |
 | `.claude/settings.json` | **committed** | merged hook groups (`$CLAUDE_PROJECT_DIR`-anchored) |
-| `opencode.json(c)` | **committed** | merged `plugin` + `mcp.skillstate` entries |
+| `opencode.json(c)` | **committed** | merged v2 `plugins` + `mcp.skillstate` entries |
 | `.mcp.json` | **committed** | merged `mcpServers.skillstate` stdio entry |
 | `skill-spec.json` | **committed** | declarative task spec (instructions + schema) shared by the whole team; `init` never touches `.gitignore` |
 | `.skillstate/` (state envelope, `install-manifest.json`, session sidecars, `agents/`) | **ignored** | per-session runtime state |
@@ -489,7 +558,7 @@ repo: the Codex glue (`~/.codex/hooks/skillstate/`, `~/.codex/hooks.json`,
 `~/.codex/config.toml`) installed once by `skillstate install`, and the
 machine manifest `~/.skillstate/install-manifest.json`.
 
-Manual step-by-step guides (tested on OpenCode 1.17):
+Manual step-by-step guides (tested on OpenCode 2.0.19):
 
 - [`packages/opencode` → "Install into OpenCode (host)"](./packages/opencode/README.md#install-into-opencode-host) —
   add the npm plugin to the project `opencode.json(c)`, register the MCP
@@ -503,32 +572,45 @@ Verify with `opencode debug config`, `opencode debug skill`, and an
 
 ## Real-world usage
 
-### OpenCode — real O(1) via `experimental.chat.messages.transform`
+### OpenCode — an additive system fragment, never a transcript rewrite
 
-The npm plugin (`SkillStatePlugin`, loaded from the project
-`"plugin": ["@skillstate/opencode"]`) hooks OpenCode's
-`experimental.chat.messages.transform` to trim history **before** each LLM
-call. Old messages are dropped — only the last 3 non-system messages plus an
-injected state message are sent to the model. This is real O(1) prompt
-footprint. State resolves per session from the host cwd:
-`<cwd>/.skillstate/skillstate.json` (global bucket from `~`). The plugin is
-inert when the project has no skillstate state.
+The npm plugin loads from the project `"plugins": ["@skillstate/opencode"]`
+and registers three native tools plus one `context` hook:
 
 ```ts
-import { SkillStatePlugin } from '@skillstate/opencode';
+import SkillStatePlugin from '@skillstate/opencode';
 
-// The ready-made plugin instance (default export too) — what OpenCode
-// loads from "plugin": ["@skillstate/opencode"]:
-const plugin = SkillStatePlugin;
-
-// Need a custom configuration? Build your own instance:
-import { createSkillStatePlugin } from '@skillstate/opencode';
-const configured = createSkillStatePlugin({ maxHistoryMessages: 5 });
+// What OpenCode calls: Plugin.define({ id, setup(ctx) }).
+// setup registers, and returns the cleanup that aborts the event stream.
+await SkillStatePlugin.setup(ctx);
 ```
 
-The plugin also hooks:
-- `experimental.session.compacting`: injects state into compaction context so the summary preserves it.
-- `tool.execute.after`: persists state patches from LLM responses to disk.
+- **`ctx.tool.transform(...)`** — `skillstate_read`, `skillstate_update`,
+  `skillstate_merge`. Each has a JSON Schema, structured output, and a
+  discriminated result (`{ ok: true, value }` / `{ ok: false, error }`), so
+  a rejected patch comes back as a readable reason rather than a host-level
+  tool error.
+- **`ctx.session.hook('context', ...)`** — pushes ONE bounded fragment onto
+  `event.system`. Nothing else. `event.messages` is never read for
+  rewriting and never written.
+- **`ctx.event.subscribe(...)`** — feeds the session registry, which is how
+  a sub-agent is recognised and given its own state file.
+
+The fragment is intentionally small and advisory. It names the state file,
+renders the current notes (bounded — a large document is summarized to a key
+list plus a pointer to `skillstate_read`), lists the tools, and says the
+notes are a side channel rather than the task. It contains no "you must", no
+"always", and no output format, because that framing is what turned a
+persistence aid into a prompt override the first time round.
+
+State resolves from the plugin's own `ctx.location.project.canonical`, not
+from `process.cwd()` — one OpenCode v2 server serves many projects, so the
+process cwd is simply the wrong answer. The plugin is inert when the project
+has no state file: no fragment, and no files created.
+
+Compaction needs no special handling. `compaction` is a separate hook kind
+in v2 and this plugin deliberately does not register it; the first
+agent-loop request after a compaction re-adds the fragment.
 
 ### Claude Code — state-injection strategy (2.1.260)
 
@@ -642,7 +724,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] O(1)/O(T) property test — prompt size stays constant modulo observation growth (`tests/core/runtime-footprint.test.ts`)
 - [x] InterCode CTF canonical 5-field schema (`discovered_flags`, `tested_hypotheses`, `active_files`, `working_dir`, `cmd_summary`)
 - [x] Exactly the §4.3 three-metric triad in chars — Task Accuracy (`accuracy`), Average Prompt Size (`averagePromptSize` = mean chars), Total Token Cost (`totalTokens` = cumulative burn) as the *clean* `getMetrics()`; session bookkeeping (`stepCount`, `totalPromptChars`, `totalChars`, `sessionName`, `lastStepTimestamp`) is separated onto `getBookkeeping()`; Table 1 ratios fixed as fixtures (`tests/core/paper-fidelity.test.ts`)
-- [x] OpenCode adapter: real O(1) via `experimental.chat.messages.transform` — trims history to last N messages + state injection
+- [x] OpenCode v2 adapter (`@non-paper`): native tools via `ctx.tool.transform` (`skillstate_read`/`_update`/`_merge`, typed schemas, discriminated results) plus one additive, bounded `ctx.session.hook('context')` fragment; `event.messages` is never modified, and the invariant is asserted in `tests/opencode/context-integrity.test.ts`
 - [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into the project `.claude/settings.json`; stdio project `.mcp.json` + the shared project `SKILL.md` installed by `skillstate init`
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML, wired machine-level by `skillstate install` and picking up each project's state automatically; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
 - [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
