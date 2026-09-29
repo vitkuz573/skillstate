@@ -39,4 +39,4 @@ npm test >/dev/null 2>&1 || fail "tests. Run: just test"
 printf '  tests ok\n'
 
 npm run test:coverage >/dev/null 2>&1 || fail "coverage gate (100% on all four metrics). Run: just coverage"
-printf '  coverage 100% ok\n'
+printf '  coverage 100%% ok\n'
