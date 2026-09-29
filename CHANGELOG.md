@@ -92,6 +92,34 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
+**Measured, and it is the opposite of the headline on multi-step tasks.** With
+every trigger fixed, paper mode answers the eight-file task correctly — 2/2
+trials, final state naming all eight files, answer 462 — and costs more than
+doing nothing. Three configurations, same fixture, same model:
+
+| configuration | prompt tokens | tool calls | state |
+| --- | --- | --- | --- |
+| notes — transcript, host batching | 245,940 | 16–17 | complete |
+| paper — bounded context, not driven | 319,366 | 17 | complete |
+| paper — bounded context, one action per step | 923,253 | 61–65 | complete |
+
+All three are correct with a complete state. Driving the step loop is what costs
+2.9×, and both paper configurations cost more than the plain transcript at this
+length.
+
+**This is not evidence against the 70.4% figure — it is out of its range.** The
+saving requires a growing transcript to outrun a bounded prompt, and at 9–17
+requests there is nothing to outrun: a bounded prompt of ~15k per step simply
+costs more than a short history. The corpus puts real sessions at a median
+52,322 tokens per step with transcripts reaching millions, so the effect belongs
+to long runs. An eight-file task is too short to bear on the claim either way,
+and an honest report says so rather than picking whichever number flatters.
+
+`SKILLSTATE_DRIVE=0` exists so this is a measurement rather than an argument:
+paper's context replacement with the host's own batching left alone. It is also
+the cheapest paper configuration by 2.9×, which makes it an option rather than a
+diagnostic.
+
 **The paper's step boundary, implemented, behind a flag.** §5.1 gives the
 runtime `execute(aₜ, Σₜ₊₁)` and chains Oₜ into Oₜ₊₁: one observation per step.
 This integration had been delegating execution to the host's agent loop and
