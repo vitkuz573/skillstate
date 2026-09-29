@@ -37,20 +37,30 @@ were rewritten. The O(1) test was also comparing two transcripts with
 *different* latest instructions and passing only because of the pin; it now
 varies only history depth, which is what the claim is about.
 
-**Measured: the cost saving is real, and the task completes.**
+**Measured: 70.4% fewer prompt tokens, at roughly equal accuracy.**
 
-Live A/B on `opencode-go/space-bunny-free`, identical task, number given at
-turn 1, a file read at turn 2, a computation at turn 3:
+Real A/B on `opencode/big-pickle` — the weakest model in the catalogue — 7
+trials per arm, scored by the harness rather than by hand, all seven gates
+passed, exit 0:
 
 | | paper mode | notes (control) |
 | --- | --- | --- |
-| prompt tokens | 81 685 | 203 801 |
-| result | **88557 — correct** | **88557 — correct** |
+| prompt tokens, median | 27 550 | 92 984 |
+| spread (MAD) | 60 — ±0% | 16 504 — ±18% |
+| correct | 6 / 7 | 4 / 7 |
 
-60% fewer prompt tokens, same answer, with Σₜ carrying
-`{"secret_number": 4217, "v3": 21}` across the resets. Reproduced on
-`opencode/mimo-v2.6-flash-free` and on `opencode/big-pickle`, the weakest
-model in the catalogue.
+The spread is the finding. Paper mode's per-run cost is flat to within 60
+tokens because the prompt does not grow; the control swings ±18% as its
+transcript accumulates. 4.0 MADs, well past the threshold the harness
+demands.
+
+**Not claimed: that paper mode is more accurate.** 6/7 vs 4/7 is suggestive
+and not conclusive at this size, and both arms fail the same step — the model
+reads a file and does not write the fact. An earlier 2/2-vs-1/2 reading was
+n=2 noise and is withdrawn. The defensible claim is cost at roughly equal
+accuracy.
+
+Reproduced on `opencode/mimo-v2.6-flash-free` and `opencode-go/space-bunny-free`.
 
 **The bug that nearly buried it, and the shape of the mistake.** Every run
 failed first, and the symptom blamed the model: it would run a tool, get the
@@ -69,7 +79,7 @@ extracted observation per turn, which is what made the mismatch visible: a
 the model. Use `opencode run --standalone` for it — the plugin lives in a
 background server, so CLI environment variables never reach it.
 
-What is still unestablished is scale: three turns, one task shape. Nothing
+What is still unestablished is breadth: one task shape, three turns. Nothing
 here measures a long autonomous run, and §7 notes the method does not help
 when the task is defined over the historical trajectory.
 

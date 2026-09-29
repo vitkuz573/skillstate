@@ -839,21 +839,28 @@ Reproduce: `tests/bench/survey.test.ts` over
 
 ### Whether it still does the work (measured, and it does)
 
-A real A/B on `opencode-go/space-bunny-free`, identical task in both arms.
-The task requires a number given at turn 1 to survive to turn 3 and a file
-read at turn 2 to be recorded, then multiplied:
+A real A/B on `opencode/big-pickle` — the weakest model in the catalogue —
+7 trials per arm, identical task, through the harness's own gates
+(`npm run bench:ab`, exit 0):
 
 | | paper mode | notes (control) |
 | --- | --- | --- |
-| prompt tokens | 81 685 | 203 801 |
-| task result | **88557 — correct** | **88557 — correct** |
+| prompt tokens, median | 27 550 | 92 984 |
+| spread (MAD) | **60 — ±0%** | 16 504 — ±18% |
+| correct | 6 / 7 | 4 / 7 |
 
-Paper mode spent **60% fewer prompt tokens and got the same answer**. Σₜ
-carried both facts across the resets: `{"secret_number": 4217, "v3": 21}`.
+**70.4% fewer prompt tokens**, 4.0 MADs, every gate passed. The interesting
+column is the spread: paper mode's per-run cost is flat to within 60 tokens
+because the prompt does not grow, while the control swings ±18% as the
+transcript accumulates. That variance is the mechanism, visible in one number.
 
-Reproduced on `opencode/mimo-v2.6-flash-free` and on `opencode/big-pickle`,
-the weakest model in the catalogue, which reads both the state block and the
-observation correctly. The integration is not model-specific.
+On accuracy, do not over-read 6/7 vs 4/7 — it is suggestive and not
+conclusive at this sample size, and both arms fail the *same* kind of step
+(the model reads a file and does not write the fact). The claim that holds is
+**cost at roughly equal accuracy**, not that paper mode is more accurate.
+
+Reproduced on `opencode/mimo-v2.6-flash-free` and `opencode-go/space-bunny-free`
+completing the same task. The integration is not model-specific.
 
 **The bug that nearly buried this.** Every one of those runs failed first,
 for a long time, and the symptom blamed the model: it would run a tool, get
