@@ -355,8 +355,12 @@ export const SkillStatePlugin = Plugin.define({
     // The step loop. Present in paper mode only, where the context is
     // replaced and the model therefore cannot fall back on the transcript to
     // keep going; see runtime.ts for why this belongs in code.
+    // `SKILLSTATE_DRIVE=0` measures the trade-off rather than assuming it:
+    // the paper's context replacement, with the host's own batching left
+    // alone. Measured 3.75x cheaper on the eight-file task with the state
+    // lagging the work; see CHANGELOG. Off means the step loop is not driven.
     const runtime =
-      mode === 'paper'
+      mode === 'paper' && process.env['SKILLSTATE_DRIVE'] !== '0'
         ? new RuntimeDriver({
             prompt: async (sessionID, text) => {
               try {
@@ -461,7 +465,7 @@ export const SkillStatePlugin = Plugin.define({
             // while the current one was still running, and the continuation was
             // consumed by a request that got superseded — measured, the
             // `[next step]` marker never reached the model at all.
-            if (mode === 'paper' && isStepEnded(event)) {
+            if (mode === 'paper' && isStepEnded(event) && runtime !== undefined) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
               // Deferred out of the event loop: asking the server to start a

@@ -1305,6 +1305,46 @@ describe('the plugin closes the paper transition from the event stream', () => {
     expect(prompts).toEqual(['ses_root']);
   });
 
+  it('leaves the loop alone when the driver is switched off', async () => {
+    // The switch that makes the cost trade-off measurable rather than arguable:
+    // paper's context replacement with the host's own batching untouched.
+    // Measured on the eight-file task, driving costs 3.75x the prompt tokens
+    // because it takes ~60 single-action steps against the control's ~9 batched
+    // ones. Whether that is worth paying is a product question; that it is
+    // measurable is this flag's job.
+    process.env['SKILLSTATE_DRIVE'] = '0';
+    try {
+      const prompts: string[] = [];
+      const projectDir = paperProjectWithSpec({ step: 0 });
+      const harness = createPluginHarness({
+        projectDir,
+        prompts,
+        events: [
+          {
+            type: 'session.text.ended',
+            data: {
+              sessionID: 'ses_root',
+              assistantMessageID: 'msg_1',
+              ordinal: 0,
+              text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+            },
+          },
+          { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
+        ],
+      });
+      cleanups.push(await harness.start());
+      // The state still lands — only the loop is not driven.
+      await waitFor(
+        () => JSON.parse(fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8')).state.step === 1,
+        'the patch to land',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(prompts).toEqual([]);
+    } finally {
+      delete process.env['SKILLSTATE_DRIVE'];
+    }
+  });
+
   it('applies a recovered patch once, however often the host asks', async () => {
     // The event for the same message still arrives afterwards. If both paths
     // merged it, an accumulator would double its own total — a worse failure
