@@ -143,8 +143,23 @@ and an honest report says so rather than picking whichever number flatters.
 
 `SKILLSTATE_DRIVE=0` exists so this is a measurement rather than an argument:
 paper's context replacement with the host's own batching left alone. It is also
-the cheapest paper configuration by 2.9×, which makes it an option rather than a
-diagnostic.
+the cheapest paper configuration by 2.9× on that task.
+
+**It is not an option, and the thirty-file task is what showed why.** With the
+driver off: exit 0, 8 tool calls, **101,616 prompt tokens** — cheaper than
+anything else measured here — and **no answer at all**, with the state at 1/30.
+The model read files, globbed, grepped, and narrated: *"Step 3 — Next file:
+`src/cfg2.ts` is the only remaining un-read file"*, said after eight tool calls.
+Its state said one file read; its work said several; with the context replaced it
+could not reconcile them.
+
+So the narration is not a tax the driver imposes. It is a property of the model
+under a replaced context, and **the driver is the only thing that keeps going
+through it** — without one, a turn that only narrates ends the run. Driven paper
+on the same task: 30/30, 56–84 calls, ~1.6M tokens, answer correct. Cheaper and
+empty is not a better product, and §5.1 line 12 having the runtime own execution
+is not a detail the implementation inherited — it is the difference between a
+record and nothing.
 
 **The crossover, measured.** Thirty files of forty lines each — 1,200 lines of
 observation, so the control's history has something to grow into. The lever is
