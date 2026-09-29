@@ -92,6 +92,32 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
+**Notes mode stopped ignoring a shipped schema in silence.** A thirty-file run
+left the schema-declared `total` and `done` at their defaults and wrote all
+thirty files under `accumulate`, a namespace the model invented — and declared the
+deviation in its own words, while nothing in the system told it the spec said
+otherwise. A reader checking `done` found an empty list and concluded the arm had
+done nothing.
+
+The spec is now resolved in **both** modes and its declared fields are named to
+the model. Stated, not enforced: §4.1 scopes the schema to a spec P, and notes
+mode has no P because it never formats an A.4 prompt, so free-form notes remain
+defensible. Three details it had to get right, each wrong first:
+
+- the line must not announce a **builtin fallback**. `resolve` returns the
+  generic spec with `source: 'builtin'` when a project ships no
+  `skill-spec.json`; calling that "this project declares these fields" is a false
+  claim about a file that does not exist, and it fired on every project without
+  one, reporting a mismatch that was an artefact of our own fallback;
+- it must not fire when the state already matches — it costs prompt budget on
+  every turn to say something true, and the hint has a standing budget test;
+- it must name the key that is wrong, not only the fields that were expected.
+
+Loading a spec in notes mode also quietly constructed a `FeedbackQueue` there,
+which exists for a `state_patch` the host rejects and notes mode has none. Caught
+by the branch gate refusing to pass; both it and the sink are now keyed on the
+mode rather than on `spec`.
+
 **Measured, and it is the opposite of the headline on multi-step tasks.** With
 every trigger fixed, paper mode answers the eight-file task correctly — 2/2
 trials, final state naming all eight files, answer 462 — and costs more than
