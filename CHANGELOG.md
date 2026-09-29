@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-09-29
+
+**Fix:** `skillstate init` no longer registers the MCP server for opencode.
+
+The 3.0.0 release shipped a config we have since proved harmful. It wired
+both the native plugin AND `mcp.skillstate` into the project `opencode.json`,
+which is not the harmless redundancy it looks like:
+
+- the MCP surface adds **6 457 characters (~1 614 tokens) of resident tool
+  description to every model request** on top of the three native tools, and
+  `spec.get` pours a further 1 286 characters of prose into context per call;
+- the two surfaces **disagree about what may be written**, over one file. The
+  native tools are schema-free; the MCP server validates against the
+  procedural spec, so
+
+  ```
+  native write -> {"added":["decision"],"updated":[],"deleted":[]}
+  MCP    write -> {"valid":false,"error":"Unknown key: decision"}
+  ```
+
+  With both advertised, whether a note is saved depends on which tool the
+  model happened to pick.
+
+`skillstate init` now writes only the `plugins` entry for opencode. The MCP
+package is unchanged and still registered for claude, codex and any other
+MCP-capable host — none of those have a plugin API, so it is the only way in.
+
+A project installed from 3.0.0 is migrated on the next `init`: a stale
+`mcp.skillstate` entry is removed and other MCP servers are left alone.
+
+Nothing about the runtime, the state format, the tools or the paper surface
+changed. 3.0.1 is a configuration fix.
+
 ## [3.0.0] - 2026-09-29
 
 **Breaking:** the OpenCode integration is rewritten for OpenCode v2, and the

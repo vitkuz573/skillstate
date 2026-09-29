@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/cli",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "skillstate CLI — init | run | report.",
   "type": "module",
   "main": "dist/index.js",

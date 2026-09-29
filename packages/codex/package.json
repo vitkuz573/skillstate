@@ -1,6 +1,6 @@
 {
   "name": "@skillstate/codex",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "OpenAI Codex platform adapter for the skillstate runtime.",
   "type": "module",
   "main": "dist/index.js",
