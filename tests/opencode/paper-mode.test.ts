@@ -25,7 +25,7 @@ import {
   PAPER_MESSAGE_ID,
   applyPaperContext,
   buildPaperPrompt,
-  initialTask,
+  currentInstruction,
   latestObservation,
   proceduralSpecWithTask,
 } from '@skillstate/opencode';
@@ -208,17 +208,23 @@ describe('A.4 is byte-exact', () => {
   });
 });
 
-describe('the task survives the replacement', () => {
-  it('pins the first user message, not the most recent one', () => {
+describe('the live instruction survives the replacement', () => {
+  // ── The 2026-09-29 regression ──────────────────────────────────────────
+  //
+  // This used to assert the OPPOSITE: that the FIRST user message is pinned
+  // and the most recent one is ignored. That inversion is what made a model
+  // treat the live instruction as untrusted environment data and refuse the
+  // user's task. The test encoded the bug, so it had to encode the fix.
+  it('pins the MOST RECENT user message, not the first', () => {
     const messages = [
       user('TASK: migrate the MCP server', 'msg_1'),
       assistant('working'),
       user('actually, use native tools instead', 'msg_2'),
     ];
-    expect(initialTask(messages)).toBe('TASK: migrate the MCP server');
+    expect(currentInstruction(messages)).toBe('actually, use native tools instead');
   });
 
-  it('carries the task into every step of P', () => {
+  it('carries the live instruction into P on every step', () => {
     const built = buildPaperPrompt({
       spec: SPEC,
       state: { step: 9 },
@@ -226,6 +232,94 @@ describe('the task survives the replacement', () => {
     });
     expect(built.prompt).toContain('TASK: migrate the MCP server');
     expect(built.task).toBe('TASK: migrate the MCP server');
+  });
+
+  it('replaces the stale opening request with the live one', () => {
+    // The failure was not that the first task was missing; it was that the
+    // first task was still there while the live one had been demoted. Both
+    // being present in the wrong order is what the model reasoned about.
+    const built = buildPaperPrompt({
+      spec: SPEC,
+      state: {},
+      messages: [
+        user('The secret number is 4217. Acknowledge it.'),
+        user('Read every file in src/ and tell me the value of v3.'),
+        user('Now compute: secret_number multiplied by v3.'),
+      ],
+    });
+    expect(built.prompt).toContain('Now compute: secret_number multiplied by v3.');
+    expect(built.prompt).not.toContain('Acknowledge it.');
+  });
+
+  it('puts the live instruction ABOVE the spec text, not below it', () => {
+    // Below the standing instructions it reads as another paragraph of
+    // guidance; at the top it reads as the request.
+    const withTask = proceduralSpecWithTask(SPEC, 'do the thing now');
+    expect(withTask.instructions.indexOf('do the thing now')).toBeLessThan(
+      withTask.instructions.indexOf(SPEC.instructions),
+    );
+  });
+
+  it('skips a blank user turn rather than rendering an empty task', () => {
+    const messages = [user('the real request'), user('   ')];
+    expect(currentInstruction(messages)).toBe('the real request');
+  });
+
+  it('finds no instruction when every user turn is blank', () => {
+    expect(currentInstruction([user('  '), user('')])).toBe('');
+  });
+
+  it('joins several text parts of one message', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'first part' }, { type: 'text', text: 'second part' }] },
+    ];
+    expect(currentInstruction(messages)).toBe('first part\nsecond part');
+  });
+
+  it('ignores content parts that are not text', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'image', url: 'x' }, { type: 'text', text: 'the ask' }] },
+    ];
+    expect(currentInstruction(messages)).toBe('the ask');
+  });
+
+  it('finds nothing in a session that opened with a system message', () => {
+    expect(currentInstruction([{ role: 'system', content: [{ type: 'text', text: 'sys' }] }])).toBe('');
+  });
+
+  it('reproduces the 2026-09-29 live failure and prevents it', () => {
+    // The exact shape of the live A/B that lost the task: a number given at
+    // turn 1, distractors, then an instruction at turn 5 that only makes
+    // sense if turn 1 is still present. Before the fix, turn 5's text landed
+    // in the observation slot and the model refused it as untrusted; after,
+    // it is the instruction and the opening request is gone.
+    const messages = [
+      user('The secret number is 4217. Remember it and acknowledge in one short sentence.'),
+      assistant('Noted.'),
+      user('List the files in the current directory.'),
+      assistant('src/mod1.ts src/mod2.ts src/mod3.ts'),
+      user('Read src/mod3.ts and tell me the value of v3.'),
+      assistant('v3 is 21.'),
+      user('Now compute: secret_number multiplied by v3. Reply with only the final integer.'),
+    ];
+    const built = buildPaperPrompt({
+      spec: SPEC,
+      state: { secret_number: 4217, v3: 21 },
+      messages,
+    });
+    // The live instruction is what the model must act on.
+    expect(built.prompt).toContain('Now compute: secret_number multiplied by v3.');
+    // It is NOT in the observation slot, which is the defect.
+    const observationLine = built.prompt.slice(built.prompt.indexOf('Latest Observation:'));
+    expect(observationLine).not.toContain('Now compute');
+    // The instruction sits in P, above the spec's own text.
+    expect(built.prompt.indexOf('Now compute')).toBeLessThan(
+      built.prompt.indexOf(SPEC.instructions),
+    );
+    // And the facts it needs are in Σₜ, which is the only thing carrying them
+    // now that the transcript is gone.
+    expect(built.prompt).toContain('"secret_number":4217');
+    expect(built.prompt).toContain('"v3":21');
   });
 
   it('leaves P untouched when the session has no user turn', () => {
@@ -250,18 +344,31 @@ describe('choosing the observation Oₜ', () => {
     expect(latestObservation(messages).source).toBe('tool');
   });
 
-  it('falls back to the newest user turn when there is no tool result', () => {
+  it('NEVER places a user turn in the observation slot', () => {
+    // The 2026-09-29 fix. A user message here is a category error: A.4 says
+    // the observation is what the environment returned, so a request placed
+    // in this slot reads as data about the world. The model took that reading
+    // and refused the user's own instruction. The live instruction travels in
+    // P instead, via `currentInstruction`.
     const observation = latestObservation([user('older'), assistant('a'), user('newer')]);
-    expect(observation.content).toBe('newer');
-    expect(observation.source).toBe('user');
+    expect(observation.content).toBe('');
+    expect(observation.source).toBe('empty');
   });
 
-  it('skips a user turn with no text', () => {
+  it('still reports the tool result when both a tool turn and a user turn exist', () => {
+    // The tool result is the real observation; the user turn goes to P and
+    // must not displace it.
+    const observation = latestObservation([tool('the tool output'), user('do the next thing')]);
+    expect(observation.content).toBe('the tool output');
+    expect(observation.source).toBe('tool');
+  });
+
+  it('ignores a user turn that carries no text', () => {
     const observation = latestObservation([
       user('the task'),
       { id: 'm', role: 'user', content: [{ type: 'image', url: 'x' }] },
     ]);
-    expect(observation.content).toBe('the task');
+    expect(observation.source).toBe('empty');
   });
 
   it('reports an empty session honestly rather than inventing one', () => {
@@ -279,9 +386,9 @@ describe('choosing the observation Oₜ', () => {
     expect(latestObservation([{ id: 'm', role: 'user', content: 'plain string' }]).content).toBe('');
   });
 
-  it('joins several text parts of one message', () => {
+  it('joins several text parts of one tool message', () => {
     const observation = latestObservation([
-      { id: 'm', role: 'user', content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] },
+      { id: 'm', role: 'tool', content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] },
     ]);
     expect(observation.content).toBe('one\ntwo');
   });
@@ -290,7 +397,7 @@ describe('choosing the observation Oₜ', () => {
     const observation = latestObservation([
       {
         id: 'm',
-        role: 'user',
+        role: 'tool',
         content: [null, 'bare', { type: 'text' }, { type: 'text', text: 'kept' }],
       },
     ]);
@@ -303,16 +410,16 @@ describe('choosing the observation Oₜ', () => {
 
   it('skips a user turn that is only whitespace and keeps looking', () => {
     expect(
-      initialTask([user('   \n ', 'msg_blank'), assistant('hi'), user('the real task', 'msg_t')]),
+      currentInstruction([user('   \n ', 'msg_blank'), assistant('hi'), user('the real task', 'msg_t')]),
     ).toBe('the real task');
   });
 
-  it('finds no task in a session that opened with a system message', () => {
-    expect(initialTask([{ id: 'm', role: 'system', content: 'be helpful' }])).toBe('');
+  it('finds no instruction in a session that opened with a system message', () => {
+    expect(currentInstruction([{ id: 'm', role: 'system', content: 'be helpful' }])).toBe('');
   });
 
-  it('finds no task when every user turn is blank', () => {
-    expect(initialTask([user('  '), assistant('talking')])).toBe('');
+  it('finds no instruction when every user turn is blank', () => {
+    expect(currentInstruction([user('  '), assistant('talking')])).toBe('');
   });
 });
 
@@ -387,16 +494,24 @@ describe('replacing the model-facing context', () => {
 
 describe('the O(1) claim', () => {
   it('produces the same prompt size for a short and a very long transcript', () => {
+    // The O(1) claim is about HISTORY DEPTH, so the test must vary only that.
+    // The previous version compared two transcripts whose latest user turns
+    // differed ("TASK: x" vs "here is the file"), which passed only because
+    // the first user turn was pinned; once the live instruction is used, the
+    // comparison correctly reports a difference — and the difference is the
+    // instruction, not the history.
     const state = { step: 4, done: ['a', 'b'] };
+    const instruction = user('TASK: x');
     const short = buildPaperPrompt({
       spec: SPEC,
       state,
-      messages: [user('TASK: x'), tool('obs')],
+      messages: [instruction, tool('obs')],
     });
+    // Same live instruction, 45 extra messages of history behind it.
     const long = buildPaperPrompt({
       spec: SPEC,
       state,
-      messages: [user('TASK: x'), ...longTranscript().slice(2), tool('obs')],
+      messages: [instruction, assistant('chatter'), user('TASK: x'), ...longTranscript().slice(4), instruction, tool('obs')],
     });
     expect(long.discardedMessages).toBeGreaterThan(40);
     expect(long.prompt.length).toBe(short.prompt.length);
@@ -491,12 +606,17 @@ describe('the plugin in paper mode', () => {
     expect(promptOf(result.messages)).toContain('Skill Execution State:');
   });
 
-  it('still carries the user task', async () => {
+  it('carries the LIVE instruction, not the opening request', async () => {
+    // The 2026-09-29 regression, end to end through the plugin. The old
+    // assertion here demanded the OPENING request be carried and silently
+    // accepted the live one being dropped into the observation slot — which
+    // is the failure that cost a real task. `longTranscript`'s last user turn
+    // is "here is the file", and that is what must reach the model.
     const projectDir = paperProject({ step: 1 });
     const result = await runContext(projectDir, longTranscript());
-    expect(promptOf(result.messages)).toContain(
-      'TASK: migrate the MCP server to the v2 plugin API',
-    );
+    const prompt = promptOf(result.messages);
+    expect(prompt).toContain('here is the file');
+    expect(prompt).not.toContain('TASK: migrate the MCP server to the v2 plugin API');
   });
 
   it('stays inert until the session has saved something', async () => {

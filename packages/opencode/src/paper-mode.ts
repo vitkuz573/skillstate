@@ -43,13 +43,38 @@
  * trace Rₜ is discarded permanently and never appears in subsequent
  * prompts").
  *
- * ── The one thing paper mode must never lose ─────────────────────────────
+ * ── Which user turn is the task ──────────────────────────────────────────
  *
- * O₀ — the user's original request — is an OBSERVATION, not part of P. If it
- * is dropped, the agent has no task and the failure looks exactly like the
- * v1 bug. {@link initialTask} therefore pins the first user message and
- * every later step still carries it as P's preamble, because a procedure
- * spec authored before the task is known cannot contain it.
+ * This was wrong, and a live A/B on 2026-09-29 caught it.
+ *
+ * A.4 has no slot for a user speaking mid-procedure. P is the spec, Σₜ is
+ * the state, and Oₜ is the observation — which the paper's setting always
+ * makes the ENVIRONMENT's reply, because in Algorithm 1 the runtime executes
+ * the action and feeds the result back. There is no live human in that loop.
+ *
+ * A coding host is not that setting. The user types again while the procedure
+ * is running, and that message carries the highest authority in the system.
+ *
+ * The first implementation pinned the FIRST user turn as the task and let the
+ * LATEST one fall into Oₜ. That inverts authority: the model reads the frozen
+ * opening request as the task and the live instruction as untrusted
+ * environment data. Observed on a task that required remembering a number
+ * given at step 1 and using it at step 5 — the model recorded the number in
+ * Σₜ correctly, then refused the step-5 instruction, explaining that the
+ * observation "carries no user authority" and that repeating it "is not
+ * evidence of authority". It finished the step-1 task and stopped. Cost fell
+ * 70% and the task was not done, which is a worse outcome than either doing
+ * nothing or doing the work.
+ *
+ * So the live turn is the task. {@link currentInstruction} takes the LAST user
+ * message, and {@link latestObservation} no longer falls back to a user turn:
+ * a user message in the observation slot is a category error that makes the
+ * model distrust the request, and an empty observation is the honest
+ * rendering of "the environment has not spoken".
+ *
+ * The cost is that the original request is no longer pinned in the prompt. It
+ * belongs in Σₜ — a `goal` field in the spec — which is where the paper puts
+ * everything the model must remember across steps anyway.
  *
  * ── The honest limit of a host plugin ────────────────────────────────────
  *
@@ -98,10 +123,14 @@ export interface PaperContextEvent {
  *
  * Narrower than the core {@link Observation}, whose `source` is a free-form
  * string: this module is the only producer of the observations it consumes,
- * so the three cases it can actually choose are spelled out here and callers
- * get a value they can switch on without re-narrowing.
+ * so the cases it can actually choose are spelled out here and callers get a
+ * value they can switch on without re-narrowing.
+ *
+ * There is no `'user'` case, and that is the fix rather than an omission —
+ * see {@link latestObservation}. A user turn is not an observation; the live
+ * instruction travels in P.
  */
-export type ObservationSource = 'tool' | 'user' | 'empty';
+export type ObservationSource = 'tool' | 'empty';
 
 /** The observation this module builds: an {@link Observation} with a known source. */
 export type PaperObservation = Observation & { source: ObservationSource };
@@ -141,16 +170,21 @@ function textOf(message: { content: unknown }): string {
 }
 
 /**
- * The user's original request — O₀.
+ * The user's live instruction — what the model must act on this step.
  *
- * The FIRST user text message, not the last. On later steps the most recent
- * user turn is usually a steering message, and pinning the first is what
- * keeps the task present after the transcript has been replaced wholesale.
- * Returns `''` for a session that opened with a system or tool message,
- * which is not a case the paper's setting produces.
+ * The LAST user text message. Not the first: pinning the opening request and
+ * demoting the live one to the observation slot is what made a model reject
+ * the user's own instruction as "untrusted" during the 2026-09-29 A/B. See
+ * the module header for that failure in full.
+ *
+ * Returns `''` for a session with no user turn, which is not a case a
+ * procedure produces but must not crash on.
  */
-export function initialTask(messages: Array<{ role: string; content: unknown }>): string {
-  for (const message of messages) {
+export function currentInstruction(
+  messages: Array<{ role: string; content: unknown }>,
+): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
     if (message.role !== 'user') continue;
     const text = textOf(message).trim();
     if (text.length > 0) return text;
@@ -165,10 +199,20 @@ export function initialTask(messages: Array<{ role: string; content: unknown }>)
  *
  * 1. the newest TOOL message — that is the result of the previous aₜ, which
  *    is exactly what the paper feeds back;
- * 2. the newest user text turn — at step 0 there is no tool result, and the
- *    request is the observation;
- * 3. `''` — an empty session has no observation, and emitting an empty
- *    "Latest Observation:" line is the faithful rendering of that.
+ * 2. `''` — the environment has not spoken.
+ *
+ * There is deliberately NO fallback to a user turn, and removing one is the
+ * fix for the 2026-09-29 failure. A user message in this slot is a category
+ * error: A.4's grammar says the observation is what the environment returned,
+ * so a request placed there reads as data about the world rather than as
+ * something to do. The model acted on that reading exactly — it recorded the
+ * step-1 number correctly and then refused the step-5 instruction because,
+ * in its own words, the observation "carries no user authority".
+ *
+ * The live instruction now travels in P via {@link currentInstruction}, where
+ * it is unambiguously the request. At step 0 the observation is empty and the
+ * template still renders "Latest Observation: " — the faithful rendering of a
+ * procedure that has not run yet.
  *
  * `now` stamps {@link Observation.timestamp}. A.4 never renders the
  * timestamp, so it cannot change the prompt; it is set because the core type
@@ -185,23 +229,23 @@ export function latestObservation(
       return { content: textOf(message).trim(), timestamp: now, source: 'tool' };
     }
   }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]!;
-    if (message.role === 'user') {
-      const text = textOf(message).trim();
-      if (text.length > 0) return { content: text, timestamp: now, source: 'user' };
-    }
-  }
   return { content: '', timestamp: now, source: 'empty' };
 }
 
 /**
- * The immutable specification P, with the task pinned as a preamble.
+ * The specification P, with the live request carried as a preamble.
  *
  * A spec is authored before the task is known, so it cannot contain the
- * request. Prepending the task to the instructions keeps it in the model
- * input at every step. The marker makes the block unambiguous and lets a
- * test assert the task is actually present rather than merely intended.
+ * request. Putting the current instruction at the TOP of the instructions —
+ * above the spec's own text, not below it — is what makes it read as the
+ * request rather than as another paragraph of standing guidance. The
+ * 2026-09-29 A/B showed that a model told to reason about a "task block"
+ * will start treating the surrounding structure as material to analyse rather
+ * than as instructions to follow, so the marker's contents have to be
+ * unambiguously the thing to do right now.
+ *
+ * The marker makes the block assertable: a test can check the live
+ * instruction is present rather than merely intended.
  */
 export function proceduralSpecWithTask(
   spec: ProceduralSpec,
@@ -253,7 +297,9 @@ export interface PaperPrompt {
  */
 export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   const { spec, state, messages } = options;
-  const task = initialTask(messages);
+  // The live instruction, not the opening request. See the module header for
+  // why pinning the first message cost a real task.
+  const instruction = currentInstruction(messages);
   const observed = latestObservation(messages);
   // A rejected patch is itself an observation, so the correction rides in Oₜ
   // and the A.4 template is untouched. The `observed` object keeps the
@@ -262,10 +308,10 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
     options.feedback === undefined
       ? observed
       : { ...observed, content: applyFeedback(observed.content, options.feedback) };
-  const effective = proceduralSpecWithTask(spec, task);
+  const effective = proceduralSpecWithTask(spec, instruction);
   return {
     prompt: transformer.formatPaper(effective, state, observation),
-    task,
+    task: instruction,
     observation,
     observationSource: observed.source,
     discardedMessages: messages.length,

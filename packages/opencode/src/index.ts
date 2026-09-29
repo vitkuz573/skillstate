@@ -62,7 +62,7 @@ export {
   PAPER_MESSAGE_ID,
   applyPaperContext,
   buildPaperPrompt,
-  initialTask,
+  currentInstruction,
   latestObservation,
   proceduralSpecWithTask,
 } from './paper-mode.js';
