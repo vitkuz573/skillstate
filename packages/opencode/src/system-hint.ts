@@ -131,7 +131,7 @@ function purposeLine(initialized: boolean, statePath: string): string {
  * It fires once per silence, not every turn: a notice that repeats forever
  * is wallpaper, and after the second copy nobody reads it.
  */
-function driftNotice(turnsSinceWrite: number): string {
+export function driftNotice(turnsSinceWrite: number): string {
   return `Note: ${turnsSinceWrite} turns have passed without a change to this state file.`;
 }
 

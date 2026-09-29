@@ -12,7 +12,7 @@ import { describe as group, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { dumpPromptShape } from '@skillstate/opencode';
+import { dumpDrift, dumpPromptShape } from '@skillstate/opencode';
 
 let dirs: string[] = [];
 
@@ -118,5 +118,62 @@ group('dumpPromptShape', () => {
         { role: 'user', content: [] },
       ]),
     ).not.toThrow();
+  });
+});
+
+/**
+ * The anti-drift diagnostic.
+ *
+ * This one answers a different question from `dumpPromptShape`. That records
+ * what the host sent; this records what went out to the model AND what the
+ * model had done about it — which is the only way to tell "the notice was
+ * ignored" from "the notice was never built". Both look identical from
+ * outside, and that ambiguity is the whole reason the notice's effect has to
+ * be measured rather than assumed.
+ */
+group('dumpDrift', () => {
+  const line = (turns: number, notice: boolean, writes: number) => ({
+    scope: '',
+    turns,
+    notice,
+    writes,
+  });
+
+  it('does nothing when no path is configured', () => {
+    expect(() => dumpDrift(undefined, line(1, false, 0))).not.toThrow();
+    expect(() => dumpDrift('', line(1, false, 0))).not.toThrow();
+  });
+
+  it('records the fragment count, the notice flag and the write count', () => {
+    const file = scratch();
+    dumpDrift(file, line(14, true, 3));
+    const [entry] = readLines(file);
+    expect(entry).toMatchObject({ turns: 14, notice: true, writes: 3 });
+  });
+
+  it('separates a notice that was sent from one that was not', () => {
+    // The distinction the diagnostic exists for: same session, same silence,
+    // and the only difference is whether the sentence was in the prompt.
+    const file = scratch();
+    dumpDrift(file, line(11, false, 0));
+    dumpDrift(file, line(12, true, 0));
+    const entries = readLines(file);
+    expect(entries[0]!.notice).toBe(false);
+    expect(entries[1]!.notice).toBe(true);
+  });
+
+  it('appends one line per turn so a session reads in order', () => {
+    // Reading a live session means reading it in order, which is why this is
+    // append-only rather than a rewrite of the final state.
+    const file = scratch();
+    for (let i = 1; i <= 3; i += 1) dumpDrift(file, line(i, false, 0));
+    const entries = readLines(file);
+    expect(entries.map((e) => e['turns'])).toEqual([1, 2, 3]);
+  });
+
+  it('swallows an unwritable path instead of breaking the agent loop', () => {
+    // Same rule as every other diagnostic: a throw inside the context hook
+    // ends the agent's turn, which costs far more than a missing line.
+    expect(() => dumpDrift('/nonexistent-directory/deeper/drift.log', line(1, false, 0))).not.toThrow();
   });
 });

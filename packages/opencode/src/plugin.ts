@@ -95,7 +95,7 @@ import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
 import { ProjectStateStore } from './state-store.js';
-import { buildStateHint } from './system-hint.js';
+import { buildStateHint, driftNotice } from './system-hint.js';
 import { registerTools } from './tools.js';
 
 /** Stable plugin id — scopes plugin storage and identifies it in `/api/plugin`. */
@@ -154,6 +154,44 @@ export function dumpPromptShape(
 }
 
 /**
+ * One line per turn of the anti-drift diagnostic.
+ *
+ * The drift notice has a claim attached to it — "the model drifts, the notice
+ * brings it back" — and neither half can be checked from inside the process.
+ * A notice in a prompt is not an observation of a model: the fragment may be
+ * built correctly and the model may ignore it, and the two look identical
+ * from the code's side. Worse, both look identical from the *outside* too,
+ * which is what made the earlier `tool-result` bug so expensive to find.
+ *
+ * So each line carries the evidence that distinguishes them:
+ *
+ * - `notice` — was the drift sentence in the fragment that went out this turn;
+ * - `writes` — how many times the state file had changed when it went out, so
+ *   a notice that repeats forever is visible as a flat counter;
+ * - `fragments` — how many turns had passed without a change.
+ *
+ * That is enough to say "the notice fired and the state moved afterwards" or
+ * "the notice fired and nothing happened", which is the only claim worth
+ * making about it.
+ *
+ * @non-paper diagnostics. Enabled by `SKILLSTATE_DEBUG_DRIFT=<path>`.
+ * Separate from {@link dumpPromptShape} because it answers a different
+ * question: that one asks what the host sent, this one asks what the model
+ * did about what we sent.
+ */
+export function dumpDrift(
+  path: string | undefined,
+  record: { readonly scope: string; readonly turns: number; readonly notice: boolean; readonly writes: number },
+): void {
+  if (path === undefined || path.length === 0) return;
+  try {
+    fs.appendFileSync(path, `${JSON.stringify(record)}\n`);
+  } catch {
+    // Diagnostics must never break the agent loop.
+  }
+}
+
+/**
  * The plugin definition.
  *
  * `setup` wires the session registry, the project state store, the native
@@ -198,6 +236,10 @@ export const SkillStatePlugin = Plugin.define({
     const feedback = spec === undefined ? undefined : new FeedbackQueue();
     // Turns taken per scope without the state changing, for the drift notice.
     const turnsSinceWrite = new Map<string, number>();
+    // Applied patches per scope, so the drift diagnostic can show whether a
+    // notice was followed by a write — the only half of the claim that is
+    // actually about the model.
+    const stateWrites = new Map<string, number>();
 
     await ctx.tool.transform((editor) => {
       registerTools(editor, { store, sessions, scopeFor });
@@ -233,7 +275,9 @@ export const SkillStatePlugin = Plugin.define({
             // starts again. Without this it would only ever climb and the
             // notice would become a permanent wallpaper line.
             if (outcome.applied && isTextEnded(event)) {
-              turnsSinceWrite.set(scopeFor(event.data.sessionID), 0);
+              const key = scopeFor(event.data.sessionID);
+              turnsSinceWrite.set(key, 0);
+              stateWrites.set(key, (stateWrites.get(key) ?? 0) + 1);
             }
           }
         }
@@ -304,6 +348,15 @@ export const SkillStatePlugin = Plugin.define({
       });
       if (hint.length === 0) return;
       event.system.push({ type: 'text', text: hint });
+      // What went out, and what the model had done about it at the time. The
+      // only way to tell "the notice was ignored" from "the notice was never
+      // built" — the two are indistinguishable from the outside otherwise.
+      dumpDrift(process.env['SKILLSTATE_DEBUG_DRIFT'], {
+        scope,
+        turns: sinceWrite,
+        notice: hint.includes(driftNotice(sinceWrite)),
+        writes: stateWrites.get(scope) ?? 0,
+      });
     });
 
     return () => {

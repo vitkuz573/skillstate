@@ -82,7 +82,7 @@ export type { PaperStateSinkOptions, SinkOutcome, SinkRejection } from './respon
 export { FeedbackQueue, applyFeedback, feedbackFor } from './feedback.js';
 export type { PendingFeedback } from './feedback.js';
 /** `SKILLSTATE_DEBUG_PROMPT` diagnostic — what the host actually handed us. */
-export { dumpPromptShape } from './plugin.js';
+export { dumpPromptShape, dumpDrift } from './plugin.js';
 /** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
 export {
   DEFAULT_PLUGIN_MODE,
