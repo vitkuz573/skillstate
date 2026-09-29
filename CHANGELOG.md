@@ -161,6 +161,44 @@ empty is not a better product, and §5.1 line 12 having the runtime own executio
 is not a detail the implementation inherited — it is the difference between a
 record and nothing.
 
+**Oₜ was carrying an order, and §2 forbids it.** The runtime put the model's own
+previous action into the observation channel, so the model could tell why it was
+being asked again. It began answering *"I'll read cfg3.ts next, as directed by
+the observation"* and then reading cfg3.ts: it obeyed a stored order instead of
+choosing, made 54 `read` calls for thirty files, and used grep three times as a
+side errand, where a control with no step driver read one file, ran ONE grep and
+finished in six calls. §2 says the agent receives "only Oₜ — never prior
+observations or actions."
+
+With the order removed and nothing put there instead, re-reads halved — 41 reads
+against 53, 11 wasted against 22 — and the model found the batching strategy on
+its own. But the run never converged: 98 text blocks against 43, 7.9M prompt
+tokens against 1.6M. The runtime re-prompts when a turn produced a patch but no
+tool call, and with nothing saying why, the model looped.
+
+So the environment now **reports** what it did — "step N ended; your state patch
+was applied; nothing was executed" — and the model chooses its own next action,
+which is the division the paper draws: `execute(aₜ, Σ_{t+1})` is the runtime's,
+choosing aₜ is the model's. The order path survives behind
+`SKILLSTATE_CONTINUATION=1` so its cost stays measurable, and the two carry
+different markers, because a report labelled "do it now" is an order wearing a
+report's clothes.
+
+**Two things found by looking rather than reasoning.** A per-item `values` map
+was added to the schema on the theory that the model re-read because it could
+not verify an aggregate. It made things *worse* — 103 reads for 29 files, three
+files read thirteen times each. The transcripts showed the real mechanism:
+batching within a turn produces several observations and eq. 1 gives the prompt
+one, so all but the last are discarded. The model's own words: *"the last
+observation re-read cfg8.ts and confirmed REAL_8 = 19 — already recorded"* — and
+then it read cfg8 again. The thrash is data loss, not doubt.
+
+And the model **deleted its own complete state** at the end, with
+`{"total": null, "done": null}`, turning a finished 30/30 record into `{}`. Per
+§3 rule 2 that is the correct result and the implementation is faithful; the
+model chose destruction. It is the same class as the array-truncation finding
+below, except that this one empties the artifact at the moment it is finished.
+
 **The crossover, re-measured: the saving did not survive n=3.** Thirty files of
 forty lines each, 1,200 lines of observation. Six runs, all six 30/30 and all
 six correct:
