@@ -78,14 +78,17 @@ harnesses later = re-running `init` (the manifest merges host records).
    `.claude/skills/skillstate/SKILL.md`: both OpenCode (which reads project
    `.claude/skills/` too) and Claude Code load this same file. Nothing is
    ever installed into `~/.config/opencode`, `~/.claude`, or `~/.codex`.
-3. For OpenCode: splices the v2 `"plugins": ["@skillstate/opencode"]` entry
-   (npm plugin, auto-installed by OpenCode via Bun — no generated plugin
-   file) and the `mcp.skillstate` local server (`["npx", "-y",
-   "@skillstate/mcp@^3"]`, `enabled: true`) into the PROJECT
-   `opencode.jsonc|json` — top-level comments and unknown keys preserved, a
-   timestamped `.bak.*` backup when the file changes. A config written by an
-   earlier version is migrated: our entry leaves the legacy `plugin` array,
-   and that key is dropped when nothing of the user's is left in it.
+3. For OpenCode: splices ONLY the v2 `"plugins": ["@skillstate/opencode"]`
+   entry (npm plugin, auto-installed by OpenCode via Bun — no generated
+   plugin file) into the PROJECT `opencode.jsonc|json` — top-level comments
+   and unknown keys preserved, a timestamped `.bak.*` backup when the file
+   changes. The `mcp.skillstate` local server is NOT written here: the v2
+   plugin contributes native tools, and registering both costs ~1.6k tokens
+   of tool description per request while leaving two surfaces with
+   incompatible write rules over one file. A config written by an earlier
+   version is migrated: our entry leaves the legacy `plugin` array, that key
+   is dropped when nothing of the user's is left in it, and a stale
+   `mcp.skillstate` entry is removed.
 4. For Claude Code: writes self-contained `.cjs` hook scripts into
    `.claude/hooks/skillstate/`, merges the skillstate hook groups into the
    PROJECT `.claude/settings.json` (`UserPromptSubmit` /
@@ -160,7 +163,7 @@ the manifest removed.
 | `.claude/skills/skillstate/SKILL.md` | **committed** | host-neutral skill shared by OpenCode + Claude Code |
 | `.claude/hooks/skillstate/*.cjs` | **committed** | self-contained Claude hook scripts (inert without state) |
 | `.claude/settings.json` | **committed** | merged hook groups (`$CLAUDE_PROJECT_DIR`-anchored) |
-| `opencode.json(c)` | **committed** | merged `plugin` + `mcp.skillstate` entries |
+| `opencode.json(c)` | **committed** | merged v2 `plugins` entry (no MCP entry for opencode) |
 | `.mcp.json` | **committed** | merged `mcpServers.skillstate` stdio entry |
 | `skill-spec.json` | **committed** | declarative task spec (instructions + schema) shared by the whole team; `init` never touches `.gitignore` |
 | `.skillstate/` (state envelope, `install-manifest.json`, session sidecars, `agents/`) | **ignored** | per-session runtime state |

@@ -39,31 +39,40 @@ host's own API rather than against hand-written local declarations.
 // opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@skillstate/opencode"],
-  "mcp": {
-    "skillstate": {
-      "type": "local",
-      "command": ["npx", "-y", "@skillstate/mcp@^3"],
-      "enabled": true
-    }
-  }
+  "plugins": ["@skillstate/opencode"]
 }
 ```
 
-Both entries are registered on purpose:
-
-- **`plugins`** — the native path. Typed schemas, structured output, no
-  JSON-RPC round-trip. This is the fast one.
-- **`mcp.skillstate`** — the portable path. Any MCP-capable host reads the
-  same state through it.
-
-They address one file (`<project>/.skillstate/skillstate.json`), so they can
-never disagree about what is saved.
+That is the whole configuration. The MCP server is deliberately NOT
+registered here — see below.
 
 OpenCode v1 is not supported: the config key was `plugin`, and a v1 plugin
 implementation does not run in v2 at all. `skillstate init` migrates a config
 written by an earlier version — our entry is removed from the legacy `plugin`
-array and the key is dropped when nothing of yours is left in it.
+array, the key is dropped when nothing of yours is left in it, and an
+`mcp.skillstate` entry from a previous install is removed.
+
+### Why there is no MCP entry here
+
+The MCP server is still shipped and still registered for **Claude Code,
+Codex and any other MCP-capable host** — there it is the only way in. In
+OpenCode the plugin already provides native tools, so registering both is not
+free redundancy:
+
+    native   3 tools    3 357 chars   ~839 tokens
+    MCP     14 tools    9 814 chars  ~2 454 tokens
+    extra                 6 457 chars  ~1 614 tokens on EVERY request
+
+`spec.get` pours a further 1 286 characters of prose into context per call.
+
+Worse, the two surfaces disagree about what may be written, over one file:
+
+    native write -> {"added":["decision"],"updated":[],"deleted":[]}
+    MCP    write -> {"valid":false,"error":"Unknown key: decision"}
+
+The native tools are schema-free; the MCP server validates against the
+procedural spec. With both advertised, whether a note is saved depends on
+which one the model happened to pick.
 
 ## What the plugin registers
 

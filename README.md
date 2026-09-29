@@ -514,12 +514,15 @@ nothing lands in `~`:
   `./skill-spec.json` (from `--spec <path>` or the domain-neutral default);
 - ONE host-neutral skill at `.claude/skills/skillstate/SKILL.md` — both
   OpenCode (project `.claude/skills/` discovery) and Claude Code read it;
-- OpenCode: the v2 `"plugins": ["@skillstate/opencode"]` entry + an
-  `mcp.skillstate` server spliced into the project `opencode.json(c)`
-  (comment-preserving, timestamped backup; the plugin is auto-installed by
-  OpenCode via Bun). A config written by an earlier version is migrated: the
-  legacy `plugin` array loses our entry and the key is dropped when nothing
-  of yours is left in it;
+- OpenCode: the v2 `"plugins": ["@skillstate/opencode"]` entry spliced into
+  the project `opencode.json(c)` (comment-preserving, timestamped backup;
+  the plugin is auto-installed by OpenCode via Bun). The MCP server is NOT
+  registered there — the v2 plugin contributes native tools, and a second
+  surface over one file with different write rules costs 1.6k tokens per
+  request and makes "was this note saved?" depend on which tool the model
+  picked. A config written by an earlier version is migrated: the legacy
+  `plugin` array loses our entry, the key is dropped when nothing of yours is
+  left in it, and a stale `mcp.skillstate` entry is removed;
 - Claude Code: self-contained `.cjs` hook scripts in
   `.claude/hooks/skillstate/`, hook groups merged into the project
   `.claude/settings.json` with `node "$CLAUDE_PROJECT_DIR/.../<event>.cjs"
@@ -546,7 +549,7 @@ protocol — no task-specific assumptions). Bring your own procedure with
 | `.claude/skills/skillstate/SKILL.md` | **committed** | host-neutral skill shared by OpenCode + Claude Code |
 | `.claude/hooks/skillstate/*.cjs` | **committed** | self-contained Claude hook scripts (inert without state) |
 | `.claude/settings.json` | **committed** | merged hook groups (`$CLAUDE_PROJECT_DIR`-anchored) |
-| `opencode.json(c)` | **committed** | merged v2 `plugins` + `mcp.skillstate` entries |
+| `opencode.json(c)` | **committed** | merged v2 `plugins` entry (native tools; no MCP entry for opencode) |
 | `.mcp.json` | **committed** | merged `mcpServers.skillstate` stdio entry |
 | `skill-spec.json` | **committed** | declarative task spec (instructions + schema) shared by the whole team; `init` never touches `.gitignore` |
 | `.skillstate/` (state envelope, `install-manifest.json`, session sidecars, `agents/`) | **ignored** | per-session runtime state |

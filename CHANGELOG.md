@@ -85,6 +85,31 @@ and start emitting state JSON". Three independent causes, all of them ours:
   (`OpenCodeMessage`, `SkillStateHooks`). OpenCode v1 is no longer supported —
   v1 plugin implementations do not run in v2, and the config key was renamed.
 
+### Removed
+
+- **The `mcp.skillstate` entry is no longer written for opencode.**
+  `skillstate init` registers the native plugin only there. The MCP server
+  is unchanged and still registered for claude, codex and any other
+  MCP-capable host — those have no plugin API, so it is the only way in.
+
+  It was not merely redundant. On the real `tools/list` payload the MCP
+  surface adds **6 457 characters (~1 614 tokens) of resident tool
+  description to every model request** on top of the native tools, and
+  `spec.get` pours a further 1 286 characters of prose into context per
+  call. Worse, the two surfaces disagree about what may be written, over
+  one file: the native tools are schema-free, the MCP server validates
+  against the procedural spec, and
+
+  ```
+  native write -> {"added":["decision"],"updated":[],"deleted":[]}
+  MCP    write -> {"valid":false,"error":"Unknown key: decision"}
+  ```
+
+  With both advertised, whether a note is saved depends on which one the
+  model picked. A project installed from the previous version is migrated:
+  a stale `mcp.skillstate` entry is removed, other MCP servers are left
+  alone.
+
 ### Verified
 
 Live on OpenCode 2.0.19, one session, five turns:

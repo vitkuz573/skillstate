@@ -124,7 +124,11 @@ resources return `no skillstate state in this directory — run \`skillstate
 init\`` and nothing is created. Verify with:
 
 ```bash
-opencode debug config   # mcp.skillstate appears in the resolved config
+# NOTE: this server is registered for claude, codex and any other MCP-capable
+# host. It is deliberately NOT registered for opencode, whose v2 plugin
+# provides the same state as native tools — a second surface over one file
+# with different write rules is a hazard, and costs ~1.6k tokens per request
+# in resident tool descriptions.
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
