@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./ab-cli": {
+      "types": "./dist/ab-cli.d.ts",
+      "default": "./dist/ab-cli.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

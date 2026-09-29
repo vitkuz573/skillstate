@@ -4,3 +4,4 @@
 // when `run.js` is the process entry (`node dist/run.js`), never on import.
 export * from './harness.js';
 export * from './run.js';
+export * from './ab/index.js';
