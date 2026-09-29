@@ -330,6 +330,40 @@ group('§10.2 conformance harness', () => {
     expect(metrics.totalTokens).toBe(promptChars + responses.length * responses[0]!.length);
   });
 
+  it('6b. promptChars is the BASE prompt — retry feedback is transport, not Aₜ', async () => {
+    // §8.1: "`promptChars[t]` is `|A_t|` — the base prompt at step t. Retry
+    // feedback is transport cost of the step and is counted in
+    // `responseChars` (it is attached to the call), but it is never part of
+    // `|A_t|`."
+    //
+    // Worth a test because the correct code is one identifier away from the
+    // wrong code: a retried step sends `withRetryFeedback(basePrompt, err)`, and
+    // recording `prompt.length` instead of `basePrompt.length` would look like
+    // a simplification. It would also quietly break the flatness eq. 5 claims,
+    // because a step that retried would report a longer prompt than one that
+    // did not — for reasons that have nothing to do with state growth.
+    const tracker = new TokenTracker();
+    const longError = 'a rejection reason long enough to move the character count on its own';
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: scriptedLlm(['no fence', 'no fence either', llmText('ok', { mood: 'ok' }, 'go')]),
+      execute: fixedExecutor,
+      maxValidationRetries: 2,
+      tracker,
+    });
+
+    await runtime.step(obs('OBS'));
+
+    const step = tracker.steps[0]!;
+    const base = new PromptTransformer().formatPaper(SPEC, { mood: 'neutral', count: 0, log: [] }, obs('OBS'));
+    // Exactly the base, to the character.
+    expect(step.promptChars).toBe(base.length);
+    expect(step.promptChars).toBeLessThan(longError.length + base.length);
+    // And the step did retry, so this is not a case that never exercised the
+    // path it is guarding.
+    expect(step.success).toBe(true);
+  });
+
   it('7. Complexity — O(T) cumulative, and the (T+1)/2 floor', async () => {
     // "For a fixed-size prompt, assert cumulative state chars are O(T) and the
     // measured reduction floor is (T+1)/2."
