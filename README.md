@@ -939,7 +939,8 @@ argument:
 | variable | default | what it changes |
 | --- | --- | --- |
 | `SKILLSTATE_MAX_STEPS=<n>` | 100 | the runtime-driven step ceiling, per §10.1's `Run(... maxSteps = 100)`. A malformed value is ignored rather than clamped, so a typo leaves the ceiling where the code says it is |
-| `SKILLSTATE_DRIVE=0` | driving on | paper's context replacement with the host's own batching left alone — 2.9× cheaper on the eight-file task, and a real option rather than a diagnostic |
+| `SKILLSTATE_DRIVE=0` | driving on | paper's context replacement with **no step loop**. Cheapest paper configuration on the eight-file task (17 calls, complete 8/8, 319,366 tokens) and **no answer at all** on the thirty-file task (101,616 tokens, state 1/30) — a run that ends on a turn that only narrated, because nothing re-prompts. Keep it for measurement; it is not a deployment option. |
+| `SKILLSTATE_CONTINUATION=1` | off | put the model's previous action into Oₜ as an order. §2 forbids it — "the agent receives only Oₜ, never prior observations or actions" — and with it on the model obeys its own stored order instead of choosing: 54 reads for thirty files, one grep as a side errand. Exists so that cost stays measurable. |
 
 Note the direction. Driving the loop is the paper's mechanism and is the
 default: §5.1 line 12 has the runtime own execution. `SKILLSTATE_DRIVE=0` is the
