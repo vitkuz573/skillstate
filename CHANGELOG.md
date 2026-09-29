@@ -7,6 +7,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Measured:** the cost side of the O(1) claim, over 1810 real sessions.
+
+**19 626 479 940 → 211 352 400 prompt tokens. A 98.9% saving, and a bounded
+prompt is cheaper in every single session measured.**
+
+Numbers from the host's own token accounting, read from its local store —
+`message.tokens` with `input` and `cache.read` per assistant message. Not
+modelled, not from the paper: what a real agent loop was actually charged.
+
+| | |
+| --- | --- |
+| sessions | 1810 |
+| steps | 117 418 |
+| host prompt tokens (transcript) | 19 626 479 940 |
+| bounded Aₜ = (P, Σₜ, Oₜ) | 211 352 400 |
+| saved | 19 415 127 540 (**98.9%**) |
+| median per session | 96.6% |
+| sessions where the transcript grew | 1582 / 1810 (87.4%) |
+| **sessions where bounded costs more** | **0 / 1810** |
+
+The last row is the claim worth having. "A bounded prompt usually wins" and "a
+bounded prompt never loses" are different statements, and only the counter
+distinguishes them.
+
+**It survives an unfavourable assumption.** 1 800 is the paper's Table 1 figure
+for an A.4 prompt. If it were badly wrong the result should collapse; it does
+not. At 10 000 tokens per step the saving is still 94.0% and only 35 of 1810
+sessions go the other way. The break-even — the largest bounded prompt that
+still wins in *every* session — is 4 168 tokens/step, against a measured median
+of 52 322. A realistic A.4 prompt is 1 500–3 000 tokens, so the headroom is
+roughly 2×.
+
+**What this does not establish.** It measures COST only. Whether an agent
+given a bounded prompt still completes the work is an outcome question that
+needs a live model, and the quota is exhausted. A cost win with no task
+completion is worth nothing, so `assessReconstruction` refuses any session
+that cannot support the claim (fewer than two steps, a transcript that never
+grew, a gap inside the noise floor) rather than reporting a number anyway. The
+A/B harness is the other half and is still unrun.
+
+**The limit, stated plainly.** A paper prompt is not literally constant: Σₜ
+grows with what the agent records, and an agent that appends to state without
+pruning can rebuild the transcript inside Σₜ. The method does not prevent this.
+It is a schema-authoring discipline (fixed fields, prune `notes`), and an
+honest report has to name it rather than claim O(1) unconditionally.
+
+Implementation: `packages/bench/src/ab/replay.ts` and `survey.ts`, with
+`tests/bench/_support/real-sessions.json` (223 KB) as the real corpus and
+`tests/bench/survey.test.ts` asserting the aggregate.
+
+**Fixed:** a rejected `state_patch` now reaches the model as corrective
+feedback, instead of being silently discarded.
+
+`plugin.ts` called `sink.ingest(event)` and dropped the `SinkOutcome`. All
+seven rejection reasons — `no_block`, `malformed_json`,
+`missing_state_patch`, `missing_action`, `schema_invalid`, `empty_patch`,
+`duplicate`, `write_failed` — were computed and thrown away, so a model whose
+patch failed to parse received a byte-identical next prompt and no indication
+that anything was wrong.
+
+The consequence was not subtle: Σₜ stops moving, and a model silently failing
+for ten steps sees the same stale state each time. §7's rollback-retry cycle
+works in `SkillStateRuntime` because it owns the loop and can re-prompt, but a
+host plugin cannot invoke a tool on the model's behalf and the v2 session API
+has no response hook. So the correction rides in **Oₜ** — the one slot A.4
+gives the model for facts about the environment — rather than in P.
+
+Putting it in Oₜ rather than P is load-bearing, not stylistic. P is the
+operator's specification; appending a correction there would drift the prompt
+from A.4 and inject a *behavioural* instruction into the one surface that must
+not carry one (`tests/opencode/system-hint.test.ts` guards that). A rejected
+patch is the environment refusing and explaining why, which is exactly what an
+observation is.
+
+Guarantees, each with a test:
+
+- a rejected patch is reported to the model on **exactly** the next prompt —
+  `take()` clears on read, because a correction that repeats forever is
+  wallpaper that stops carrying information and hides an ongoing failure;
+- it is **not** in notes mode, where no `state_patch` is ever sent, so a
+  correction there would report a failure that did not happen;
+- sessions are isolated, so one sub-agent's correction never reaches another;
+- an applied patch **clears** any pending correction — stale complaints must
+  not ride alongside good news;
+- the A.4 template and P are byte-identical with and without a correction;
+- a rejection reason added to the union without a message degrades to no
+  correction rather than throwing inside the event loop, where a throw would
+  end the subscription and silently stop session scoping.
+
+This is **not** a retry mechanism: it does not re-prompt, roll back, or count
+attempts. The host's agent loop remains the executor, and §7's bounded retry
+cycle stays where the paper put it — inside a runtime that can own the loop.
+
+**Added:** an A/B harness that refuses to report a number it cannot defend
+(`@skillstate/bench`, `npm run bench:ab`, see `packages/bench/AB.md`).
+
+The 2026-09-29 A/B run of the OpenCode integration reported a 39% saving, with
+`AUDIT.md` byte-identical in both arms. The state file in the instrumented arm
+was unchanged from the seed: the model never called `skillstate_update` or
+`skillstate_read`, so the plugin was decoration and the 39% was the spread
+between two runs of the same non-deterministic system. Nothing flagged it,
+because the pipeline carried a number, and a number has no opinion about
+whether the thing it measured was switched on.
+
+The harness's primary output is a **verdict**, and a percentage is reachable
+only by passing every gate:
+
+- **engagement** — measured by diffing the state file's bytes, not by asking
+  the model. A sink re-writing identical bytes counts as zero writes, so a
+  retry loop cannot manufacture engagement; a pre-existing file is not a write;
+  a trial with fewer than two samples is *unwitnessed* rather than inert, since
+  calling an unwatched run "the integration did nothing" would be an
+  accusation the harness cannot support;
+- **completeness**, **sample-size** (≥2 trials per arm), **comparability**,
+  **task-equivalence** (artifact digests) and **variance** (effect ≥ 1 MAD);
+- **paper-compatibility** — §7 Limitations case (3) predicts no benefit when
+  the task objective is defined over the historical trajectory, so a flat
+  result on an audit-style task is reported as `NOT-A-TEST` rather than as a
+  refutation.
+
+Gates are evaluated cumulatively, so a caller fixing a broken experiment is
+told every problem at once. Statistics are median and MAD rather than mean and
+standard deviation, because one runaway run inflates a standard deviation
+enough to hide a real effect while barely moving the MAD.
+
+Token spend is read from the **host's own store** (`message.tokens`, keyed by
+session) rather than from stdout: the model does not report its own cost
+reliably, a run that dies on a provider error prints an error instead of its
+totals, a session can be re-read after the fact, and the read works with no
+live model — which is the situation right now, with the account quota
+negative.
+
+Acceptance criterion, enforced in `tests/bench/ab-gates.test.ts`: given the
+real 2026-09-29 numbers, the harness returns `INERT` and prints no percentage.
+
 **Added:** paper mode — the model-facing context rebuilt as `Aₜ = (P, Σₜ, Oₜ)`.
 
 The plugin previously had exactly one behaviour: push a bounded fragment onto

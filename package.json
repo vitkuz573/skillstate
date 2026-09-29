@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b",
-    "bench": "npm run build && node ./packages/bench/dist/run.js"
+    "bench": "npm run build && node ./packages/bench/dist/run.js",
+    "bench:ab": "npm run build && node ./packages/bench/dist/ab-cli.js"
   },
   "engines": {
     "node": ">=20"
