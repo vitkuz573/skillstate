@@ -92,12 +92,20 @@ The notice is kept — it is honest, it costs a few tokens, and it may still hel
 a model that does attend to its context — but it is documented as an
 unproven nudge rather than a fix, because that is what it is.
 
-**The paper's step boundary, implemented, measured, and left OFF.** §5.1 gives the
+**The paper's step boundary, implemented, behind a flag.** §5.1 gives the
 runtime `execute(aₜ, Σₜ₊₁)` and chains Oₜ into Oₜ₊₁: one observation per step.
 This integration had been delegating execution to the host's agent loop and
 letting the runtime only re-prompt, which handed the model an unbounded inner
 loop. It used it — 21 tool calls, 3 text blocks, one patch written at the end
 from whatever observation happened to be current.
+
+Withholding tools on alternating requests reproduces §5.1's alternation with the
+host standing in for both `llm` and `execute`. The measurement that put it behind
+a flag — that a tool-less turn produces prose, not a patch — was taken while the
+runtime's step request was being rejected by the host schema, so the report turn
+it leads to had nowhere to go. **That measurement has to be taken again now that
+the runtime actually drives.** Until it is, `SKILLSTATE_STEP_BOUNDARY=1` is
+untested in the field and should stay off.
 
 `SkillStateRuntime`, which owns that loop properly, exists at
 `packages/core/src/runtime.ts:218`, tested and used by `bench` and `cli`, and
@@ -121,15 +129,40 @@ With the boundary off the same task reaches cfg8; with it on it stops at cfg1.
 So it ships behind `SKILLSTATE_STEP_BOUNDARY=1`, correct and tested, and the
 default stays the behaviour that measurably goes further.
 
-**Also measured: `session.prompt` did start a turn — after being moved off the
-event loop.** Called inline from the handler reporting that turn's own
-completion, the host accepted the request and no turn ever began: context
-requests on the eight-file task went 2 → 4 once the call was deferred, with no
-error. An earlier reading of eleven context requests as "the runtime is driving"
-was wrong — those were the host's own loop. And the `catch` that swallowed the
-outcome is gone: a refused step request now records `{"promptFailure": …}` to
-the debug log, because a failure that is indistinguishable from a host declining
-is how a dead call path survives a day of work passing its own tests.
+**Fixed: the runtime's step request was rejected by the host, every time.**
+`SessionPromptInput` declares `readonly text: { … }["text"]`, and that indexing
+is TypeScript's indexed access — `text` **is** the string field, not an object
+containing one. The runtime was sending `{ sessionID, text: { text } }` and the
+host refused every call with `SchemaError: Expected string at ["text"]`.
+
+So the runtime has never once driven a turn, and the section above about
+deferring the call off the event loop was wrong. Deferring changed nothing about
+the payload; it only changed when the rejection happened, and the 2 → 4
+difference I read as success was coincidence.
+
+It was invisible three ways stacked: the type is written the way TypeScript
+writes indexed access; the rejection was swallowed by `catch { return false }`,
+which is indistinguishable from a host declining; and the runtime's own tests
+passed, because they inject a `prompt` stub that accepts anything. The refusal
+log added for diagnosability — not expecting anything — is why it was found.
+
+One change, same model, same four-file fixture:
+
+| | state after the run |
+| --- | --- |
+| before | `{0, 0}` — the state never moved |
+| after | 11 → 33 → 66, files 1 → 2 → 3, every patch arithmetically correct |
+
+**And the last failure was never in the code.** With the runtime driving,
+accumulation was exact and then the model lost the thread: Σ said `files: 2` and
+not *which* two, and in paper mode there is no transcript to recover that from.
+It re-read a file, listed the directory, grepped, and stopped at 66 of 110.
+Giving the spec a `done` list — the smallest change §4.1 says an author makes —
+and changing nothing else, the same task completed with the correct answer.
+
+That is the paper's own position: P is the operator's procedural specification,
+and how to author its schema is §4.1. A spec that records a count instead of a
+set is a bad spec, not a broken runtime.
 
 **Fixed: a read-after-write race that served the model a state that had not
 moved.** The `context` hook learns of a patch from `session.text.ended`, which
