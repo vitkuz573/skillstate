@@ -985,6 +985,17 @@ calls against 45 and 68 — and that is the trade, stated rather than rounded of
 † A third paper run in the earlier n=3 set was killed by us to free the machine,
 not by a fault. It is excluded rather than counted as a failure.
 
+**These are provider token counts, not §4.3 metrics.** §8.2 requires the
+comparison triple to be computed *in raw string characters*, so that any two
+runtimes in any language can be compared without sharing a tokenizer; it says in
+terms that dollar figures and tokenizer heuristics "must be labeled separately as
+estimates — they are not §4.3 metrics and must not be presented as such." The
+figures below are what the provider billed, read from the session database, and
+they are labelled accordingly. A live two-arm comparison cannot easily produce
+§4.3 chars, because the two arms are two separate model sessions rather than two
+instances of one runtime; the core's `TokenTracker` measures the triad properly
+and the conformance suite pins that it does.
+
 **There are two numbers, and quoting only the flattering one is the error this
 project keeps undoing.**
 
