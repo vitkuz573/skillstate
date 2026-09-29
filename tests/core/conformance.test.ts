@@ -18,7 +18,10 @@
  */
 
 import { describe as group, it, expect } from 'vitest';
-import { SkillStateRuntime, PromptTransformer, TokenTracker, mergeState, validatePatch } from '@skillstate/core';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { FileStore, SkillStateRuntime, PromptTransformer, TokenTracker, mergeState, validatePatch } from '@skillstate/core';
 import type { ActionExecutor, LLMFn, Observation, ProceduralSpec, StatePatch } from '@skillstate/core';
 
 // ---------------------------------------------------------------------------
@@ -373,5 +376,59 @@ group('§10.2 conformance harness', () => {
       // What a growing context looks like, stated as the failure to catch.
       expect(ratio).not.toBeGreaterThan(1.5);
     }
+  });
+});
+
+group('§9.3 on-disk format', () => {
+  // Not one of §10.2's seven, and included anyway: the format is the interop
+  // surface, and every other claim in this file is about behaviour inside one
+  // process. A reader in another language is the whole point of the envelope.
+  it('reads only `version` and `state`, ignoring unknown top-level keys', async () => {
+    // "a reader must ignore unknown top-level keys to stay forward-compatible."
+    // Tested by WRITING a file with keys this implementation has never heard of
+    // and checking they neither reach the caller nor fail the read — a reader
+    // that passed them through would hand a second implementation a shape it
+    // cannot interpret, and one that threw would break on the next version.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-format-'));
+    const store = new FileStore(root, 'skillstate.json');
+    await store.save({
+      version: 1,
+      state: { working_dir: '/', discovered_flags: [] },
+      future_key: 'x',
+      spec: { id: 'from a newer writer' },
+      updated_at: 1_700_000_000,
+    } as never);
+
+    const loaded = await store.load();
+
+    expect(loaded).not.toBeNull();
+    expect(Object.keys(loaded!).sort()).toEqual(['state', 'version']);
+    expect(loaded!.state).toEqual({ working_dir: '/', discovered_flags: [] });
+    expect(loaded!.version).toBe(1);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('never writes a state key the schema does not declare', () => {
+    // "A conforming writer must never emit a `state` containing a key absent
+    // from the schema." Enforced at the front door: Σ₀ is built from the
+    // schema's defaults, and a patch naming an undeclared key is rejected
+    // before it can become part of the merge.
+    const initial: Record<string, unknown> = {};
+    for (const [key, field] of Object.entries(SPEC.schema)) initial[key] = field.default;
+    expect(Object.keys(initial).sort()).toEqual(Object.keys(SPEC.schema).sort());
+
+    // The gate is the ORDER, not the merge. §3 defines ⊕ per key and never
+    // mentions the schema, and it should not: an operator that knew which keys
+    // were legal would stop being the compatibility surface §3.3 says it is.
+    // So `mergeState` will happily add a key the schema does not declare —
+    // which is exactly why §6.2's validation must run first.
+    const rogue = { smuggled: 'value' };
+    expect(validatePatch(SPEC.schema, rogue).valid).toBe(false);
+    expect(mergeState(initial, rogue).smuggled).toBe('value');
+
+    // What the writer actually does: validate, and merge only what survived.
+    const accepted = validatePatch(SPEC.schema, rogue);
+    const next = accepted.valid ? mergeState(initial, rogue) : initial;
+    expect(Object.keys(next).sort()).toEqual(Object.keys(SPEC.schema).sort());
   });
 });
