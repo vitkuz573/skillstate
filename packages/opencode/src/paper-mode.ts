@@ -460,13 +460,29 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
  * later run shows the narration back, this string is the first thing to change
  * again, and the step trace is what will say so.
  */
-export const CONTINUATION_MARKER = '[next step — do this now, do not describe it first]';
+export const CONTINUATION_MARKER =
+  '[next step — do it now in this turn, use as many tool calls as it takes, and do not describe it first]';
 
+/**
+ * The one thing the host's own loop needs the model to know.
+ *
+ * Its second sentence used to read "each step ends with a real tool call — read
+ * the next file, or answer and stop." That clause was this repository's
+ * instruction, not a host constraint, and it was measured doing exactly what it
+ * said: a thirty-file task produced 51, 53 and 54 `read` calls for thirty
+ * files, while a control with no step driver at all read one file and ran a
+ * single grep — nine calls for the same work.
+ *
+ * The host does not limit a turn to one tool call. It does limit what ends a
+ * turn: no tool call means the turn is over. So the note says that, and says
+ * the opposite of what it used to about batching.
+ */
 export const HOST_ACTION_NOTE = [
   'The `action` field is a label, not a command: nothing executes it.',
-  'The loop turns when you call a tool, so each step ends with a real tool',
-  'call — read the next file, or answer and stop. Emitting a state_patch on',
-  'its own ends the run, however correct the patch was.',
+  'A step ends when you call a tool, so end each step with a real tool call —',
+  'or answer and stop. Make as many tool calls in one step as the work needs;',
+  'a step may read every file it wants. Emitting a state_patch on its own ends',
+  'the run, however correct the patch was.',
 ].join(' ');
 
 /**

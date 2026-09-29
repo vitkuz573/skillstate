@@ -779,7 +779,16 @@ describe('the plugin in paper mode', () => {
     const result = await runContext(projectDir, longTranscript());
     const system = result.system.map((p) => p.text ?? '').join('\n');
     expect(system).toContain('The `action` field is a label, not a command');
-    expect(system).toContain('ends with a real tool call');
+    expect(system).toContain('real tool call');
+
+    // And it must NOT tell the model to do one thing per step. The previous
+    // wording said "each step ends with a real tool call — read the next file",
+    // which was this repository's instruction rather than a host constraint, and
+    // it was measured: thirty files cost 51, 53 and 54 `read` calls, while a
+    // control with no step driver read one file and ran a single grep. The host
+    // does not limit a turn to one tool call; it limits what ENDS a turn.
+    expect(system).toContain('as many tool calls in one step as the work needs');
+    expect(system).not.toContain('read the next file');
 
     // P itself is untouched by the note — the invariant is on the prompt, not
     // on the system slot, and this is what keeps it honest.
