@@ -961,18 +961,37 @@ calls against 45 and 68 — and that is the trade, stated rather than rounded of
 † A third paper run in the earlier n=3 set was killed by us to free the machine,
 not by a fault. It is excluded rather than counted as a failure.
 
-**Paper is 1.25× cheaper at 30 files, having been 3.75× dearer at 8.** That
-figure is the one that survives scrutiny, and it is smaller than the 2.09× first
-measured here. The 2.09× compared paper's median against the control's — but
-paper's median run finished 25 of 30 files while the control finished 30, so it
-was not the same work. Against a control that also completed all thirty, with
-§5.1's retry loop in place, paper is **1.25× cheaper**: 1,607,539 against
-2,015,473 prompt tokens, both with a complete 30/30 state and a correct answer.
+**There are two numbers, and quoting only the flattering one is the error this
+project keeps undoing.**
 
-The uncached input holds the mechanism at either figure, because it is bounded
-by the prompt and the control's is not: 149,801 for paper against 241,061 to
-1,502,583 for the control. Scaling from 8 files to 30 is a 3.75× larger task:
-paper went **+5%**, the control **+735%**. The two numbers locate it — the control's
+| at 30 files, both 30/30, both correct | value | paper is |
+| --- | --- | --- |
+| billed prompt tokens (input + cache_read) | 1,607,539 vs 2,015,473 | **1.25× cheaper** |
+| uncached input per request | 149,801 vs 1,342,356 | **8.96× cheaper** |
+
+**1.25× is the headline**, because it is what the run actually paid. §7's eq. 8
+predicts `(T+1)/2`, which at the measured T = 38 steps is **19.5×**. The gap is
+fifteen-fold and it has a name — cache pricing. Paper's prompt is 91% cache
+reads (a bounded context that repeats gets served from cache); the control's is
+33% (a history that keeps changing cannot be). The control re-sends nine times
+more fresh text, so on the quantity eq. 5 and eq. 8 actually describe — the size
+of the prompt — the mechanism delivers ~9×. It is the *billed* total that
+compresses, because the control's oversize history is largely cache-served.
+
+The paper calls `(T+1)/2` an upper bound and not a deployment claim, for exactly
+this reason. This measurement is consistent with that caveat rather than against
+it. The compression belongs to OpenCode's prompt caching, not to the mechanism: a
+host billing cache reads at parity with fresh input would show the paper's
+ratios. We have not measured this provider's cache-read price, so no figure here
+is converted into money.
+
+An earlier figure in this file said 2.09×. It compared paper's median run, which
+finished 25 of 30 files, against the control's, which finished 30 — not the same
+work. With §5.1's retry loop in place paper completes all thirty, and the
+like-for-like number is the 1.25× above.
+
+Scaling from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the
+control **+735%**. The two numbers locate it — the control's
 uncached input is 16.6× paper's, because a growing history is re-sent every
 request, while paper's context is stable and therefore cache-local. Paper's
 `cache_read` is the *higher* of the two: a bounded context that repeats gets
