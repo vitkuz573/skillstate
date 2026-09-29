@@ -82,6 +82,8 @@ export interface HarnessOptions {
   failStream?: boolean;
   /** Session ids the runtime asked for a step on, in order. */
   prompts?: string[];
+  /** The raw payloads the runtime sent, so a host schema can be checked. */
+  payloads?: Array<{ sessionID: string; text?: unknown }>;
   /** Make `session.prompt` throw, as a host does for an ended session. */
   promptRefuses?: boolean;
   /** Throw a bare string, so the non-`Error` branch of the diagnostic is real. */
@@ -141,6 +143,7 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
   const transformCallbacks: Array<(editor: ToolEditor) => void> = [];
   const queue: unknown[] = [...(options.events ?? [])];
   const prompts: string[] = options.prompts ?? [];
+  const payloads: Array<{ sessionID: string; text?: unknown }> = options.payloads ?? [];
   let ended = false;
 
   const ctx = {
@@ -162,8 +165,9 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
       // The runtime's half of Algorithm 1. Stubbed rather than absent so a
       // test can assert that a step was requested, and so the "host refuses"
       // path — a session that has already ended — is reachable at all.
-      prompt: async (input: { sessionID: string }) => {
+      prompt: async (input: { sessionID: string; text?: unknown }) => {
         prompts.push(input.sessionID);
+        payloads.push(input);
         if (options.promptRefuses === true) throw new Error('session is busy');
         if (options.promptThrowsString === true) throw 'a bare string, not an Error';
         return { id: 'msg_stub' } as never;

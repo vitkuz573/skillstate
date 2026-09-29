@@ -1230,6 +1230,37 @@ describe('the plugin closes the paper transition from the event stream', () => {
     }
   });
 
+  it('sends the step as a plain string, which is what the host schema wants', async () => {
+    // The bug this pins cost a day. `SessionPromptInput` declares
+    // `readonly text: { … }["text"]`, and that indexing reads as "an object
+    // with a text field" — it is actually the string field itself. Passing
+    // `{ text: { text } }` was refused by the host with
+    // `SchemaError: Expected string at ["text"]` on every single call, which
+    // is why the runtime never once drove a turn while its own tests passed.
+    // The type cannot catch this; only a shape assertion can.
+    const payloads: Array<{ sessionID: string; text?: unknown }> = [];
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      payloads,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await waitFor(() => payloads.length > 0, 'the step request');
+    expect(typeof payloads[0]!.text).toBe('string');
+    expect(payloads[0]!.text).toBe('read src/cfg2.ts');
+  });
+
   it('applies a recovered patch once, however often the host asks', async () => {
     // The event for the same message still arrives afterwards. If both paths
     // merged it, an accumulator would double its own total — a worse failure

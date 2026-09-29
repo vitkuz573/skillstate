@@ -301,9 +301,17 @@ export const SkillStatePlugin = Plugin.define({
         ? new RuntimeDriver({
             prompt: async (sessionID, text) => {
               try {
+                // `text` is a plain string. The type reads
+                // `{…}["text"]` and that indexing is the point: it IS the
+                // string field, not an object containing one. Passing
+                // `{ sessionID, text: { text } }` was rejected by the host's
+                // own schema with `SchemaError: Expected string at ["text"]`,
+                // which is why the runtime never once drove a turn — the call
+                // was refused every time, and the refusal was swallowed until
+                // a diagnostic started recording it.
                 await ctx.session.prompt({
                   sessionID,
-                  text: { text },
+                  text,
                 } as unknown as Parameters<typeof ctx.session.prompt>[0]);
                 return true;
               } catch (error) {
