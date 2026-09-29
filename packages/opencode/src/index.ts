@@ -1,18 +1,55 @@
-// @skillstate/opencode — OpenCode platform adapter + npm plugin entry.
-import { createSkillStatePlugin } from './plugin.js';
-
-export * from './opencode-adapter.js';
-export * from './plugin.js';
-
 /**
- * Ready-made npm-plugin entry for DIRECT loading from a project
- * `opencode.json` (`"plugin": ["@skillstate/opencode"]`): opencode loads
- * the npm package and calls the exported plugin function, which returns
- * the skillstate hooks (per-project state resolution and the
- * inert-without-state guards included — see `createSkillStatePlugin`).
- * The default export carries the same function for hosts that import the
- * module default.
+ * `@skillstate/opencode` — the OpenCode v2 plugin package.
+ *
+ * The default export IS the plugin definition: OpenCode loads
+ * `opencode.json` → `"plugins": ["@skillstate/opencode"]`, imports this
+ * module and calls `setup(ctx)`. Everything else is exported for tests and
+ * for embedders that want the pieces without the plugin lifecycle.
+ *
+ * See `plugin.ts` for the design contract, in particular the rule that this
+ * package never mutates `event.messages`.
  */
-export const SkillStatePlugin = createSkillStatePlugin();
 
-export default SkillStatePlugin;
+export { SkillStatePlugin, PLUGIN_ID, default } from './plugin.js';
+/**
+ * The paper-exact `PlatformAdapter` (arXiv 2608.26263v3 A.4 prompt format).
+ * Kept as the research surface used by the benchmark; it is NOT the host
+ * integration and nothing in the plugin path calls it. In particular its
+ * `injectState` still emits the paper's `STATE_PATCH_CONTRACT`, which is
+ * exactly the instruction pattern the v2 plugin avoids.
+ */
+export { OpenCodeAdapter } from './opencode-adapter.js';
+export {
+  SessionRegistry,
+  stateScopeFor,
+  DEFAULT_SESSION_TTL_MS,
+} from './session-registry.js';
+export type { SessionRecord, SessionRegistryOptions } from './session-registry.js';
+export {
+  ProjectStateStore,
+  diffDocuments,
+  mergeDocuments,
+  statePathFor,
+} from './state-store.js';
+export type {
+  StateChanges,
+  StateDocument,
+  ProjectStateStoreOptions,
+} from './state-store.js';
+export {
+  buildStateHint,
+  renderStateForHint,
+  ADVERTISED_TOOLS,
+  MAX_INLINE_STATE_CHARS,
+} from './system-hint.js';
+export type { StateHintOptions } from './system-hint.js';
+export { registerTools, normalizePatch, MAX_PATCH_BYTES } from './tools.js';
+export type {
+  MergeValue,
+  ReadValue,
+  ToolDeps,
+  ToolError,
+  ToolOk,
+  ToolResult,
+  UpdateValue,
+} from './tools.js';

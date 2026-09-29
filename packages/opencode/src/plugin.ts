@@ -1,362 +1,152 @@
 /**
- * Static OpenCode npm plugin — the SINGLE SOURCE OF TRUTH for the skillstate
- * host integration. Loaded DIRECTLY from the project `opencode.json`
- * `"plugin": ["@skillstate/opencode"]` (both the named `SkillStatePlugin`
- * and the default export are usable — no generated plugin file exists);
- * the per-project state resolution lives in `@skillstate/core`
- * (`resolveHostStateForCwd`, re-exported here) and the hook logic
- * (envelope read/write, ⊕ merge, patch extraction) in the core
- * hook-runtime — this module only adapts it to the OpenCode hooks.
+ * `@skillstate/opencode` — the OpenCode **v2** plugin.
  *
- * PROJECT-LOCAL / INERT WITHOUT STATE: every state-mutating or
- * prompt-mutating hook first resolves the per-project state path and
- * returns EARLY when the state FILE does not exist — `hooks NEVER create
- * state files`. A fresh clone (or any project without skillstate state)
- * therefore behaves like vanilla opencode: `experimental.chat.messages.
- * transform` leaves the message array untouched,
- * `experimental.session.compacting` pushes nothing into the context, and
- * `tool.execute.after` writes nothing. Only the harmless `event`
- * session-registry hook stays unguarded.
+ * ── What this replaces ───────────────────────────────────────────────────
  *
- * Hooks (opencode 1.17 contract, verified on host):
- * - `experimental.chat.messages.transform` — entries are `{ info, parts }`
- *   envelopes (role on `info.role`); the pipeline keeps the ORIGINAL array
- *   reference, so trimming mutates in place; the state is injected as a
- *   synthetic `{ info, parts }` element. Real O(1) prompt footprint.
- * - `experimental.session.compacting` — pushes the state into
- *   `output.context` so the compaction summary preserves it.
- * - `tool.execute.after` — the tool response is `output.output`; a fenced
- *   ```json `state_patch` block is merged (paper ⊕: null deletes) and saved.
+ * The v1 integration rewrote the conversation on every model request. It
+ * kept the system messages and the last three non-system messages, dropped
+ * everything else from `output.messages`, and appended a synthetic
+ * `role: "user"` message containing the raw state JSON. The reported
+ * failure was that the agent stopped doing the user's task and started
+ * emitting state JSON instead.
  *
- * AGENT-SCOPED STATE: the opencode hook inputs carry the session id
- * (`input.sessionID`; message envelopes carry `info.sessionID`). The MAIN
- * session resolves to the ROOT state file
- * `<cwd>/.skillstate/skillstate.json` — the same file the skillstate MCP
- * tools and the CLI address, so the injected state and `state.patch` can
- * never disagree. SUB-AGENT sessions (registered from the host event bus —
- * `session.created`/`session.updated` carry `info.parentID`) resolve to
- * isolated `agents/<parentPrefix>-<sessionPrefix>/` copies and never
- * last-writer-win the main state; the main agent folds them back with
- * `agent.merge`. Writes go through the core cross-process sync lock
- * (`lockStateWrite`) so a state file is never interleaved between
- * processes.
+ * Both halves of that were destructive, and neither was a model quirk:
+ *
+ * 1. The injected message landed LAST, so for the model it was the current
+ *    instruction — it displaced the user's actual request.
+ * 2. `slice(-3)` deleted the task statement, the tool results and the
+ *    errors the agent had just been handed. It was reasoning about work it
+ *    could no longer see.
+ *
+ * The MCP server made it worse: `spec.get` returned a procedural spec whose
+ * default was `INTERCODE_CTF_SPEC`, whose instructions read "You are an
+ * autonomous CTF agent ... hidden flag somewhere on its filesystem". A
+ * model told to look for a flag looks for a flag. (Fixed: the default is now
+ * the neutral `GENERIC_PROCEDURE_SPEC`, and its instructions describe the
+ * storage format instead of prescribing a way of working.)
+ *
+ * ── The v2 design ────────────────────────────────────────────────────────
+ *
+ * Three rules, each enforced by a test:
+ *
+ * - **Never mutate `event.messages`.** The plugin contributes one additive
+ *   fragment to `event.system` and leaves the transcript alone. See
+ *   `tests/opencode/context-integrity.test.ts`.
+ * - **Never inject behavioural instructions.** The system fragment
+ *   describes what the notes are and when to use them; it contains no
+ *   "you must", no "always", and no output format. See
+ *   `system-hint.ts`.
+ * - **Inert until used.** A project with no state file gets no system
+ *   fragment at all and behaves exactly like vanilla OpenCode. No files are
+ *   created by loading the plugin.
+ *
+ * ── Native tools AND the MCP server, on purpose ──────────────────────────
+ *
+ * This package does not replace `@skillstate/mcp`; it sits beside it.
+ *
+ * - The native tools ({@link registerTools}) are the fast path inside
+ *   opencode: a typed schema, structured output, no JSON-RPC round-trip and
+ *   no untyped text result.
+ * - The MCP server is the portable path. It is what every other
+ *   MCP-capable host reads, and the only way to reach this state from a
+ *   client that is not opencode.
+ *
+ * Both address the same `<project>/.skillstate/skillstate.json`, so they
+ * cannot disagree about what is saved. `skillstate init` registers both.
+ *
+ * The reason v1 needed the MCP server is gone: an opencode v1 plugin could
+ * not contribute first-class tools at all.
+ *
+ * Load it from `opencode.json(c)`:
+ *
+ * ```json
+ * { "plugins": ["@skillstate/opencode"] }
+ * ```
  */
-import * as fs from 'node:fs';
-import * as os from 'node:os';
+
+import { Plugin } from '@opencode/plugin';
 import * as path from 'node:path';
-import {
-  findFencedPatch,
-  lockStateWrite,
-  mergePatch,
-  readStateEnvelope,
-  resolveAgentIdFromSession,
-  resolveHostStateForCwd,
-  saveStateEnvelope,
-  stateFileExists,
-} from '@skillstate/core';
-import type {
-  OpenCodeMessage,
-  SkillStateHooks,
-  SkillStatePlugin,
-} from './plugin-types.js';
+import { SessionRegistry, stateScopeFor } from './session-registry.js';
+import { ProjectStateStore } from './state-store.js';
+import { buildStateHint } from './system-hint.js';
+import { registerTools } from './tools.js';
 
-export * from './plugin-types.js';
+/** Stable plugin id — scopes plugin storage and identifies it in `/api/plugin`. */
+export const PLUGIN_ID = 'skillstate';
 
 /**
- * Resolve the per-project state file for a session working directory
- * (`cwd` of the current opencode session) — the core single source of
- * truth (`resolveHostStateForCwd`): `<cwd>/.skillstate/skillstate.json`,
- * or the global bucket `<home>/.skillstate/global/skillstate.json` when
- * cwd equals home. A non-empty `agentId` scopes the file under
- * `<bucket>/agents/<agentId>/skillstate.json`. Pure path arithmetic via
- * `path.resolve`, no filesystem access.
+ * The plugin definition.
+ *
+ * `setup` wires three things and returns a cleanup function:
+ *
+ * - a {@link SessionRegistry}, fed by the server event stream, so a
+ *   sub-agent session is recognised and given its own state file;
+ * - a {@link ProjectStateStore} rooted at the plugin's own project
+ *   location, so two checkouts served by one OpenCode server never share
+ *   state;
+ * - native tools plus a single additive `context` hook.
+ *
+ * The event subscription is the only resource the plugin owns, so the
+ * returned cleanup aborts it. Hook and tool registrations are disposed by
+ * OpenCode when the plugin unloads.
  */
-export { resolveHostStateForCwd as resolveStatePathForCwd };
+export const SkillStatePlugin = Plugin.define({
+  id: PLUGIN_ID,
+  async setup(ctx) {
+    const sessions = new SessionRegistry();
+    const scopeFor = (sessionID: string): string => stateScopeFor(sessions, sessionID);
 
-export { mergePatch };
-
-/** Options for {@link createSkillStatePlugin}. */
-export interface SkillStatePluginOptions {
-  /** Non-system messages kept in the prompt (default 3). */
-  maxHistoryMessages?: number;
-}
-
-/**
- * Read the state file. Missing or corrupt files yield `{}` (best-effort).
- * The on-disk envelope is `{ version: 1, state }` (migrations-compatible);
- * a bare object is tolerated and treated as the state itself. Thin fs
- * adapter over the core hook-runtime {@link readStateEnvelope}.
- */
-export function readSkillState(statePath: string): Record<string, unknown> {
-  return readStateEnvelope(statePath, (p) => fs.readFileSync(p, 'utf-8')) as Record<string, unknown>;
-}
-
-/**
- * Persist the state file (best-effort: read-only environments are ignored).
- * Creates the parent directory when missing (the per-project resolver may
- * target a fresh `<cwd>/.skillstate/agents/<id>/`). Writes the
- * `{ version: 1, state }` envelope so `migrate()`/runtime resume read the
- * same file — via the core hook-runtime {@link saveStateEnvelope} — under
- * the cross-process sync lock {@link lockStateWrite} (2-3 parallel agent
- * processes never interleave state writes).
- */
-export function saveSkillState(statePath: string, state: Record<string, unknown>): void {
-  try {
-    fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    lockStateWrite(
-      statePath,
-      fs,
-      () => saveStateEnvelope(statePath, state, (p, data) => fs.writeFileSync(p, data)),
-    );
-  } catch {
-    // Best-effort: read-only environments or permission issues.
-  }
-}
-
-/**
- * Atomic READ-MERGE-WRITE of one `state_patch` (paper ⊕: null deletes):
- * the whole critical section runs inside {@link lockStateWrite}, so two
- * concurrent writers apply BOTH patches instead of racing between the
- * read and the write. Best-effort: lock contention or unwritable state
- * files are swallowed — the tool flow never breaks.
- */
-export function mergeSkillState(
-  statePath: string,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  try {
-    fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    let merged: Record<string, unknown> = {};
-    lockStateWrite(statePath, fs, () => {
-      merged = mergePatch(readSkillState(statePath), patch);
-      saveStateEnvelope(statePath, merged, (p, data) => fs.writeFileSync(p, data));
+    // `ctx.location.project.canonical` is the canonical checkout, stable
+    // across worktrees and symlinks. The v1 plugin used `process.cwd()`,
+    // which in v2 is the server's cwd, not the session's project.
+    const store = new ProjectStateStore({
+      directory: ctx.location.project.canonical,
     });
-    return merged;
-  } catch {
-    return readSkillState(statePath);
-  }
-}
 
-/**
- * Extract the `state_patch` object from an LLM response's fenced ```json
- * block; `null` when there is no block, it is malformed, or it carries no
- * object-shaped `state_patch`. Thin adapter over the core hook-runtime
- * {@link findFencedPatch} (the invalid/truncated outcomes collapse to
- * `null`, preserving the legacy boolean contract).
- */
-export function extractPatch(response: string): Record<string, unknown> | null {
-  const result = findFencedPatch(response);
-  return 'patch' in result ? result.patch : null;
-}
+    await ctx.tool.transform((editor) => {
+      registerTools(editor, { store, sessions, scopeFor });
+    });
 
-/**
- * Agent id for an opencode hook call.
- *
- * MAIN SESSION → `''` (the ROOT state file `<cwd>/.skillstate/skillstate.json`
- * — the SAME file the skillstate MCP tools and the CLI address, so the
- * injected state and `state.patch` can never disagree). A session
- * registered as a SUB-AGENT via the host event bus
- * (`session.created`/`updated` carry `info.parentID`) resolves to
- * `<parentPrefix>-<sessionPrefix>` — an isolated copy under `agents/` that
- * never last-writer-wins the main state; the main agent folds it back with
- * `agent.merge`. No session id at all → `''` (root: a single context).
- */
-export function pluginAgentId(
-  input: { sessionID?: unknown },
-  messages?: OpenCodeMessage[],
-): string {
-  const direct = resolveAgentIdFromSession(input?.sessionID);
-  const sessionPrefix =
-    direct.length > 0
-      ? direct
-      : resolveAgentIdFromSession(
-          (messages ?? []).find(
-            (m) =>
-              typeof m.info?.sessionID === 'string' &&
-              m.info.sessionID.length > 0 &&
-              m.info.sessionID !== 'skillstate',
-          )?.info.sessionID,
-        );
-  if (sessionPrefix.length === 0) return '';
-  return scopedAgentId(sessionPrefix);
-}
-
-/**
- * Widen an agent id for a registered sub-agent session:
- * `<parentPrefix>-<sessionPrefix>`. Plain sessions resolve to `''` (the
- * main/root scope — NOT their own agents/ copy).
- */
-export function scopedAgentId(agentId: string): string {
-  const parent = SUB_AGENT_PARENTS.get(agentId);
-  return parent === undefined ? '' : `${parent}-${agentId}`;
-}
-
-/**
- * Record a session→parent edge from the host event stream. `sessionId`
- * with a non-empty `parentID` registers that session as a sub-agent of
- * `parentID`; an empty `parentID` (the main session being updated after
- * the fact) clears a stale registration. Exposed for tests.
- */
-export function registerSessionParent(sessionId: unknown, parentId: unknown): void {
-  if (typeof sessionId !== 'string' || sessionId.length === 0) return;
-  const session = resolveAgentIdFromSession(sessionId);
-  if (session.length === 0) return;
-  const parent = resolveAgentIdFromSession(parentId);
-  if (parent.length === 0 || parent === session) {
-    SUB_AGENT_PARENTS.delete(session);
-    return;
-  }
-  SUB_AGENT_PARENTS.set(session, parent);
-}
-
-/** Test-only: forget every registered session→parent edge. */
-export function resetSessionParents(): void {
-  SUB_AGENT_PARENTS.clear();
-}
-
-/** Synthetic message ids for the injected state carrier. */
-const STATE_MESSAGE_ID = 'skillstate-state-inject';
-
-/**
- * The session ids known to be SUB-AGENT sessions, keyed by session id →
- * parent session id. Populated from the `event` hook
- * (`session.created`/`session.updated` carry `info.parentID`); consulted
- * when resolving an agent id so a sub-agent's state lands in the SAME
- * agents/<parent>/<session-8>/ scope as its hook-session (the task tool
- * spawns sessions whose ids never appear as sub-agent prefixes — without
- * this map a sub-agent would silently write the MAIN state).
- */
-const SUB_AGENT_PARENTS = new Map<string, string>();
-
-/**
- * Build the OpenCode plugin function with the same behavior for every host
- * entry point (direct npm loading via `"plugin": ["@skillstate/opencode"]`).
- *
- * State resolution is ALWAYS per-project: the state file path is computed
- * from the session cwd on EVERY hook call via
- * `resolveStatePathForCwd(process.cwd(), os.homedir(), agentId)` — each
- * project gets its own `<cwd>/.skillstate/`, each session (sub-agent) its
- * isolated `agents/<session>/` copy, and a session launched from `$HOME`
- * uses the global bucket.
- *
- * INERT WITHOUT STATE: `experimental.chat.messages.transform`,
- * `experimental.session.compacting`, and `tool.execute.after` resolve the
- * state path first and return EARLY when the state FILE does not exist —
- * a project without skillstate state behaves like vanilla opencode, and
- * hooks never create state files.
- */
-export function createSkillStatePlugin(options: SkillStatePluginOptions = {}): SkillStatePlugin {
-  const resolvePath = (agentId: string): string =>
-    resolveHostStateForCwd(process.cwd(), os.homedir(), agentId);
-  const maxHistory = options.maxHistoryMessages ?? 3;
-
-  return async () => {
-    return {
-      // ── Session registry ──────────────────────────────────────────────
-      // The host event bus carries full Session objects on
-      // session.created/updated — including `parentID`. Registering here
-      // is what makes sub-agent scoping work: a Task sub-agent's session
-      // (parentID set) resolves to agents/<parent>-<session>/ BEFORE its
-      // first hook fires, so it never touches the parent's state file.
-      event: async ({ event }: { event: unknown }): Promise<void> => {
-        const payload = event as
-          | { type?: unknown; properties?: { info?: { id?: unknown; parentID?: unknown } } }
-          | undefined;
-        if (
-          payload === null ||
-          typeof payload !== 'object' ||
-          payload['type'] !== 'session.created' && payload['type'] !== 'session.updated'
-        ) {
-          return;
+    // ── Session tree ────────────────────────────────────────────────────
+    // Sub-agent sessions are created by OpenCode itself, so the parent edge
+    // arrives on the event stream. Until one is seen a session is treated as
+    // a root session, which is the correct default for single-session use.
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          sessions.ingestEvent(event);
         }
-        const info = payload['properties']?.['info'];
-        if (info === null || typeof info !== 'object') return;
-        const record = info as { id?: unknown; parentID?: unknown };
-        registerSessionParent(record['id'], record['parentID']);
-      },
+      } catch {
+        // The stream ends when the plugin unloads or the server goes away.
+        // Session scoping degrades to "everyone shares the project file",
+        // which is safe; it must never surface as an unhandled rejection.
+      }
+    })();
 
-      // ── O(1) history trimming ──────────────────────────────────────────
-      // Filters messages BEFORE each LLM call: keeps all system messages
-      // plus the last `maxHistory` non-system messages, then injects a
-      // synthetic state element. Old messages are DROPPED from the prompt,
-      // not just hidden. INERT without state: when the project has no
-      // state file the hook returns before touching `output.messages`
-      // (fresh clones behave like vanilla opencode).
-      'experimental.chat.messages.transform': async (
-        input,
-        output,
-      ): Promise<void> => {
-        const agentId = pluginAgentId(input as { sessionID?: unknown }, output.messages);
-        const statePath = resolvePath(agentId);
-        if (!stateFileExists(statePath, fs)) return;
-        const state = readSkillState(statePath);
-        const messages = output.messages;
-        const systemMessages = messages.filter((m) => m.info.role === 'system');
-        const trimmed = messages
-          .filter((m) => m.info.role !== 'system')
-          .slice(-maxHistory);
+    // ── System fragment ─────────────────────────────────────────────────
+    // Registered on the agent loop only. `compaction`, `generate` and
+    // `title` are separate hooks in v2 and are deliberately left alone:
+    // after a compaction the next agent-loop request re-adds the fragment,
+    // so state survives without this plugin ever touching the transcript or
+    // the summariser's input.
+    await ctx.session.hook('context', (event) => {
+      const scope = scopeFor(event.sessionID);
+      if (!store.exists(scope)) return;
+      const state = store.read(scope);
+      const hint = buildStateHint({
+        state,
+        statePath: path.relative(store.projectDirectory, store.pathFor(scope)),
+        scope,
+      });
+      if (hint.length === 0) return;
+      event.system.push({ type: 'text', text: hint });
+    });
 
-        // Synthetic state carrier — a `{ info, parts }` envelope whose text
-        // part carries the current state JSON.
-        const stateMessage: OpenCodeMessage = {
-          info: {
-            id: STATE_MESSAGE_ID,
-            sessionID: 'skillstate',
-            role: 'user',
-            time: { created: 0 },
-            agent: 'skillstate',
-            model: { providerID: 'skillstate', modelID: 'skillstate' },
-          },
-          parts: [
-            {
-              id: `${STATE_MESSAGE_ID}-text`,
-              sessionID: 'skillstate',
-              messageID: STATE_MESSAGE_ID,
-              type: 'text',
-              synthetic: true,
-              text: `Current skill state (JSON): ${JSON.stringify(state)}`,
-            },
-          ],
-        };
+    return () => {
+      controller.abort();
+    };
+  },
+});
 
-        // The pipeline holds the original array reference — mutate in place
-        // (reassigning `output.messages` would not reach the LLM call).
-        const kept = [...systemMessages, ...trimmed, stateMessage];
-        messages.length = 0;
-        messages.push(...kept);
-      },
-
-      // ── Compaction context injection ───────────────────────────────────
-      // Before compaction, inject the current state into the context so the
-      // compaction summary preserves state even after history is compressed.
-      // INERT without state: no state file → nothing is pushed (and a
-      // missing `output.context` array is NOT created).
-      'experimental.session.compacting': async (input, output): Promise<void> => {
-        const agentId = pluginAgentId(input);
-        const statePath = resolvePath(agentId);
-        if (!stateFileExists(statePath, fs)) return;
-        const state = readSkillState(statePath);
-        if (!Array.isArray(output.context)) {
-          output.context = [];
-        }
-        output.context.push(`Skillstate: ${JSON.stringify(state)}`);
-      },
-
-      // ── State persistence from LLM responses ───────────────────────────
-      // After tool execution, extract state_patch from the tool response
-      // (output.output), and atomically merge it into the session-scoped
-      // state (read + merge + write all inside the cross-process lock).
-      // INERT without state: hooks NEVER create state files — a project
-      // without an existing state file is left untouched.
-      'tool.execute.after': async (input, output): Promise<void> => {
-        const response = output.output ?? '';
-        if (typeof response !== 'string') return;
-        const patch = extractPatch(response);
-        if (!patch) return;
-        const statePath = resolvePath(pluginAgentId(input));
-        if (!stateFileExists(statePath, fs)) return;
-        mergeSkillState(statePath, patch);
-      },
-    } satisfies SkillStateHooks;
-  };
-}
+export default SkillStatePlugin;
