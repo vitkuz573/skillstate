@@ -93,4 +93,58 @@ describe('RuntimeDriver', () => {
     expect(RuntimeDriver.isTerminal('  Done  ')).toBe(true);
     expect(RuntimeDriver.isTerminal('read src/cfg2.ts')).toBe(false);
   });
+
+  // ── The continuation has to survive the message wipe ────────────────────
+  //
+  // Measured: the runtime asked for the next step, the host opened a turn, and
+  // the model did nothing — because applyPaperContext clears event.messages,
+  // so the text sent with session.prompt was gone before the model saw it. The
+  // action therefore travels to Oₜ instead, and these pin that handshake.
+
+  it('remembers the action before asking, so a fast host does not find it gone', async () => {
+    // The host can start the turn before `prompt` resolves. The context hook
+    // reads the pending action, so it has to be set first or the model gets a
+    // step with nothing in it.
+    const driver = new RuntimeDriver({
+      prompt: () => {
+        // Synchronously, the way a fast host would look.
+        expect(driver.takeContinuation('ses_1')).toBe('read src/cfg2.ts');
+        return ok();
+      },
+    });
+    await driver.advance('ses_1', 'read src/cfg2.ts');
+  });
+
+  it('hands the continuation out exactly once', async () => {
+    // Twice would show the model the same request twice in one turn; never
+    // would leave the step unexplained. The feedback queue has the same rule.
+    const driver = new RuntimeDriver({ prompt: ok });
+    await driver.advance('ses_1', 'read src/cfg2.ts');
+    expect(driver.takeContinuation('ses_1')).toBe('read src/cfg2.ts');
+    expect(driver.takeContinuation('ses_1')).toBeUndefined();
+  });
+
+  it('clears the pending action when the host refuses', async () => {
+    // Otherwise a refused request leaks into some later, unrelated turn.
+    const driver = new RuntimeDriver({ prompt: refused });
+    await driver.advance('ses_1', 'read src/cfg2.ts');
+    expect(driver.takeContinuation('ses_1')).toBeUndefined();
+  });
+
+  it('keeps continuations separate per session', async () => {
+    const driver = new RuntimeDriver({ prompt: ok });
+    await driver.advance('ses_a', 'read a');
+    await driver.advance('ses_b', 'read b');
+    expect(driver.takeContinuation('ses_b')).toBe('read b');
+    expect(driver.takeContinuation('ses_a')).toBe('read a');
+  });
+
+  it('forgets a pending action on request', async () => {
+    // Teardown and tests need a way to clear, and a Map without one leaks
+    // state between sessions forever.
+    const driver = new RuntimeDriver({ prompt: ok });
+    await driver.advance('ses_1', 'read src/cfg2.ts');
+    driver.forget('ses_1');
+    expect(driver.takeContinuation('ses_1')).toBeUndefined();
+  });
 });

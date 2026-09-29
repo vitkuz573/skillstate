@@ -201,8 +201,28 @@ export function applyFeedback(
   feedback: PendingFeedback | undefined,
 ): string {
   if (feedback === undefined || feedback.length === 0) return observation;
-  const marker = '[state patch rejected]';
-  return observation.length === 0
-    ? `${marker} ${feedback}`
-    : `${marker} ${feedback}\n${observation}`;
+  return applyObservation(observation, '[state patch rejected]', feedback);
+}
+
+/**
+ * Prepend a line from the environment to the observation slot.
+ *
+ * Shared by the two things the environment has to say to the model — a patch
+ * it refused, and an action it is carrying out — because they need the same
+ * shape and must not be told apart by accident.
+ *
+ * The marker is a parameter for exactly that reason. An earlier version reused
+ * {@link applyFeedback} for both, and the hard-coded
+ * `[state patch rejected]` would have told the model its patch was refused at
+ * the very moment the runtime was accepting it and asking for the next step —
+ * a message not merely useless but actively false, and the kind of false that
+ * makes a model re-derive state it has already recorded.
+ */
+export function applyObservation(
+  observation: string,
+  marker: string,
+  line: string,
+): string {
+  if (line.length === 0) return observation;
+  return observation.length === 0 ? `${marker} ${line}` : `${marker} ${line}\n${observation}`;
 }

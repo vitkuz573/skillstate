@@ -12,7 +12,7 @@ import { describe as group, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { dumpDrift, dumpPromptShape } from '@skillstate/opencode';
+import { applyFeedback, applyObservation, dumpDrift, dumpPromptShape } from '@skillstate/opencode';
 
 let dirs: string[] = [];
 
@@ -131,6 +131,53 @@ group('dumpPromptShape', () => {
  * outside, and that ambiguity is the whole reason the notice's effect has to
  * be measured rather than assumed.
  */
+group('applyObservation', () => {
+  it('leaves the observation alone for an empty line', () => {
+    // A blank line from the environment is not worth a marker, and adding one
+    // would put a bare "[next step]" in front of a real observation.
+    expect(applyObservation('the observation', '[next step]', '')).toBe('the observation');
+  });
+
+  it('marks a line in front of an existing observation', () => {
+    expect(applyObservation('the observation', '[next step]', 'read cfg2')).toBe(
+      '[next step] read cfg2\nthe observation',
+    );
+  });
+
+  it('marks a line when there is no observation yet', () => {
+    expect(applyObservation('', '[next step]', 'read cfg2')).toBe('[next step] read cfg2');
+  });
+
+  it('never reuses the rejection marker, because a continuation is not one', () => {
+    // The whole reason this function exists. The runtime accepting a patch
+    // and asking for the next step must not read to the model as a refusal.
+    const continued = applyObservation('obs', '[next step]', 'read cfg2');
+    expect(continued).not.toContain('[state patch rejected]');
+    expect(applyFeedback('obs', 'total must be a number')).toContain('[state patch rejected]');
+  });
+});
+
+group('dumpPromptShape — the state the model was shown', () => {
+  it('records Σ alongside the shape, so a stale write is diagnosable', () => {
+    // A model that writes back a stale total is indistinguishable from one
+    // that was never given a fresh one, and those are opposite bugs. The
+    // dump is the only place both are visible.
+    const file = scratch();
+    dumpPromptShape(file, [{ role: 'user', content: [] }], { total: 58, files: 1 });
+    const [entry] = readLines(file);
+    expect(entry!['state']).toEqual({ total: 58, files: 1 });
+  });
+
+  it('omits Σ when the caller has none to report', () => {
+    // Notes mode reads the state but never dumps it; the key should be
+    // absent rather than null, so a reader can tell them apart.
+    const file = scratch();
+    dumpPromptShape(file, [{ role: 'user', content: [] }]);
+    const [entry] = readLines(file);
+    expect(entry!['state']).toBeUndefined();
+  });
+});
+
 group('dumpDrift', () => {
   const line = (turns: number, notice: boolean, writes: number) => ({
     scope: '',

@@ -63,6 +63,8 @@ export class RuntimeDriver {
   readonly #prompt: (sessionID: string, text: string) => Promise<boolean>;
   readonly #maxSteps: number;
   readonly #steps = new Map<string, number>();
+  /** The action each session is mid-way through, read by the context hook. */
+  readonly #pending = new Map<string, string>();
   /** Every advancement made, for diagnostics and tests. */
   readonly advanced: RuntimeStep[] = [];
 
@@ -99,17 +101,42 @@ export class RuntimeDriver {
     const step = (this.#steps.get(sessionID) ?? 0) + 1;
     if (step > this.#maxSteps) return null;
 
-    // The continuation text is the action, restated as the request the
-    // runtime is making on the model's behalf. It is short on purpose: this
-    // arrives as a user message, and the context hook replaces the rest of
-    // the context with (P, Σₜ, Oₜ) anyway.
+    // The action is remembered BEFORE the host is asked, because the context
+    // hook that follows reads it, and a host that starts the turn quickly must
+    // not find an empty slot. The text handed to `session.prompt` is only a
+    // wake-up: `applyPaperContext` clears the messages, so the model reads the
+    // action from Oₜ instead. See the `continuation` option.
+    this.#pending.set(sessionID, action);
+
     const asked = await this.#prompt(sessionID, action);
-    if (!asked) return null;
+    if (!asked) {
+      this.#pending.delete(sessionID);
+      return null;
+    }
 
     this.#steps.set(sessionID, step);
     const record: RuntimeStep = { sessionID, action, step };
     this.advanced.push(record);
     return record;
+  }
+
+  /**
+   * Take the action this session was last asked to perform, if any.
+   *
+   * Taken exactly once per step, so a prompt built twice for one turn cannot
+   * show the model the same continuation twice — the same discipline the
+   * feedback queue uses, and for the same reason.
+   */
+  takeContinuation(sessionID: string): string | undefined {
+    const action = this.#pending.get(sessionID);
+    if (action === undefined) return undefined;
+    this.#pending.delete(sessionID);
+    return action;
+  }
+
+  /** Forget a session's pending action, on reset or teardown. */
+  forget(sessionID: string): void {
+    this.#pending.delete(sessionID);
   }
 
   /** Steps taken for a session, for diagnostics. */

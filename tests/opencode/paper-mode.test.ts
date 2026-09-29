@@ -932,6 +932,60 @@ describe('the plugin closes the paper transition from the event stream', () => {
     throw new Error(`timed out waiting for ${what}`);
   }
 
+  it('asks the host for the next step when a patch is applied', async () => {
+    // The half of Algorithm 1 that was missing for so long: an applied patch
+    // whose action is not terminal means there is another step, and CODE asks
+    // for it. Before this, the model emitted a correct patch and the run simply
+    // ended — it had satisfied its instruction completely, which is exactly
+    // why three successive prompts did not fix it.
+    const prompts: string[] = [];
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      prompts,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await waitFor(() => prompts.length > 0, 'the runtime to request a step');
+    expect(prompts).toEqual(['ses_root']);
+  });
+
+  it('survives a host that will not start another turn', async () => {
+    // A refusal means the session has ended. It must not throw into the event
+    // loop: a throw there ends the subscription for the rest of the process
+    // and silently stops both the session registry and the state sink.
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      promptRefuses: true,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: '```json\n{"state_patch":{"step":1},"action":"read src/cfg2.ts"}\n```',
+          },
+        },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await waitFor(() => readState(projectDir)['step'] === 1, 'the patch to land');
+    // A refused continuation is not a refused patch: the state still moved.
+    expect(readState(projectDir)['step']).toBe(1);
+  });
+
   function readState(projectDir: string): Record<string, unknown> {
     const file = path.join(projectDir, '.skillstate', 'skillstate.json');
     return JSON.parse(fs.readFileSync(file, 'utf-8')).state as Record<string, unknown>;

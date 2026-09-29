@@ -128,10 +128,15 @@ const DEBUG_OBSERVATION_CHARS = 400;
 export function dumpPromptShape(
   path: string | undefined,
   messages: ReadonlyArray<{ role: string; content: unknown }>,
+  state?: Record<string, unknown>,
 ): void {
   if (path === undefined || path.length === 0) return;
   const record = {
     turn: messages.length,
+    // Σ as the model was shown it, not as it ended up on disk. A model that
+    // writes back a stale total is indistinguishable from one that was never
+    // given a fresh one, and those are opposite bugs.
+    state,
     roles: messages.map((m) => m.role),
     partTypes: messages.map((m) =>
       Array.isArray(m.content)
@@ -341,14 +346,18 @@ export const SkillStatePlugin = Plugin.define({
         // Taken exactly once: `take` clears on read, so calling it twice would
         // show the correction to nobody.
         const correction = feedback?.take(event.sessionID);
+        // The action the runtime is carrying out, which has to reach the model
+        // through Oₜ because the messages it was sent in are cleared here.
+        const continuation = runtime?.takeContinuation(event.sessionID);
         const raw = event.messages as unknown as PaperContextEvent['messages'];
-        dumpPromptShape(process.env['SKILLSTATE_DEBUG_PROMPT'], raw);
+        dumpPromptShape(process.env['SKILLSTATE_DEBUG_PROMPT'], raw, state);
         applyPaperContext(
           event as unknown as PaperContextEvent,
           buildPaperPrompt({
             spec: spec!,
             state,
             messages: raw,
+            ...(continuation === undefined ? {} : { continuation }),
             ...(correction === undefined ? {} : { feedback: correction }),
           }),
           HOST_ACTION_NOTE,

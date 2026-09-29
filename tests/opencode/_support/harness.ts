@@ -80,6 +80,10 @@ export interface HarnessOptions {
   events?: unknown[];
   /** Make the event stream throw immediately. */
   failStream?: boolean;
+  /** Session ids the runtime asked for a step on, in order. */
+  prompts?: string[];
+  /** Make `session.prompt` throw, as a host does for an ended session. */
+  promptRefuses?: boolean;
 }
 
 /** The fake context plus the recordings the tests assert on. */
@@ -134,6 +138,7 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
   const hooks = new Map<string, CapturedHook>();
   const transformCallbacks: Array<(editor: ToolEditor) => void> = [];
   const queue: unknown[] = [...(options.events ?? [])];
+  const prompts: string[] = options.prompts ?? [];
   let ended = false;
 
   const ctx = {
@@ -151,6 +156,14 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
       hook: async (name: string, callback: CapturedHook) => {
         hooks.set(name, callback);
         return { dispose: async () => void hooks.delete(name) };
+      },
+      // The runtime's half of Algorithm 1. Stubbed rather than absent so a
+      // test can assert that a step was requested, and so the "host refuses"
+      // path — a session that has already ended — is reachable at all.
+      prompt: async (input: { sessionID: string }) => {
+        prompts.push(input.sessionID);
+        if (options.promptRefuses === true) throw new Error('session is busy');
+        return { id: 'msg_stub' } as never;
       },
     },
     event: {

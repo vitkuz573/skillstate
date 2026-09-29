@@ -105,7 +105,7 @@ import type {
   ProceduralSpec,
   SkillState,
 } from '@skillstate/core';
-import { applyFeedback } from './feedback.js';
+import { applyFeedback, applyObservation } from './feedback.js';
 
 /** The parts of the host's `context` event this module reads and writes. */
 export interface PaperContextEvent {
@@ -318,6 +318,24 @@ export interface PaperPromptOptions {
    * `feedback.ts` for why that distinction matters.
    */
   feedback?: string;
+  /**
+   * The action the runtime is carrying out, for the next step.
+   *
+   * ── Why this has to ride in Oₜ ───────────────────────────────────────────
+   *
+   * Measured: the runtime asked for the next step, the host started a new turn,
+   * and the model did nothing — because `applyPaperContext` clears
+   * `event.messages`, so the text sent with `session.prompt` was discarded
+   * before the model could see it. The model was left holding (P, Σₜ, Oₜ) and
+   * a state that had moved, with nothing saying why it was being asked again.
+   *
+   * Oₜ is the paper's channel for the environment's reply, and a runtime
+   * requesting the next step is exactly that: something the environment did,
+   * not part of the operator's specification. So it goes where a rejected
+   * patch's correction already goes, for the same reason, and A.4 stays
+   * byte-identical.
+   */
+  continuation?: string;
 }
 
 /** What {@link buildPaperPrompt} decided, for tests and diagnostics. */
@@ -350,10 +368,15 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   // A rejected patch is itself an observation, so the correction rides in Oₜ
   // and the A.4 template is untouched. The `observed` object keeps the
   // host-derived source and timestamp; only the rendered content changes.
+  let content = observed.content;
+  if (options.continuation !== undefined) {
+    content = applyObservation(content, '[next step]', options.continuation);
+  }
+  if (options.feedback !== undefined) {
+    content = applyFeedback(content, options.feedback);
+  }
   const observation: PaperObservation =
-    options.feedback === undefined
-      ? observed
-      : { ...observed, content: applyFeedback(observed.content, options.feedback) };
+    content === observed.content ? observed : { ...observed, content };
   const effective = proceduralSpecWithTask(spec, instruction);
   return {
     prompt: transformer.formatPaper(effective, state, observation),
