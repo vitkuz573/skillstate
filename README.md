@@ -946,20 +946,33 @@ lines, 1,200 lines of observation. The lever is observation size rather than fil
 count, because tiny files make a tiny transcript and would rig the comparison in
 paper's favour by making the control's history too small to hurt.
 
-| 30 files, n=3 | paper | notes (control) |
+| 30 files | paper, §5.1 retry | notes (control) |
 | --- | --- | --- |
-| prompt tokens, median | **966,072** | 2,015,473 |
-| prompt tokens, range | 594,894 – 1,390,359 | 490,262 – 2,052,736 |
-| uncached input, range | 52,545 – 144,015 | 241,061 – 1,502,583 |
-| correct | 2 / 2 † | 3 / 3 |
-| final state | 25/30, 30/30 | 30/30, 30/30, 30/30 |
+| prompt tokens | **1,607,539** | 2,015,473 (median, n=3) |
+| uncached input | 149,801 | 241,061 – 1,502,583 |
+| tool calls | 84 | 45 – 64 |
+| correct | ✓ | 3 / 3 |
+| final state | **30/30** | 30/30, 30/30, 30/30 |
 
-† a third paper run was killed by us to free the machine, not by a fault. It is
-excluded rather than counted as a failure.
+Before §5.1's retry loop, on the same fixture: answer correct, state **25/30**,
+966,072 prompt tokens, 45 tool calls. Completeness was bought with steps — 84
+calls against 45 and 68 — and that is the trade, stated rather than rounded off.
 
-**Paper is 2.09× cheaper at the median at 30 files, having been 3.75× dearer at
-8.** Scaling from 8 files to 30 is a 3.75× larger task: paper went **+5%**, the
-control **+735%**. The two numbers locate the mechanism — the control's
+† A third paper run in the earlier n=3 set was killed by us to free the machine,
+not by a fault. It is excluded rather than counted as a failure.
+
+**Paper is 1.25× cheaper at 30 files, having been 3.75× dearer at 8.** That
+figure is the one that survives scrutiny, and it is smaller than the 2.09× first
+measured here. The 2.09× compared paper's median against the control's — but
+paper's median run finished 25 of 30 files while the control finished 30, so it
+was not the same work. Against a control that also completed all thirty, with
+§5.1's retry loop in place, paper is **1.25× cheaper**: 1,607,539 against
+2,015,473 prompt tokens, both with a complete 30/30 state and a correct answer.
+
+The uncached input holds the mechanism at either figure, because it is bounded
+by the prompt and the control's is not: 149,801 for paper against 241,061 to
+1,502,583 for the control. Scaling from 8 files to 30 is a 3.75× larger task:
+paper went **+5%**, the control **+735%**. The two numbers locate it — the control's
 uncached input is 16.6× paper's, because a growing history is re-sent every
 request, while paper's context is stable and therefore cache-local. Paper's
 `cache_read` is the *higher* of the two: a bounded context that repeats gets
@@ -976,13 +989,21 @@ calls), so the total is less predictable; the control's grows with its
 transcript while its run length is steadier. Paper wins on the total and loses
 on the predictability, and both hold at once.
 
-One caveat that does not resolve: paper answered correctly while its state ended
-25/30, and the control's ended complete. The cause is measured and it belongs to
-the paper's own operator — §3 rule 1 replaces arrays wholesale, so a model
-emitting `done: ["cfg9.ts"]` over a ten-element list is doing exactly what is
-specified. The state rewinds, `total` double-counts, and the run still answers
-correctly out of its own arithmetic. A guard against that would be a rule the
-paper does not have.
+§5.1's bounded retry — `k + 1` attempts at the same `Aₜ`, each after the first
+carrying the reason the last failed — was not implemented, and it was the cause.
+Without it each failed attempt became its own step, so the corrective feedback
+arrived on a different `Aₜ` than the one it was correcting, and the model spent
+about 63% of turns narrating instead of patching. Implemented, the state reaches
+30/30 under the default 64-step ceiling. §6.4's synthetic observation now
+accompanies a spent step, so the model is told the step ended and the state was
+not written.
+
+One hazard remains and belongs to the paper rather than to this implementation:
+§3 rule 1 replaces arrays wholesale, so a model emitting `done: ["cfg9.ts"]` over
+a ten-element list is doing exactly what is specified. Observed once — the state
+rewound, `total` double-counted, and the run still answered correctly out of its
+own arithmetic. A guard against that would be a rule the paper does not have, so
+it is described here rather than added.
 
 What is still open is the same thing it was before, one scale further along:
 the crossover is bracketed between 8 and 30 files, not located, and the state
