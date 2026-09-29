@@ -867,10 +867,31 @@ A real A/B on `opencode/big-pickle` — the weakest model in the catalogue —
 | spread (MAD) | **60 — ±0%** | 16 504 — ±18% |
 | correct | 6 / 7 | 4 / 7 |
 
-**70.4% fewer prompt tokens**, 4.0 MADs, every gate passed. The interesting
-column is the spread: paper mode's per-run cost is flat to within 60 tokens
-because the prompt does not grow, while the control swings ±18% as the
-transcript accumulates. That variance is the mechanism, visible in one number.
+**70.4% fewer prompt tokens**, 4.0 MADs, every gate passed.
+
+**This measurement was taken before the step driver worked, and that changes
+what it is about.** `session.prompt` was being rejected by the host's own schema
+on every call — `SchemaError: Expected string at ["text"]` — so `RuntimeDriver`
+had never once driven a turn. The "paper mode" arm in this table had the bounded
+context and *no step loop*, which is the configuration now behind
+`SKILLSTATE_DRIVE=0`.
+
+That is not a discredited number; it is a number about a different thing. On the
+eight-file task that configuration gives 17 tool calls and a complete 8/8 state
+at 319,366 tokens, and it is the cheapest paper configuration there. On the
+thirty-file task it exits with **no answer at all**, at 101,616 tokens, with the
+state at 1/30 — a run that ends on a turn that only narrated, because without a
+driver nothing re-prompts.
+
+So the 70.4% is a real measurement of context replacement without a step loop,
+on a task short enough that the absence of the loop costs nothing. It is not a
+measurement of the paper's mechanism, and it should not be read as one.
+
+The spread column is the part that still holds: paper mode's per-run cost is flat
+to within 60 tokens because the prompt does not grow, while the control swings
+±18% as the transcript accumulates. That is confirmed independently at n=3 on the
+thirty-file task, where paper's prompt per request is 12,239 – 12,710 across
+three runs — a 1.04× spread.
 
 On accuracy, do not over-read 6/7 vs 4/7 — it is suggestive and not
 conclusive at this sample size, and both arms fail the *same* kind of step
