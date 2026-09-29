@@ -190,7 +190,9 @@ directed by the observation" is the giveaway — it is narrating Oₜ back at us
 
 Those narration turns are exactly the turns with no patch, and the state advances
 only on patch turns, so the state grows at about half the step rate. Thirty
-files cost about sixty steps, and `DEFAULT_MAX_STEPS` is 64. A thirty-file task
+files cost about sixty steps, and the ceiling was then 64 — a number of our own
+invention, since corrected: §10.1's `Run` signature says `maxSteps = 100`. A
+thirty-file task
 sits on the ceiling. This also explains why `SKILLSTATE_DRIVE=0` is 2.9× cheaper:
 the host lets the model plan once and then act, instead of forcing a fresh turn
 per action. The cost is not context tokens — it is turns spent narrating.

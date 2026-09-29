@@ -1037,7 +1037,7 @@ carrying the reason the last failed — was not implemented, and it was the caus
 Without it each failed attempt became its own step, so the corrective feedback
 arrived on a different `Aₜ` than the one it was correcting, and the model spent
 about 63% of turns narrating instead of patching. Implemented, the state reaches
-30/30 under the default 64-step ceiling. §6.4's synthetic observation now
+30/30 under the step ceiling (§10.1's 100). §6.4's synthetic observation now
 accompanies a spent step, so the model is told the step ended and the state was
 not written.
 
