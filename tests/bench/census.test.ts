@@ -57,7 +57,7 @@ describe('census counts arithmetic the model outsourced', () => {
       ]),
     );
     expect(rowOf(out)[3]).toBe('1');
-    expect(out).toMatch(/^\s+execute: /m);
+    expect(out).toMatch(/^\s+sum\s+execute: /m);
   });
 
   it('counts a bash pipeline, and the one whose tool is missing', () => {
@@ -117,5 +117,106 @@ describe('census counts arithmetic the model outsourced', () => {
       ]),
     );
     expect(rowOf(out).slice(1, 3)).toEqual(['2', 'grep×1 shell×1']);
+  });
+});
+
+describe('the two counters stay separate', () => {
+  it('counts a patch built in a loop as a patch, not as a sum', () => {
+    // The values-schema run built its whole `done` list in JavaScript and
+    // passed it as the patch. Its state file reads {done: [all 30]} and is
+    // indistinguishable from a record of thirty reads, because it is a record
+    // — of a loop. Folding this into the sum counter would report one fact
+    // about arithmetic when the fact was about the record itself.
+    const out = census(
+      transcript([
+        { tool: 'read', input: { path: 'src/cfg1.ts' } },
+        {
+          tool: 'execute',
+          input: {
+            code: 'const done = []; for (let i = 1; i <= 28; i++) done.push(`cfg${i}.ts`); return JSON.stringify({ state_patch: { total: 1446, done }, action: "echo" });',
+          },
+        },
+      ]),
+    );
+    const [, , , sum, built] = rowOf(out);
+    expect(sum).toBe('0');
+    expect(built).toBe('1');
+  });
+
+  it('counts one call in both columns when it did both', () => {
+    // The real values run. A single execute that summed AND built the list is
+    // one attempt at two different things, and collapsing the columns would
+    // hide whichever one was not being looked at.
+    const out = census(
+      transcript([
+        {
+          tool: 'execute',
+          input: {
+            code: 'const done = []; let total = 0; for (let i = 1; i <= 28; i++) { done.push(`cfg${i}.ts`); } return JSON.stringify({ state_patch: { total: 1446 + 0, done }, action: "echo" });',
+          },
+        },
+      ]),
+    );
+    const [, , , sum, built] = rowOf(out);
+    expect(sum).toBe('1');
+    expect(built).toBe('1');
+  });
+});
+
+describe('the two implementations agree', () => {
+  // There are two copies of this detector: scripts/census.mjs for looking at a
+  // run, and scripts/blind-score.py for scoring one. A pattern added to one and
+  // not the other would make the report and the verdict disagree about the same
+  // transcript, and the second one is the one that gates. So they are run
+  // against the same input and compared.
+  const SCORER = path.join(ROOT, 'scripts/blind-score.py');
+
+  it('counts identically on a transcript that exercises every pattern', () => {
+    const body = transcript([
+      { tool: 'read', input: { path: 'src/cfg1.ts' } },
+      { tool: 'read', input: { path: 'src/cfg2.ts' } },
+      { tool: 'shell', input: { command: "grep -oP 'REAL_\\K\\d+' src/*.ts | paste -sd+ | bc" } },
+      { tool: 'shell', input: { command: "grep -oP 'REAL_\\K\\d+' src/*.ts | awk -F: '{s+=$2} END{print s}'" } },
+      { tool: 'shell', input: { command: 'python3 -c "print(sum([1,2,3]))"' } },
+      { tool: 'execute', input: { code: 'return {total: 1466 + 57};' } },
+      { tool: 'grep', input: { pattern: 'export const REAL_', path: 'src' } },
+      { tool: 'ls', input: {} },
+      {
+        tool: 'execute',
+        input: {
+          code: 'const done = []; for (let i = 1; i <= 28; i++) done.push(`cfg${i}.ts`); return JSON.stringify({ state_patch: { total: 1446, done }, action: "echo" });',
+        },
+      },
+    ]);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'census-'));
+    const file = path.join(dir, 'out.json');
+    fs.writeFileSync(file, body);
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 1523, done: [] } }),
+    );
+    try {
+      const report = execFileSync(process.execPath, [SCRIPT, file], { encoding: 'utf8' });
+      const [, , , sum, built] = rowOf(report);
+
+      const scored = execFileSync(
+        'python3',
+        [SCORER, dir, 'paper', 'x'],
+        { encoding: 'utf8', env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '0' } },
+      );
+      const record = JSON.parse(scored) as Record<string, number | boolean>;
+
+      expect(Number(sum)).toBe(record.outsourced_sums);
+      expect(Number(built)).toBe(record.patches_built);
+      // And the verdict agrees with the counts: a perfect state with a patch
+      // built in a loop is state_ok and not accumulated, which is the whole
+      // reason the two are separate fields.
+      expect(record.state_ok).toBe(true);
+      expect(record.accumulated).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

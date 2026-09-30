@@ -74,6 +74,66 @@ def _state(directory: str) -> dict[str, Any]:
         return {}
 
 
+# Commands whose purpose is to add numbers up, whatever the language. Kept in
+# step with scripts/census.mjs by hand — a failed attempt counts, because whether
+# the calculator exists is a different fact and dropping failures would make the
+# number depend on the container image.
+_SUMMING = (
+    re.compile(r"\bbc\b"),
+    re.compile(r"paste\s+-sd?\+"),
+    re.compile(r"\bawk\b"),
+    re.compile(r"python3?\s+-c"),
+    re.compile(r"\bsum\("),
+    re.compile(r"total\s*[:=]\s*\d+\s*[+*]"),
+    re.compile(r"state_patch[\s\S]{0,200}total[\s\S]{0,80}[+\-]\s*\d"),
+)
+_CODE_TOOLS = {"shell", "execute", "bash", "python", "python3", "run"}
+
+# The stronger version: the PATCH is built in code rather than accumulated. The
+# values-schema run emitted
+#
+#   execute: {"code":"const done = []; for (let i = 1; i <= 28; i++)
+#             done.push(`cfg${i}.ts`); return JSON.stringify({state_patch:
+#             {total: 1446, done}, ..."}
+#
+# and its state file reads {done: [all 30]}. That is indistinguishable from a
+# record of thirty reads, because it is a record — of a loop. So it gets its own
+# count, and `accumulated` requires both to be zero.
+_PATCH_BUILT = (
+    re.compile(r"state_patch[\s\S]{0,400}JSON\.stringify"),
+    re.compile(r"done\.push\("),
+    re.compile(r"for\s*\(\s*let\s+\w+\s*=\s*1[\s\S]{0,120}done"),
+)
+
+
+def _code_delegation(out: str) -> tuple[int, int]:
+    """(arithmetic handed to a tool, patches built in a tool)."""
+    if not os.path.exists(out):
+        return 0, 0
+    sums = 0
+    built = 0
+    with open(out, errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            part = event.get("part") or {}
+            if part.get("type") != "tool":
+                continue
+            if str(part.get("tool")) not in _CODE_TOOLS:
+                continue
+            blob = json.dumps((part.get("state") or {}).get("input") or {})
+            if any(pattern.search(blob) for pattern in _SUMMING):
+                sums += 1
+            if any(pattern.search(blob) for pattern in _PATCH_BUILT):
+                built += 1
+    return sums, built
+
+
 def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     truth = int(os.environ["BLIND_TRUTH"])
     files = int(os.environ.get("BLIND_FILES", "30"))
@@ -98,10 +158,31 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     # sat there, written by a path that never validated against the schema.
     total_typed = isinstance(total, (int, float)) and not isinstance(total, bool)
 
+    # A state that holds the right number is not a state that accumulated it.
+    # The n=3 paper trial scored 30/30 with the true total after running the
+    # sum in the host's JavaScript sandbox: `execute: {"code": "return
+    # {total: 1466 + 57};"}`. Two bash attempts came first; bc was missing.
+    #
+    # So the attempts are counted and reported, and they do NOT feed state_ok —
+    # state_ok stays a measurement of the state. `accumulated` is the claim
+    # about the mechanism, and it is a separate verdict that the same number can
+    # fail. Reporting one as the other is what let a perfect state stand as
+    # evidence for the state having done the work.
+    outsourced, built = _code_delegation(out)
+
     return {
         "record_id": record_id,
         "arm": arm,
         "state_ok": total == truth and done_count == files and total_typed,
+        "accumulated": (
+            total == truth
+            and done_count == files
+            and total_typed
+            and outsourced == 0
+            and built == 0
+        ),
+        "outsourced_sums": outsourced,
+        "patches_built": built,
         "total": total,
         "total_is_number": total_typed,
         "n_done": done_count,
