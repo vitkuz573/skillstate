@@ -997,7 +997,7 @@ paper's favour by making the control's history too small to hurt.
 | prompt tokens | **1,607,539** | 2,015,473 (median, n=3) |
 | uncached input | 149,801 | 241,061 – 1,502,583 |
 | tool calls | 84 | 45 – 64 |
-| correct | ✓ | 3 / 3 |
+| state total 1523, 30/30 | ✓ | 3 / 3 |
 | final state | **30/30** | 30/30, 30/30, 30/30 |
 
 Before §5.1's retry loop, on the same fixture: answer correct, state **25/30**,
@@ -1006,6 +1006,12 @@ calls against 45 and 68 — and that is the trade, stated rather than rounded of
 
 † A third paper run in the earlier n=3 set was killed by us to free the machine,
 not by a fault. It is excluded rather than counted as a failure.
+
+**These fixtures told the model the answer, so the answer column was void.** Each
+task ended "output exactly TOTAL=1523"; the model printed it. The **state** was
+the real evidence, and it was checked independently on every paper run — 30/30
+with total 1523 — which is why the claim above is stated about the state. See
+"the instrument that lied" below.
 
 **These are provider token counts, not §4.3 metrics.** §8.2 requires the
 comparison triple to be computed *in raw string characters*, so that any two
@@ -1021,7 +1027,7 @@ and the conformance suite pins that it does.
 **The n=3 result does not support a token saving on this task, and the
 headline says so.**
 
-| 30 files, n=3, all six runs 30/30 and correct | run 1 | run 2 | run 3 | median |
+| 30 files, n=3, every run reached 30/30 with total 1523 in the state | run 1 | run 2 | run 3 | median |
 | --- | --- | --- | --- | --- |
 | paper — prompt tokens | 2,211,504 | 1,211,662 | 1,613,699 | **1,613,699** |
 | notes — prompt tokens | 96,827 | 148,160 | 1,780,955 | **148,160** |
