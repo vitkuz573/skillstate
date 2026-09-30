@@ -927,7 +927,7 @@ only by passing every gate:
   accusation the harness cannot support;
 - **completeness**, **sample-size** (≥2 trials per arm), **comparability**,
   **task-equivalence** (artifact digests) and **variance** (effect ≥ 1 MAD);
-- **paper-compatibility** — §7 Limitations case (3) predicts no benefit when
+- **paper-compatibility** — the paper's Limitations, case (3), predicts no benefit when
   the task objective is defined over the historical trajectory, so a flat
   result on an audit-style task is reported as `NOT-A-TEST` rather than as a
   refutation.

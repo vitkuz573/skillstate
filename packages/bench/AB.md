@@ -44,7 +44,7 @@ and only one of them is correct.
 | `engagement` | The instrumented arm never wrote the state file | **The gate that caught it.** If the integration did nothing, its token count measures the model, not the integration. |
 | `task-equivalence` | An arm's artifact digest appears in no control run | Byte-identical artifacts are the strongest available evidence both arms finished the same thing. |
 | `variance` | The effect is under 1 MAD of the arms' own spread | An effect smaller than the noise is not an effect. |
-| `paper-compatibility` | The task is defined over the historical trajectory | §7 Limitations case (3): the paper predicts **no** benefit for an audit-style task. A flat result there is consistent with the paper, not a refutation. Reported as `NOT-A-TEST`. |
+| `paper-compatibility` | The task is defined over the historical trajectory | the paper's Limitations, case (3): the paper predicts **no** benefit for an audit-style task. A flat result there is consistent with the paper, not a refutation. Reported as `NOT-A-TEST`. |
 
 Gates run in that order, and **all** of them are evaluated before any return:
 a caller fixing a broken experiment is told everything that is wrong in one

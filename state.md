@@ -53,7 +53,15 @@ This specification defines the **data model and the per-step transition protocol
 - The three comparison metrics and their char-based measurement contract.
 - Interop file and adapter conventions.
 
-Honest scope boundaries (§ Limitations, mirroring the source paper):
+Honest scope boundaries (§ Limitations, mirroring the source paper).
+
+**The Limitations section is not numbered here**, and the code that cites it does
+not invent a number. `state.md` is the only record of the paper this repository
+works from, so a section number it does not carry cannot be checked from inside
+the project — and an unverifiable citation is worse than no citation, because it
+looks verified. If a reader has the paper to hand, the number belongs in the table
+in §11 above and the four sites that currently say "the paper's Limitations" can
+name it.
 
 - **Single agent.** No multi-agent coordination, no shared persisted state between independent agents, no distributed consensus.
 - **Procedural execution.** The model issues discrete actions against an environment and observes a scalar result. There is no claim about open-ended reasoning traces, memory architecture, retrieval, or long-term knowledge persistence beyond the single schema-constrained state object.

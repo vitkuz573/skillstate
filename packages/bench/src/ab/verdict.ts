@@ -15,7 +15,7 @@
  * a comparison.
  *
  * @non-paper — measurement infrastructure for OUR host integration, not the
- * paper's own evaluation. The paper's §7 Limitations are cited here as the
+ * paper's own evaluation. The paper's Limitations are cited here as the
  * source of one gate, not as a claim being verified.
  */
 
@@ -80,7 +80,10 @@ export interface ExperimentOptions {
    * Set when the task's objective is defined over the historical trajectory
    * (an audit, a review, a "what did I just do" task).
    *
-   * §7 Limitations, case (3): the paper's own assumption fails exactly there.
+   * Limitations, case (3): the paper's own assumption fails exactly there. The
+   * section is not numbered — `state.md` records it as `§ Limitations` with no
+   * number, so a number here would be a citation nobody can check. An
+   * unverifiable citation is worse than none: it looks verified.
    * A flat result on such a task is the predicted outcome, so reporting it
    * as a refutation would be a category error in the harness's own favour.
    * The gate downgrades `no-effect` to a failure that says so.
@@ -313,7 +316,7 @@ export function runExperiment(
     failures.push({
       gate: 'paper-compatibility',
       detail:
-        'this task is defined over the historical trajectory (audit-style), which is the case §7 Limitations' +
+        'this task is defined over the historical trajectory (audit-style), which is the case the paper’s Limitations call out' +
         ' predicts will not benefit from a bounded prompt; a flat result here is consistent with the paper, not a' +
         ' refutation of it — measure a task that needs cross-turn memory',
     });

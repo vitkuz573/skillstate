@@ -37,7 +37,7 @@
  *
  * ── What the sink guarantees ──────────────────────────────────────────────
  *
- * - **A rejected response never touches Σₜ** (paper §7, Limitations). A
+ * - **A rejected response never touches Σₜ** (the paper's Limitations). A
  *   missing block, malformed JSON, a missing `state_patch` or a missing
  *   `action` returns a result and changes nothing on disk.
  * - **The patch is validated against P's schema** (§3.2) before it is
