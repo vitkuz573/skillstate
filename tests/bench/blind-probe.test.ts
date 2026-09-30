@@ -480,3 +480,93 @@ group('a host-dropped run is not a model result', () => {
     expect(score(['not json at all', '{', '[]']).ended_on_error).toBe(false);
   });
 });
+
+
+group('a run killed by the harness clock says so', () => {
+  // `timeout` sends SIGTERM, the host closes the socket, and the transcript's
+  // last line reads "Transport: The socket connection was closed unexpectedly" --
+  // a harness decision wearing the costume of a network failure. Two 90-file runs
+  // died at 39.9 minutes against the stand's `timeout 2400` while the control arm
+  // at the same length finished in 6.9. Exit code 0, stderr empty, state file
+  // plausible: for a day that read as a model losing track of its work, and then
+  // as a step ceiling. The run's own duration against the cap it was given costs
+  // one comparison.
+  const score = (dir: string): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+
+  /** A transcript `seconds` long, ending however you ask. */
+  const runDir = (seconds: number, cap: unknown, end: 'text' | 'error'): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmo-'));
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [] } }),
+    );
+    const start = 1_700_000_000_000;
+    const at = (ms: number): number => start + ms;
+    const lines = [
+      JSON.stringify({ type: 'step_start', timestamp: at(0) }),
+      JSON.stringify({ type: 'text', timestamp: at(seconds * 500), part: { type: 'text', text: 'working' } }),
+    ];
+    if (end === 'error') {
+      lines.push(
+        JSON.stringify({
+          type: 'error',
+          timestamp: at(seconds * 1000),
+          error: { type: 'unknown', message: 'Transport: The socket connection was closed unexpectedly.' },
+        }),
+      );
+    } else {
+      lines.push(JSON.stringify({ type: 'text', timestamp: at(seconds * 1000), part: { type: 'text', text: 'done' } }));
+    }
+    fs.writeFileSync(path.join(dir, 'out.json'), lines.join('\n'));
+    if (cap !== undefined) {
+      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(cap));
+    }
+    return dir;
+  };
+
+  it('flags a run that reached the cap', () => {
+    const result = score(runDir(2394, { timeout_s: 2400 }, 'error'));
+    expect(result.at_timeout).toBe(true);
+    expect(result.timeout_s).toBe(2400);
+    // 39.9 minutes, to the second, from the transcript alone.
+    expect(result.duration_s).toBeCloseTo(2394, 0);
+  });
+
+  it('does not flag a run that finished early', () => {
+    // The control arm at ninety files: 6.9 minutes against the same 2400. If this
+    // reads as capped then the comparison is worthless.
+    const result = score(runDir(414, { timeout_s: 2400 }, 'text'));
+    expect(result.at_timeout).toBe(false);
+    expect(result.duration_s).toBeCloseTo(414, 0);
+  });
+
+  it('is null when the run has no cap to compare against, not false', () => {
+    // A run taken before the stand wrote `meta.json`. `false` would read as "this
+    // was not capped", which is exactly the claim nobody can check.
+    const result = score(runDir(2394, undefined, 'error'));
+    expect(result.at_timeout).toBeNull();
+    // The duration is still measured -- it is the evidence either way.
+    expect(result.duration_s).toBeCloseTo(2394, 0);
+  });
+
+  it('is null on a transcript with nothing to measure a duration from', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmo-bare-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), '');
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [] } }),
+    );
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ timeout_s: 2400 }));
+    const result = score(dir);
+    expect(result.duration_s).toBeNull();
+    expect(result.at_timeout).toBeNull();
+  });
+});

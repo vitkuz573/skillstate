@@ -66,6 +66,46 @@ def _assistant_texts(path: str) -> list[str]:
     return texts
 
 
+def _duration_s(path: str) -> float | None:
+    """Wall-clock seconds the run occupied, from its own event timestamps."""
+    stamps: list[float] = []
+    with open(path, errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and isinstance(event.get("timestamp"), (int, float)):
+                stamps.append(float(event["timestamp"]))
+    if len(stamps) < 2:
+        return None
+    return (max(stamps) - min(stamps)) / 1000.0
+
+
+def _meta(directory: str) -> dict[str, Any]:
+    """The stand's `meta.json`, if the run was taken by a stand that writes one.
+
+    Looked for beside the run and one level up, because the stand writes it at the
+    root of its tree and the scorer is called per arm.
+    """
+    for candidate in (
+        os.path.join(directory, "meta.json"),
+        os.path.join(os.path.dirname(os.path.abspath(directory)), "meta.json"),
+    ):
+        if os.path.exists(candidate):
+            try:
+                with open(candidate) as handle:
+                    parsed = json.load(handle)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (OSError, ValueError):
+                return {}
+    return {}
+
+
 def _stream_health(path: str) -> tuple[list[str], bool]:
     """Errors in the transcript, and whether the run ENDED on one.
 
@@ -237,9 +277,11 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         texts = _assistant_texts(out)
         census = _tool_census(out)
         errors, ended_on_error = _stream_health(out)
+        duration = _duration_s(out)
     else:
         texts, census = [], {}
         errors, ended_on_error = [], False
+        duration = None
 
     match = ANSWER.search("\n".join(texts))
     answered = int(match.group(1)) if match else None
@@ -334,6 +376,24 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     if run is not None:
         stopped_by_ceiling = (run.get("stop") or {}).get("reason") == "max_steps"
 
+    # Was the run killed by the HARNESS? `timeout` sends SIGTERM, the host closes
+    # the socket, and the transcript's last line reads "Transport: The socket
+    # connection was closed unexpectedly" -- a harness decision wearing the
+    # costume of a network failure.
+    #
+    # Two 90-file runs died at 39.9 minutes against the stand's `timeout 2400`,
+    # while the control arm at the same length finished in 6.9. The exit code is
+    # 0, stderr is empty, and the state file looks like a run that stopped of its
+    # own accord, so for a day this read as a model that lost track of its work.
+    # The run's OWN duration against the cap it was given settles it, and it costs
+    # one comparison.
+    meta = _meta(directory)
+    cap = meta.get("timeout_s")
+    cap_s = cap if isinstance(cap, (int, float)) and cap > 0 else None
+    at_timeout = (
+        duration is not None and cap_s is not None and duration >= cap_s * 0.98
+    )
+
     return {
         "record_id": record_id,
         "arm": arm,
@@ -348,6 +408,12 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         # truncated run.
         "ended_on_error": ended_on_error,
         "errors": errors,
+        "duration_s": None if duration is None else round(duration, 1),
+        "timeout_s": cap_s,
+        # True means the stand's own clock ran out, NOT the model and NOT the
+        # mechanism. A cost or accuracy number from such a run is a number about
+        # SIGTERM.
+        "at_timeout": at_timeout if (duration is not None and cap_s is not None) else None,
         "plugin_live": engaged,
         "engagement": {
             "patch_in_text": paper_engaged,

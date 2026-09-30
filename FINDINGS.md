@@ -610,6 +610,43 @@ last event and reports `ended_on_error` with the message — **the ninth
 instrument**, and like the eighth it was *absent* rather than wrong. Two absences
 in a row, both about the same thing: **whether a run finished at all.**
 
+**And then the cause, which was in this project's own harness the whole time.**
+
+Every one of those readings — model failure, step ceiling, host transport — was
+wrong, and the fourth is trivial. The transcript carries a `timestamp` on every
+event. Span them:
+
+| run | events | wall clock |
+| --- | --- | --- |
+| paper, 90 files, ceiling 100 | 794 | **39.9 min** |
+| paper, 90 files, ceiling 200 | 809 | **39.9 min** |
+| notes, 90 files | 405 | 6.9 min |
+| paper, 30 files | 330 | 15.6 min |
+| notes, 30 files | 125 | 1.7 min |
+
+Not 39.8. Not 40.1. **39.9 minutes twice**, against the stand's own
+`timeout 2400` — forty minutes — while the control arm at the same length
+finished in 6.9. `timeout` sends SIGTERM, the host closes the socket, and the
+transcript's last line reads "Transport: The socket connection was closed
+unexpectedly".
+
+**A harness decision wearing the costume of a network failure.** The exit code is
+0, stderr is empty, the state file looks like a run that stopped of its own
+accord — and I read three wrong explanations off that evidence, in order, each
+with a build behind it.
+
+**So the tenth instrument, and the one that ends the sequence:** the scorer reads
+the run's own duration and compares it against the cap the stand records in
+`meta.json`, and reports `at_timeout`. One subtraction. It would have said this on
+the first run, before the second reading, and it does not require anyone to open a
+transcript at all — the number is in the file.
+
+Ten instruments, and the shape of the last four is the point: three counters that
+were *wrong*, then three that were *absent* — no stop reason, no liveness, no
+transport check — and then a duration. Every one was found by asking a question
+of a second opinion rather than by being green, and none of them would have failed
+its own test.
+
 **The retest, and what it settled.** Same fixture, ceiling raised from 100 to 200,
 so the hypothesis got its test:
 

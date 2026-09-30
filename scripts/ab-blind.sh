@@ -165,6 +165,16 @@ setup() {
   printf '{"version":1,"state":{"total":0,"done":[]}}' > "$1/.skillstate/skillstate.json"
 }
 
+# The wall-clock cap on a single run. Read here, written to `$ROOT/meta.json`
+# below, and compared against the transcript's own duration by the scorer — so a
+# run killed by SIGTERM says so instead of looking like a model that gave up.
+#
+# Placed above `task_text()` on purpose: a guard reads the range from
+# `task_text()` to the next `mkdir` of the run root, to check that the TASK TEXT
+# cannot name the answer, and a timeout is not an answer. (That guard finds its
+# markers by first occurrence, so this comment must not quote them.)
+TMO="${SKILLSTATE_AB_TIMEOUT:-2400}"
+
 # The task text. Note what is NOT in it: any number the model is expected to
 # arrive at. The phrase is "the final total", and the scorer holds the rest.
 task_text() {
@@ -182,6 +192,15 @@ PY
 }
 
 mkdir -p "$ROOT"
+# The cap travels with the run, because a measurement whose conditions are not
+# written down is a measurement nobody can check later.
+#
+# No `truth` here, deliberately. It is held by the scorer alone, from the
+# environment, and writing it beside the transcript puts it one `read` away from
+# the model for the sake of a convenience nothing needs.
+printf '{"timeout_s":%s,"files":%s,"model":"%s"}\n' \
+    "$TMO" "$FILES" "$(printf '%s' "$MODEL" | sed 's/"/\\"/g')" > "$ROOT/meta.json"
+
 seed_fixture
 printf 'fixture: %s files, truth %s (held by the scorer only)\n' "$FILES" "$TRUTH"
 : > "$ROOT/trials.jsonl"
@@ -194,7 +213,18 @@ for t in $(seq 1 "$TRIALS"); do
     # SKILLSTATE_DRIVE passes through: 0 turns the step loop off, which is the
     # configuration that batches and therefore the one that keeps the request
     # count down. 1 or unset is the paper's mechanism, one action per step.
-    ( cd "$dir" && timeout 2400 opencode run --standalone \
+    # The wall-clock cap, recorded. `timeout` sends SIGTERM, the host closes the
+    # socket, and the transcript's last line reads "Transport: The socket
+    # connection was closed unexpectedly" -- which is a harness decision wearing
+    # the costume of a network failure, and which cost a day.
+    #
+    # Two 90-file paper runs died at 39.9 minutes against this 2400. Not 39.8,
+    # not 40.1: 39.9 twice, while the control arm at the same length finished in
+    # 6.9. It is a cap, and nobody could see it, because the exit code is 0 and
+    # stderr is empty and the state file looks like a run that stopped of its own
+    # accord. The scorer compares the transcript's own duration against this
+    # number, so a capped run says so instead of looking like a model failure.
+    ( cd "$dir" && timeout "$TMO" opencode run --standalone \
         --model "$MODEL" --format json "$(task_text)" > out.json 2> err.txt ) || true
     BLIND_TRUTH="$TRUTH" BLIND_FILES="$FILES" python3 "$SCRIPTER" "$dir" "$arm" "$arm-$t" \
       | tee -a "$ROOT/trials.jsonl"

@@ -307,11 +307,30 @@ connection was closed unexpectedly. ..."}}
 
 **It is the only run of the eight with an error in its transcript at all, and the
 only one that ends on one.** So 78/90 measures nothing about the mechanism and
-nothing about the model — it is the point where a socket closed. I read it three
-times and got it wrong twice: first as a model losing track of its running sum,
-then as §10.1's step ceiling (130 *emitted* patches against a default of 100
-*taken* steps is arithmetic about the wrong quantity). I built an instrument to
-prove the ceiling theory and only read the transcript's last line afterwards.
+nothing about the model. I read it four times and got it wrong three times: as a
+model losing track of its running sum, then as §10.1's step ceiling (130
+*emitted* patches against a default of 100 *taken* steps is arithmetic about the
+wrong quantity), then as a host transport failure — building an instrument to
+prove the ceiling theory before opening the last line, where the answer had been
+all along.
+
+**The cause is this project's own harness.** Span the transcript's timestamps:
+
+| run | wall clock |
+| --- | --- |
+| paper, 90 files, ceiling 100 | **39.9 min** |
+| paper, 90 files, ceiling 200 | **39.9 min** |
+| notes, 90 files | 6.9 min |
+
+Not 39.8. Not 40.1. **39.9 twice, against the stand's own `timeout 2400`,** while
+the control at the same length finished in 6.9. `timeout` sends SIGTERM, the host
+closes the socket, and the last line reads "Transport: The socket connection was
+closed unexpectedly." A harness decision wearing the costume of a network
+failure — exit code 0, empty stderr, plausible state file.
+
+The scorer now reads the run's own duration against the cap the stand records and
+reports `at_timeout`. One subtraction, and it would have said this on the first
+run.
 
 **The step ceiling is untested, not refuted.** That run has no `.run.json` to
 settle it. A six-file control takes 11 steps (1.83 per file) and this one reached
