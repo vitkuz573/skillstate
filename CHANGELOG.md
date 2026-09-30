@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Fixed: `Run` kept going after a step the paper says ends the run.**
+
+§10.1, verbatim:
+
+    if stepResult.invalidated:
+        break                                   // or continue, per policy
+
+The pseudocode breaks. The trailing comment is the paper permitting otherwise,
+and this loop implemented the comment and not the code — which is the easier of
+the two mistakes, because the comment reads like the rule and sits closer to the
+attention than the statement above it. Nothing failed: every existing test drove
+a runtime that never produced an invalidated step inside `run()`.
+
+The cost was a step per iteration re-reading an unchanged state and re-asking for
+a patch the previous k+1 attempts had already failed to produce, for the rest of
+the run. `run()` now breaks. §6.4's observation still comes back in
+`newObservation`, unchanged — the paper builds it and then breaks, and it is the
+caller's to use. The paper's alternative is reachable as
+`RunOptions.continueOnInvalidated`, because deleting the branch would be a
+second and quieter deviation.
+
+**Fixed: Oₜ said "nothing was executed" unconditionally, and that is not true.**
+
+Oₜ is the environment's channel and the contract is that what arrives there
+happened. The step report asserted that nothing had run, always. It was true on
+the day it was written — checked against the n=3 transcript: 45 patches, 58 tool
+calls, and not one turn containing both — and only by luck. Nothing enforced it;
+a model that patches and acts in one turn, which the host's batching makes
+ordinary, makes it false. And a false report in Oₜ is worse than no report: the
+same class of mistake as the paper's `__invalid_patch__` sentinel, which was
+forwarded as though it were something the model should read.
+
+The count now comes from the host's own tool results, and the report
+distinguishes 0 / 1 / n. A model's proposed action is a claim; a tool result
+coming back is the environment's account.
+
+**Removed: a clause from the spec that was wrong twice.**
+
+*"A null value means a field no longer applies — it is not a way to finish up."*
+Wrong on the mechanics: §3.1 rule 2 says `null` deletes the key, so a deleted
+field is absent, not inapplicable — and the same instructions block already said
+so correctly two paragraphs earlier. Wrong on authority: "it is not a way to
+finish up" is an order the paper does not contain. And it was the sentence that
+made state erasure look like a reasonable reading of the spec, which is the
+failure it was added to prevent.
+
+**Pinned: §4.2's deleted key, which is the claim I first got backwards.**
+
+`null` does not reset a field to its default. The key is removed, the state
+becomes `{}`, and `create_initial_state` is never called again — so nothing
+re-seeds it and one later patch re-introduces only the key it names. Test `3d`
+asserts the empty state, asserts it is *not* `createInitialState`'s output, and
+drives a second step to prove nothing re-seeds it. Asserting only the emptiness
+would pass against the wrong implementation, which is the natural one.
+
+**Added: measurements that run without a model.**
+
+- `scripts/replay-at.mjs` — rebuilds `SUM |A_t|` from a transcript's patches
+  using the runtime's own merge, in §4.3's unit (raw string chars, not wall
+  tokens). On a live run: `SUM |A_t|` 100,040, reduction 23.00x against a
+  theoretical (T+1)/2 of 23.00 — exact, and 81% of a full `A_t` is the constant
+  base prompt.
+- `scripts/census.mjs` — re-reads, lagging patches, erasures, arithmetic
+  outsourced to a tool, patches built in code.
+- `scripts/crossover.mjs` — solves for the host's per-call overhead rather than
+  assuming one, because assuming one is how this project produced three
+  headline numbers that were constants in place of measurements.
+
+**Corrected: a rate that was wrong in the direction that flattered the finding.**
+
+`9 erasures in 45 patches` was a counter firing on patches that merely *omitted*
+fields; sparse is §3.1's definition of a patch. The real count in that run is 0,
+and across four runs it is one — a patch carrying `{"total": 1523, "done": null,
+"values": null}` whose action field read *"done has 30 filenames"*. See
+[`FINDINGS.md`](./FINDINGS.md) §1b.
+
+**Fixed: the blind probe's fixture knob that did not do what it said.**
+
+The decoy-count argument was added to lengthen the transcript by making files
+bigger. The host's read tool truncates at roughly 3.8k chars — a 40-line,
+3,760-char file is returned whole, a 152-line, 14,754-char file comes back as
+*"lines 1-3"* — so a fixture built on larger files has a **shorter** transcript.
+A 150-decoy run measured 42,583 chars against 115,427 for 38 decoys. The script
+now refuses a fixture that would be truncated and says to raise the file count
+instead; the transcript-length axis is the file count, and only the file count.
+
 **Fixed:** paper mode put the user's live instruction in the wrong slot, and
 a model refused the task because of it.
 
