@@ -296,9 +296,21 @@ sending 46.9x less content, and the ceiling stops binding at all:
 | state | 78/90, total 4314 | **90/90, total 4559** |
 | answer | 3804 | **4559** |
 
-**So the cost claim survives at 90 files and the accuracy claim does not.** §7's
-arithmetic is about `SUM |Aₜ|` and it is exactly right — 65.50x, against a
-theoretical 65.50. §1–§10 say nothing about a model's ability to hold 78
+**Read the bounded arm's row as a failed run.** 78/90 and a total 245 low, while
+the control got all 90. So "128 calls against 192" compares a run that finished
+with a run that stopped, and a cheaper incomplete run is not a saving — it is a
+run that stopped, which is this project's own harness criterion: *a cost win with
+no task completion is worth nothing.*
+
+**What survives is the content, and it survives in the conservative direction** —
+`SUM |Aₜ|` 371,747 against a control context of 17,437,234, eq. 8 at 65.50
+against a theoretical 65.50 — because a run that got 78 of 90 files done already
+cost a seventh of what the control cost to get all 90. A run that stops early
+cannot flatter a content measurement; it can only shrink it.
+
+**So the cost claim survives at 90 files, the accuracy claim does not, and the
+cost row is not yet like-for-like.** §7's arithmetic is about `SUM |Aₜ|` and it
+is exactly right — 65.50x, against a theoretical 65.50. §1–§10 say nothing about a model's ability to hold 78
 filenames' worth of running sum with no transcript to check it against, and that
 is what ran out: 10 attempts to outsource the sum, 17 shell calls, one patch
 built in code, and a final answer of 3804 — *below its own state's 4314*, so it
