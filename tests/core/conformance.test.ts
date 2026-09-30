@@ -371,6 +371,36 @@ group('§10.2 conformance harness', () => {
     expect(runtime.state).toEqual({ mood: 'neutral', count: 0, log: [] });
   });
 
+  it('4d. §6.4 — the sentinel action is never executed', async () => {
+    // "The reported action is the sentinel `__invalid_patch__`" and "the
+    // sentinel action is never executed". Half of that is a return value and
+    // half is a promise about what the host does next, and only the first is
+    // visible from the return.
+    //
+    // Asserted as a negative over the executor: with k = 0 the step is spent on
+    // the first bad response, and if the sentinel reached the environment it
+    // would arrive here as an action string. It never does.
+    const executed: string[] = [];
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: scriptedLlm(['no fence']),
+      execute: (action) => {
+        executed.push(action);
+        return obs('done');
+      },
+      maxValidationRetries: 0,
+    });
+
+    const result = await runtime.step(obs('OBS'));
+
+    expect(result.action).toBe('__invalid_patch__');
+    expect(result.invalidated).toBe(true);
+    // The promise. It is an assertion about an array, not about a return value:
+    // the return value is identical whether or not the executor ran, so a test
+    // that only checked `result` would pass either way.
+    expect(executed).toEqual([]);
+  });
+
   it('4c. The corrective prompt is §10.1\'s string, character for character', async () => {
     // §10.1's `Transition` appends a specific sentence to the SAME A_t, and it
     // is the only thing standing between a model and a silent second failure.
