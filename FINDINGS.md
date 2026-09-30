@@ -647,6 +647,21 @@ transport check — and then a duration. Every one was found by asking a questio
 of a second opinion rather than by being green, and none of them would have failed
 its own test.
 
+**Verified on its first live use, deliberately.** A thirty-file run with the cap
+set to seven minutes, against fifteen to thirty-five for the same fixture's clean
+runs. SIGTERM killed it at 415.5 seconds, nineteen of thirty files in:
+
+```
+duration_s       415.5
+timeout_s        420
+at_timeout       true
+ended_on_error   true
+```
+
+Nobody read a transcript. The record is in
+[`measurements/30-files-capped/`](measurements/README.md), and it says the same
+thing the two ninety-file runs said, which cost a day to notice by hand.
+
 **The retest, and what it settled.** Same fixture, ceiling raised from 100 to 200,
 so the hypothesis got its test:
 

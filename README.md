@@ -307,9 +307,23 @@ the next one says so by itself. The records for all of this are in
 [`measurements/`](measurements/README.md).
 
 **And then the length made the request count work for the mechanism instead of
-against it.** At 90 files the control needed 192 tool calls and the bounded arm
-128 — so the bounded arm now pays the host's overhead *less* often as well as
-sending 46.9x less content, and the ceiling stops binding at all:
+against it — against the control run that kept every filename.** At 90 files that
+control run needed 192 tool calls and the bounded arm 128, so the bounded arm pays
+the host's overhead *less* often as well as sending 46.9x less content, and the
+ceiling stops binding.
+
+**Name the run, because the other control run is 96 calls.** Both control runs at
+ninety files read all ninety and answer 4559 correctly; one kept all 90 filenames
+in `done` and made 192 calls, the other kept 10 and made 96. Against *that* one the
+bounded arm's 128 is **more** calls, not fewer. The claim above is therefore true
+of one control run and false of the other, and the honest form is the weaker one:
+at 90 files the request count is no longer decisively against the mechanism, and
+which way it points depends on how much state the control chose to keep — a
+property the control does not have and the mechanism always does.
+
+| | paper — bounded | notes — transcript |
+| --- | --- | --- |
+| tool calls | **128** | 192 / **96** |
 
 | | paper — bounded | notes — transcript |
 | --- | --- | --- |

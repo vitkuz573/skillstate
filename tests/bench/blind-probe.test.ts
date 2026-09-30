@@ -644,12 +644,16 @@ group('the documentation agrees with the records', () => {
     // The claim that went wrong three times is a file count. If the record says
     // 84 and the document says 78, one of them is lying and this is the cheapest
     // possible place to find out which.
-    const first = ninety.find((r) => r['record_id'] === 'p-1');
-    expect(first, 'the 90-file paper run is missing from measurements/').toBeDefined();
-    expect(`${first!['n_done']}/90`).toMatch(/78\/90|84\/90/);
-    // And the document must agree with one of them specifically, not with "a
-    // number in that range".
-    expect(findings.includes(`${first!['n_done']}/90`) || readme.includes(`${first!['n_done']}/90`)).toBe(true);
+    // Every bounded-arm run at ninety files, and every one of its file counts has
+    // to appear in the prose. Two runs, two counts, and the claim that went wrong
+    // three times is a file count — so the guard does not accept a range, it
+    // requires each recorded count to be stated.
+    const bounded = ninety.filter((r) => r['arm'] === 'paper');
+    expect(bounded.length).toBeGreaterThan(0);
+    for (const run of bounded) {
+      const claimed = `${run['n_done']}/90`;
+      expect(findings.includes(claimed) || readme.includes(claimed)).toBe(true);
+    }
   });
 
   it('says a duration within a minute of what the transcript spans', () => {
@@ -659,6 +663,21 @@ group('the documentation agrees with the records', () => {
     expect(killed, 'no truncated run is recorded, so the claim has nothing behind it').toBeDefined();
     const minutes = Math.round((killed!['duration_s'] as number) / 6) / 10;
     expect(findings.includes(`${minutes.toFixed(1)} min`) || readme.includes(`${minutes.toFixed(1)} min`)).toBe(true);
+  });
+
+  it('names the run a call-count comparison came from', () => {
+    // "128 calls against 192" was in the README with no run named, and the other
+    // control run at the same length made 96 — so the comparison is true of one
+    // control run and false of the other. A number without its run is not a
+    // measurement, and this is the one place in the document where picking the
+    // flattering half was silent rather than argued.
+    const bounded = ninety.find((r) => r['record_id'] === 'p-1-ceiling100');
+    expect(bounded!['tools']).toBe(128);
+    const controlCalls = ninety.filter((r) => r['arm'] === 'notes').map((r) => r['tools']);
+    expect(controlCalls).toContain(192);
+    expect(controlCalls).toContain(96);
+    // Both are in the record, and the document has to carry the weaker reading.
+    expect(readme).toContain('96');
   });
 
   it('does not call a capped run a finished one', () => {
