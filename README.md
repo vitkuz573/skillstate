@@ -204,10 +204,21 @@ never recorded, a model narrating an order quoted back from its own past, and a
 merge operator with no append. Plus the measurements that argue for the mechanism
 and the two that bound it.
 
-Read the preamble there before a number. Three of them were confidently wrong for
-most of a day — a correctness column, an erasure count, a lag rate — each a counter
-that ran, printed, and was never compared against a second opinion. Corrections
-are kept in place next to the findings they correct.
+Read the preamble there before a number. **Six instruments in this project were
+confidently wrong**, each in a different direction — a correctness column, an
+erasure count, a lag rate, a drift counter, a liveness check, and a probe whose
+output turned out to be the confound rather than the evidence. Each ran, each
+printed, and none was compared against a second opinion. Corrections are kept in
+place next to the findings they correct.
+
+One of them is worth knowing about before you run anything here: **this host
+resolves plugins by workspace, not by the name in `opencode.json`.** Asking for a
+package that does not exist loads the one that does, and a copy of the plugin in
+a project is silently ignored in favour of the repository's build. That is why
+`scripts/ab-blind.sh` works — its symlink points into this repository — and it is
+invisible, because a symlink to the repo and a resolution to the repo are the same
+bytes. A measurement of this project can therefore be made with the wrong plugin
+and look entirely healthy, which is why every run now records `plugin_live`.
 
 **Every figure comes from a script that runs no model**, so the whole record is
 checkable without a provider:

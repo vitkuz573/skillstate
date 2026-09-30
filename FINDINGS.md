@@ -10,12 +10,13 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
-**How to read a number in this document.** Five of them were confidently wrong
-for most of a day — a correctness column, an erasure count, a lag rate, a drift
-counter, and the question of whether the plugin was loaded at all. Each was a
-counter or a gate that ran, printed, and was never compared against a second
-opinion. Two are corrected in place with the counter that produced them, so the
-mistake is as findable as the finding; the rest are sections of their own. Where a
+**How to read a number in this document.** Six instruments in this project were
+confidently wrong, each in a different direction: a correctness column, an erasure
+count, a lag rate, a drift counter, a liveness check with a false negative, and a
+probe whose output was read as evidence when it was the confound. Each ran, each
+printed, and none was compared against a second opinion. Two are corrected in
+place with the counter that produced them, so the mistake is as findable as the
+finding; the rest have sections of their own. Where a
 section reports one trial it says so; `n=3` appears where three ran, and at n=3
 nothing here supports a claim about accuracy in either direction.
 
@@ -643,39 +644,57 @@ here than the claim, and 81% is the number that says so.
 
 ---
 
-## 15. Was the plugin even loaded?
+## 15. The plugin resolution ignores what you asked for
 
 A run whose plugin never loaded leaves a clean state file and a model that answers
 in prose. The scorer reported `state_ok: false` — the same verdict as a model that
-engaged and got it wrong.
+engaged and got it wrong. So I went looking for whether the host could load a
+*different* plugin, to test `ctx.session.generate` and get the paper's own
+`SkillStateRuntime` running in the host with the adapter out of the loop.
 
-This was found by trying to build a throwaway probe plugin for
-`ctx.session.generate`, the one API that could let the paper's own
-`SkillStateRuntime` run in the host with the adapter out of the loop. The probe
-would not load. Four packaging attempts, and the project's own package loaded four
-of four from the same directory, with the same `opencode.json`, on the same model.
+**The probe never loaded, and every negative result about it was void.** The
+control explains why:
 
-**The probe's logic never ran, so the API question is still open.** What the
-failure established is worth more than the question was: a measurement of mine
-could have gone the same way and nothing in the harness would have said so. A
-transcript with a clean state file and a plausible answer is exactly what "the
-model did not use the state" looks like, and exactly what "the state was never
-there" looks like.
+```
+plugins: ["@skillstate/probe"]   ->  the REPO's @skillstate/opencode loaded
+```
 
-So every run now records `plugin_live` — a fenced patch in the text, or a
-`skillstate_*` tool call, or a `skillstate_*` call from inside the host's
-`execute` sandbox. That last one is required and not decorative: the notes trial
-that wrote a complete state did it thirty-one times from inside `execute`, with
-not one direct tool call anywhere in its transcript, and the first version of the
-check missed it and called that run **dead**. A detector with a false negative on
-the known instance is worse than no detector, because it produces a confident
-wrong verdict instead of a missing one.
+Asking for a package that does not exist in the workspace loaded a package that
+does. The `plugins` array's name is not what the host resolves on — it found the
+workspace's plugin instead and ran that. Confirmed a second way: a *copy* of
+`packages/opencode` at the temp project's `node_modules`, with a trace prepended
+to its real `dist/index.js`, produced no trace — that file was never read. The
+unmodified copy appeared to "load" only because the repo's build was loaded and
+wrote its debug dump, which is exactly the thing I was trying to distinguish.
+
+So: four packaging attempts, "0 of 4 loaded", against the repo package at "4 of
+4" — and that comparison was **the confound, not the evidence**. Same package,
+both sides. I had a sixth broken instrument and was about to write its output into
+the record.
+
+**What survives, and it is the useful part.** Every run now records
+`plugin_live`: a fenced patch in the text, or a `skillstate_*` tool call, or a
+`skillstate_*` call from inside the host's `execute` sandbox. The sandbox case is
+required, not decorative — the notes trial that wrote a complete state did it
+thirty-one times from inside `execute` with not one direct tool call in its
+transcript, and the first version of the check missed it and called that run
+**dead**.
 
 Re-scored against every run taken for this document: the paper arms carry 45 and
-130 fenced responses, one notes trial wrote through the sandbox, all four are
-live. **The measurements stand.**
+130 fenced responses, one notes trial wrote through the sandbox, all live. The
+measurements stand — and now for a reason that is checked rather than assumed.
 
-The five instruments in this project, all of them now checked: the correctness
-column, the erasure count, the lag rate, the drift counter, and this gate that
-exists because the first four were each wrong in a different direction.
+**The open question stays open.** Whether `ctx.session.generate` is one model call
+with no agent loop is still unknown, because nothing has run it.
+
+**Why it matters beyond the probe.** This host resolves plugins by workspace, not
+by the name in `opencode.json`. That is why `scripts/ab-blind.sh` works — its
+symlink points into this repository — and it is invisible, because a symlink to the
+repo and a resolution to the repo are the same bytes. It also means a measurement
+of this project can be made with the *wrong* plugin and look perfectly healthy.
+
+**The six instruments in this project**, each wrong in a different direction, and
+each found by comparing against a second opinion rather than by being green: the
+correctness column, the erasure count, the lag rate, the drift counter, the plugin
+liveness check (which had a false negative on the known instance), and this probe.
 
