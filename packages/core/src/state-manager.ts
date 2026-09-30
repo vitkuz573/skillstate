@@ -58,7 +58,22 @@ function checkType(value: unknown, field: SchemaField): boolean {
     case 'string':
       return typeof value === 'string';
     case 'number':
-      return typeof value === 'number';
+      // `typeof NaN === 'number'`, so that test alone lets a number the
+      // interchange format cannot carry through validation.
+      //
+      // §4.2 gives the reason it matters: types are limited to a closed set "so
+      // that a conforming validator in any language can check patches
+      // identically". JSON has no NaN and no Infinity — `JSON.stringify({n: NaN})`
+      // is `{"n":null}` — so a validator in another language reading the same
+      // patch cannot even see one, and would read the model's number as a
+      // deletion instead.
+      //
+      // The observable damage is worse than a portability gap. A patch of
+      // `{total: NaN}` passes, merges, and the state file is written with
+      // `total: null` — so §4.2's "a key that exists holds a value of its
+      // declared type" is broken by a patch §6.2 accepted, and the field the
+      // model asked to write a number into has silently become a deletion.
+      return typeof value === 'number' && Number.isFinite(value);
     case 'boolean':
       return typeof value === 'boolean';
     case 'array':

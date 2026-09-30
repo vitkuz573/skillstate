@@ -418,6 +418,37 @@ group('§10.2 conformance harness', () => {
     expect(mergeState({ v: { a: 1 } }, { v: 5 })).toEqual({ v: 5 });
   });
 
+  it('3e. §4.2 — a number JSON cannot carry is not a number, for the interop reason', () => {
+    // §4.2 limits the field types to a closed set "so that a conforming
+    // validator in any language can check patches identically". JSON has no NaN
+    // and no Infinity, so that promise is the whole reason to reject them:
+    // a validator in another language reading the same patch cannot see one, and
+    // would read the model's number as a deletion.
+    //
+    // `typeof NaN === 'number'` is what let it through, and the damage is not a
+    // portability gap. The patch validates, merges, and the state file is
+    // written as `{"n":null}` — so §4.2's "a key that exists holds a value of
+    // its declared type" is broken by a patch §6.2 accepted, and the field the
+    // model asked to write a number into has silently become a deletion.
+    const schema = { n: { type: 'number' as const, default: 0, description: 'x' } };
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const verdict = validatePatch(schema, { n: bad });
+      expect(verdict.valid, `${bad} passed validation`).toBe(false);
+      expect(verdict.field).toBe('n');
+    }
+    // The round-trip is the assertion, not the validator: this is what the
+    // state file would contain.
+    expect(JSON.parse(JSON.stringify({ n: Number.NaN }))).toEqual({ n: null });
+
+    // And the ordinary numbers, including the awkward ones, still pass.
+    for (const good of [0, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MIN_VALUE]) {
+      expect(validatePatch(schema, { n: good }).valid, `${good} was refused`).toBe(true);
+    }
+    // null is still legal, because §6.2 says so and it means deletion.
+    expect(validatePatch(schema, { n: null }).valid).toBe(true);
+  });
+
+
   it('3c. §6.2 — validation is deterministic, and true is not 1', () => {
     // §6.2: "every non-null value matches the field's declared type".
     // JavaScript's typeof says `typeof true === 'boolean'` and
