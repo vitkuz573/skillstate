@@ -296,11 +296,20 @@ sending 46.9x less content, and the ceiling stops binding at all:
 | state | 78/90, total 4314 | **90/90, total 4559** |
 | answer | 3804 | **4559** |
 
-**Read the bounded arm's row as a failed run.** 78/90 and a total 245 low, while
-the control got all 90. So "128 calls against 192" compares a run that finished
-with a run that stopped, and a cheaper incomplete run is not a saving — it is a
-run that stopped, which is this project's own harness criterion: *a cost win with
-no task completion is worth nothing.*
+**Read the bounded arm's row as an unfinished run, and the reason matters.**
+78/90, a total 245 low, the control all 90 — and the transcript ends on
+`read cfg79.ts` with the work still going. **It was stopped by the step ceiling**,
+not by the model: §10.1's `Run(..., maxSteps = 100)` is the default, a step
+advances per applied patch, and 90 files at 1.67 patches per file needs about 150.
+
+So this is not evidence that a model cannot hold 78 filenames' running sum. It is
+evidence that this adapter needs more steps per file than the paper's
+one-action-per-step, so §10.1's step budget buys less work per step. The number
+is faithful to §10.1 and the consequence is not the paper's.
+
+Which also means "128 calls against 192" compares a finished run with a stopped
+one, and a cheaper unfinished run is not a saving — this project's own harness
+criterion: *a cost win with no task completion is worth nothing.*
 
 **What survives is the content, and it survives in the conservative direction** —
 `SUM |Aₜ|` 371,747 against a control context of 17,437,234, eq. 8 at 65.50

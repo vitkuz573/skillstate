@@ -567,18 +567,34 @@ files*, because the comparison is not like-for-like. To make it so, the bounded
 arm has to finish — which is finding 13a's own conclusion, now applied to its own
 cost row.
 
-**And it lost the task.** 78/90 and a total 245 too low, where the control got
-90/90 and the exact sum. The state is not merely short — it stopped at cfg78 and
-never recovered, and the answer it reported (3804) is *below its own state*
-(4314), so it distrusted what it had and went further wrong.
+**And it did not finish** — 78/90 and a total 245 low, where the control got
+90/90 and the exact sum. **The ceiling stopped it at 100 steps, mid-file-79,**
+which is a fact about this adapter's step economics and not about the model's
+arithmetic. The answer it reported (3804) is *below its own state* (4314), so it
+distrusted its total before it stopped; the `+194` drift accumulated separately.
 
-**What the run is made of.** 96 reads for 90 files is almost efficient. 130
-patches, 10 sum-outsourcing attempts, 17 shell calls, and 1 patch built in code.
-The model spent its last third of the budget trying to add up 90 numbers it could
-not hold, and a state that lists 78 filenames is a 2.8k-character Aₜ that has to
-be re-read by a model with no transcript to check it against. The control read
-each file exactly once, wrote nothing until the end, and did the sum in one
-place.
+**What the run is made of, and why it stopped.** 96 reads for 90 files is almost
+efficient, and 130 patches at ~1.67 per file. The last events in the transcript
+are `read cfg79.ts` and nothing after it — the run was still working when it
+ended.
+
+**It was stopped by the step ceiling, not by the model.** §10.1's
+`Run(..., maxSteps = 100)` is the default, a step advances once per applied
+patch, and 90 files at 1.67 patches per file needs about 150. So the 78/90 is a
+ceiling, and the reading of it has to change: this is not evidence that a model
+cannot hold 78 filenames' running sum. It is evidence that **this adapter needs
+more steps per file than the paper's one-action-per-step, and 100 of them does
+not cover 90 files.**
+
+That is the same shape as everything else in this document — the adapter cannot
+own the executor, so the host batches, so a step carries more than one action, so
+the paper's step budget buys less work per step. The number is faithful to §10.1
+and the consequence is not the paper's.
+
+The rest of the run's shape stands: 10 sum-outsourcing attempts, 17 shell calls,
+one patch built in code, and an answer of 3804 *below its own state's 4314* — so
+whatever the ceiling did to the run, the model did distrust its own total before
+it stopped.
 
 **What this says, precisely.** The paper's cost claim survives at 90 files and its
 accuracy claim does not — and they are different claims. §7's arithmetic is about
