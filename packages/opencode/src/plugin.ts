@@ -198,16 +198,17 @@ export function recordEvent(path: string | undefined, type: string): void {
  * fixed in `response-sink.ts`, so the transcript is the more reliable of the
  * two here as well as the more available one.
  */
-function hasToolResult(messages: ReadonlyArray<{ role: string; content: unknown }>): boolean {
+/** Tool-result parts in the newest tool message, counted. */
+function countToolResults(messages: ReadonlyArray<{ role: string; content: unknown }>): number {
   const last = messages[messages.length - 1];
-  if (last === undefined || last.role !== 'tool') return false;
-  if (!Array.isArray(last.content)) return false;
-  return last.content.some(
+  if (last === undefined || last.role !== 'tool') return 0;
+  if (!Array.isArray(last.content)) return 0;
+  return last.content.filter(
     (part) =>
       typeof part === 'object' &&
       part !== null &&
       String((part as { type?: unknown }).type).startsWith('tool-result'),
-  );
+  ).length;
 }
 
 /** How much of an observation the diagnostic records. */
@@ -688,8 +689,14 @@ export const SkillStatePlugin = Plugin.define({
         // SKILLSTATE_STEP_BOUNDARY=1, and the default stays the behaviour that
         // measurably goes further. Turning it on is a claim to be measured, not
         // a setting to leave flipped.
-        if (hasToolResult(target.messages)) {
+        // What the environment actually ran, counted from the host's own tool
+        // results. `RuntimeDriver.stepReport` reports this rather than
+        // asserting that nothing happened, which was true on the day it was
+        // written and is not a property of the code.
+        const ran = countToolResults(target.messages);
+        if (ran > 0) {
           boundary.actionTaken(event.sessionID);
+          for (let i = 0; i < ran; i += 1) runtime?.noteExecution(event.sessionID);
         }
         if (stepBoundaryEnabled && boundary.reportRequired(event.sessionID)) {
           target.tools = {};

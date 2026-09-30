@@ -219,3 +219,71 @@ describe('RuntimeDriver', () => {
     expect(driver.takeContinuation('ses_1')).toBeUndefined();
   });
 });
+
+describe('§5.1 the environment reports what it did, and it is true', () => {
+  // Oₜ is the environment's channel. §5.1's contract is that what arrives there
+  // happened. The report used to say "nothing was executed" unconditionally,
+  // which was true on the day it was written — 45 patches, 58 tool calls, and
+  // not one turn containing both — and is not a property of the code. A model
+  // that patches and acts in one turn makes it false, and a false report is
+  // worse than no report.
+  const driver = (): RuntimeDriver => new RuntimeDriver({ maxSteps: 100, prompt: ok });
+
+  it('says nothing ran when the host ran nothing', async () => {
+    const d = driver();
+    void d.record('s', true);
+    await d.advance('s', 'read src/cfg1.ts');
+    expect(d.stepReport('s')).toMatch(/nothing was executed/);
+  });
+
+  it('counts the actions the host actually ran, not the one the model proposed', async () => {
+    // The distinction is the whole fix. The model naming an action is a claim;
+    // a tool result coming back is the environment's account. This project spent
+    // a week unable to tell those apart — the model emitted a correct patch and
+    // a correct action, and nothing executed either, and every prompt-based
+    // workaround was a guess.
+    const d = driver();
+    void d.record('s', true);
+    d.noteExecution('s');
+    d.noteExecution('s');
+    await d.advance('s', 'read src/cfg1.ts');
+    expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 2 actions ran.');
+  });
+
+  it('uses the singular for one, because a count of 1 is not a plural', async () => {
+    const d = driver();
+    void d.record('s', true);
+    d.noteExecution('s');
+    await d.advance('s', 'x');
+    expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 1 action ran.');
+  });
+
+  it('does not carry a count across steps', async () => {
+    // Otherwise step 2 reports step 1's actions, and the running total is a
+    // fiction that grows without anything running.
+    const d = driver();
+    void d.record('s', true);
+    d.noteExecution('s');
+    await d.advance('s', 'a');
+    expect(d.stepReport('s')).toMatch(/1 action ran/);
+
+    void d.record('s', true);
+    await d.advance('s', 'b');
+    expect(d.stepReport('s')).toMatch(/nothing was executed/);
+  });
+
+  it('keeps the two sessions apart', async () => {
+    const d = driver();
+    void d.record('a', true);
+    d.noteExecution('a');
+    await d.advance('a', 'x');
+    void d.record('b', true);
+    await d.advance('b', 'y');
+    expect(d.stepReport('a')).toMatch(/1 action ran/);
+    expect(d.stepReport('b')).toMatch(/nothing was executed/);
+  });
+
+  it('returns nothing before a step has run', () => {
+    expect(driver().stepReport('never-started')).toBeUndefined();
+  });
+});

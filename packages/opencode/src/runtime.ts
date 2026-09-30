@@ -108,6 +108,12 @@ export class RuntimeDriver {
    * A narration turn is now an attempt, not a step.
    */
   readonly #attempts = new Map<string, number>();
+  /**
+   * Tool results seen since the last report, per session. The environment's own
+   * account of what it did — the only account that is not the model's claim.
+   */
+  readonly #executed = new Map<string, number>();
+
   /** What {@link record} decided, so `advance` does not re-decide it. */
   readonly #decisions = new Map<string, 'retry' | 'advance'>();
   /** Every advancement made, for diagnostics and tests. */
@@ -250,7 +256,32 @@ export class RuntimeDriver {
   stepReport(sessionID: string): string | undefined {
     const step = this.#steps.get(sessionID);
     if (step === undefined) return undefined;
-    return `step ${step} ended; your state patch was applied; nothing was executed.`;
+    const executed = this.#executed.get(sessionID) ?? 0;
+    this.#executed.delete(sessionID);
+    // The count is the environment's, and it is read from tool RESULTS the host
+    // handed back — not from the action the model proposed. Those are different
+    // facts: a model can name an action and never cause it, which is precisely
+    // what happened for a week in this project.
+    //
+    // The sentence used to be unconditional, and it was wrong whenever a model
+    // both patched and acted in one turn. On the n=3 run it happened to be
+    // right — 45 patches, 58 tool calls, and not one turn containing both — but
+    // nothing enforced that, it was a property of the model that day, and a
+    // false report in O_t is worse than no report: O_t is the environment's
+    // channel and the whole contract is that what arrives there happened.
+    return executed === 0
+      ? `step ${step} ended; your state patch was applied; nothing was executed.`
+      : `step ${step} ended; your state patch was applied; ${executed} action${executed === 1 ? '' : 's'} ran.`;
+  }
+
+  /**
+   * Note that the environment executed something on this session's behalf.
+   *
+   * Called from the context hook, which is the only place the host's own tool
+   * results are visible. Called once per result, so the count is a count.
+   */
+  noteExecution(sessionID: string): void {
+    this.#executed.set(sessionID, (this.#executed.get(sessionID) ?? 0) + 1);
   }
 
   /**
