@@ -263,6 +263,76 @@ group('§10.2 conformance harness', () => {
     expect(factors[2]).toBeLessThan(factors[1]!);
   });
 
+  it('10. §10.1 — Run breaks on an invalidated step', async () => {
+    // §10.1's Run, verbatim:
+    //
+    //     if stepResult.invalidated:
+    //         break                                   // or continue, per policy
+    //
+    // The pseudocode breaks; the trailing comment is the paper permitting
+    // otherwise. This loop shipped the comment and not the code, which is the
+    // easier mistake to make of the two — the comment reads like the rule and
+    // sits closer to the attention than the statement above it.
+    //
+    // The cost was a step that re-reads an unchanged state and re-asks for a
+    // patch the previous k+1 attempts already failed to produce, once per step
+    // for the rest of the run.
+    const prompts: string[] = [];
+    let calls = 0;
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      // Every response is unparseable, so every step is invalidated.
+      llm: async (p) => {
+        prompts.push(p);
+        calls += 1;
+        return 'still no fence';
+      },
+      execute: () => obs('never reached'),
+      maxValidationRetries: 1,
+    });
+
+    const results = await runtime.run(obs('OBS'), () => false, 20);
+
+    // 20 steps were available. One step, two attempts, and the run is over.
+    expect(results).toHaveLength(1);
+    expect(results[0]!.invalidated).toBe(true);
+    expect(calls).toBe(2);
+
+    // §6.4's observation survives the break. The paper builds it and then
+    // breaks — it is the caller's, not the loop's, to use.
+    expect(results[0]!.newObservation.content).toMatch(/^Invalid state patch after 2 attempts: /);
+
+    // The state is untouched, and a second run starts from the same observation
+    // rather than from the synthetic one.
+    expect(runtime.state).toEqual(SPEC.defaultState ?? { mood: 'neutral', count: 0, log: [] });
+    expect(prompts).toHaveLength(2);
+  });
+
+  it('10b. the paper\'s own alternative stays reachable, deliberately', async () => {
+    // "or continue, per policy" is the paper permitting the other branch, so
+    // removing the option would be a second, quieter deviation. It is opt-in:
+    // the default has to be the pseudocode, and the flag has to be named for
+    // what it changes.
+    let calls = 0;
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: async () => {
+        calls += 1;
+        return 'still no fence';
+      },
+      execute: () => obs('never reached'),
+      maxValidationRetries: 0,
+    });
+
+    const results = await runtime.run(obs('OBS'), () => false, 4, {
+      continueOnInvalidated: true,
+    });
+
+    expect(results).toHaveLength(4);
+    expect(results.every((r) => r.invalidated)).toBe(true);
+    expect(calls).toBe(4);
+  });
+
   it('3d. §4.2 — a deleted key does not come back, and defaults are NOT re-applied', async () => {
     // §4.2, verbatim: "In state, a key that was deleted simply does not exist;
     // a key that exists holds a value of its declared type." And §3.1 rule 2:

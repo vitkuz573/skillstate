@@ -116,6 +116,14 @@ export interface RunOptions {
   tokenBudget?: CharsBudget;
   charsBudget?: CharsBudget;
   maxChars?: number;
+  /**
+   * @non-paper §10.1's `break` on an invalidated step, replaced by its own
+   * trailing comment — "or continue, per policy". Off by default, which is the
+   * pseudocode's behaviour; on, a rejected patch costs one step instead of
+   * ending the run, and the caller is responsible for the retry storm that
+   * implies.
+   */
+  continueOnInvalidated?: boolean;
 }
 
 /**
@@ -501,6 +509,23 @@ export class SkillStateRuntime {
   ): Promise<StepResult[]> {
     const results: StepResult[] = [];
     const maxChars = this.resolveMaxChars(runOpts);
+    // §10.1, verbatim:
+    //
+    //     if stepResult.invalidated:
+    //         break                                   // or continue, per policy
+    //
+    // The `break` is what the pseudocode does; the trailing comment is the
+    // paper permitting the other. This loop implemented the comment and ignored
+    // the code, so a step whose patch was rejected after every attempt kept
+    // spending steps — each one re-reading an unchanged state and re-asking for
+    // a patch that the previous k+1 attempts had already failed to produce.
+    //
+    // §6.4's observation is still returned, unchanged, in `newObservation`. The
+    // paper builds it and then breaks; it is the caller's to use afterwards. The
+    // loop is not the place to keep going.
+    const continueOnInvalidated =
+      (runOpts as { continueOnInvalidated?: boolean } | undefined)
+        ?.continueOnInvalidated === true;
     let localTotal = 0;
 
     let observation = first;
@@ -553,6 +578,9 @@ export class SkillStateRuntime {
         localTotal += result.promptChars + result.responseChars;
       }
       results.push(result);
+      if (result.invalidated && !continueOnInvalidated) {
+        break;
+      }
       if (isDone(result)) {
         break;
       }
