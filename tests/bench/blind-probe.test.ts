@@ -608,3 +608,95 @@ group('a run killed by the harness clock says so', () => {
     expect(result.at_timeout).toBeNull();
   });
 });
+
+
+group('the documentation agrees with the records', () => {
+  // Ten instruments in this project were wrong or missing, and one of them was a
+  // claim in a document with nothing behind it: the ninety-file row, restated
+  // three times, each time a different explanation. The records for every run are
+  // committed under `measurements/`, so the prose can be checked rather than
+  // remembered.
+  //
+  // This does not verify the claims. It verifies that a number the document leans
+  // on is the number the run actually produced, which is the part that went wrong
+  // every time: the run was real, the number was real, and the reading of it was
+  // not.
+  const ROOT = path.resolve(import.meta.dirname, '../..');
+  const load = (relative: string): Record<string, unknown>[] => {
+    const dir = path.join(ROOT, 'measurements', relative);
+    const files = fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
+      : [];
+    return files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as Record<string, unknown>);
+  };
+  const findings = fs.readFileSync(path.join(ROOT, 'FINDINGS.md'), 'utf-8');
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf-8');
+
+  const ninety = load('90-files');
+  const thirty = load('30-files');
+
+  it('has records to check against', () => {
+    expect(ninety.length).toBeGreaterThan(0);
+    expect(thirty.length).toBeGreaterThan(0);
+  });
+
+  it('says the file count the run recorded', () => {
+    // The claim that went wrong three times is a file count. If the record says
+    // 84 and the document says 78, one of them is lying and this is the cheapest
+    // possible place to find out which.
+    const first = ninety.find((r) => r['record_id'] === 'p-1');
+    expect(first, 'the 90-file paper run is missing from measurements/').toBeDefined();
+    expect(`${first!['n_done']}/90`).toMatch(/78\/90|84\/90/);
+    // And the document must agree with one of them specifically, not with "a
+    // number in that range".
+    expect(findings.includes(`${first!['n_done']}/90`) || readme.includes(`${first!['n_done']}/90`)).toBe(true);
+  });
+
+  it('says a duration within a minute of what the transcript spans', () => {
+    // 2393.4 seconds, stated as 39.9 minutes twice in both documents. It is the
+    // number that found the cause, and it must stay the number the record holds.
+    const killed = ninety.find((r) => r['ended_on_error'] === true);
+    expect(killed, 'no truncated run is recorded, so the claim has nothing behind it').toBeDefined();
+    const minutes = Math.round((killed!['duration_s'] as number) / 6) / 10;
+    expect(findings.includes(`${minutes.toFixed(1)} min`) || readme.includes(`${minutes.toFixed(1)} min`)).toBe(true);
+  });
+
+  it('does not call a capped run a finished one', () => {
+    // The sentence that has to stay true: these runs did not finish, and the
+    // document must not have caught up with the discovery yet.
+    const killed = ninety.filter((r) => r['ended_on_error'] === true);
+    for (const run of killed) {
+      expect(findings.includes(`${run['n_done']}/90`)).toBe(true);
+    }
+    expect(findings.toLowerCase()).not.toMatch(/the bounded arm finished all 90/i);
+  });
+
+  it('keeps the truth out of every committed record', () => {
+    // The records live in the repository and the design of the probe is that the
+    // expected total exists nowhere the model can reach. A record beside a
+    // transcript is one `read` away.
+    for (const record of [...ninety, ...thirty]) {
+      expect(Object.keys(record)).not.toContain('truth');
+    }
+  });
+
+  it('either names its build honestly or says it has none', () => {
+    // A record from before the stamp existed must read `null` — never a guess
+    // filled in from the current build, which is exactly the lie the stamp exists
+    // to prevent. A record from after it must name the plugin and carry the dist
+    // mtime, because two builds of identical source differ and a stale dist is
+    // precisely that case.
+    let stamped = 0;
+    for (const record of [...ninety, ...thirty]) {
+      const build = record['build'];
+      if (build === null) continue;
+      stamped += 1;
+      expect(typeof build).toBe('object');
+      expect((build as Record<string, unknown>)['plugin']).toBe('skillstate');
+      expect(typeof (build as Record<string, unknown>)['distMtimeMs']).toBe('number');
+    }
+    // Both cases present, so this is a rule and not a description of one era.
+    expect(stamped).toBeGreaterThan(0);
+    expect(stamped).toBeLessThan(ninety.length + thirty.length);
+  });
+});
