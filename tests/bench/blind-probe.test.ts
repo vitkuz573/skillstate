@@ -88,6 +88,34 @@ group('the blind probe cannot be told the answer', () => {
     // the whole failure this file exists to prevent.
     expect(scorer).not.toMatch(/truth\s*=\s*int\([^)]*answered/);
   });
+
+  it('keeps the truth out of meta.json, which sits beside the transcript', () => {
+    // The stand writes `meta.json` at the root of its tree so the scorer can read
+    // the wall-clock cap a run was given -- and the first version of that record
+    // carried the truth as well, because the cap and the truth were set from the
+    // same place and it was easier to write both.
+    //
+    // A file beside the transcript is one `read` away from the model, and the
+    // whole design of this probe is that the expected total exists nowhere the
+    // model can reach. So the conditions go in the record and the answer does not.
+    // The printf statement itself, not everything after it -- the comment
+    // explaining the cap is further down and mentions the answer by name while
+    // explaining why the answer is absent.
+    const start = probe.indexOf('printf \'{"timeout_s"');
+    expect(start, 'the meta.json write not found').toBeGreaterThan(-1);
+    const meta = probe.slice(start, probe.indexOf('\n', probe.indexOf('$ROOT/meta.json', start)));
+    expect(meta).toContain('timeout_s');
+    expect(meta).toContain('files');
+    expect(meta).toContain('model');
+    expect(meta).not.toContain('truth');
+    expect(meta).not.toContain('$TRUTH');
+  });
+
+  it('still names the truth in the header line it prints for the operator', () => {
+    // Which is fine: that line goes to the terminal, not to the model's context,
+    // and the operator has to be able to check the fixture against the record.
+    expect(probe).toContain("truth %s (held by the scorer only)");
+  });
 });
 
 group('the scorer judges the state, not the sentence', () => {
