@@ -1,4 +1,23 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const group = describe;
+
+/** Every `.ts` file under a directory, recursively. */
+function walk(root: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      out.push(...walk(full));
+    } else if (entry.name.endsWith('.ts')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
 import { SkillStateRuntime } from '@skillstate/core';
 import type { LLMFn, ActionExecutor } from '@skillstate/core';
 import { TokenTracker } from '@skillstate/core';
@@ -487,5 +506,79 @@ describe('the merge operator has no append, and the model is told so', () => {
     expect(array).toBeGreaterThan(-1);
     // Within the same paragraph, not scattered through the block.
     expect(array - sparse).toBeLessThan(320);
+  });
+});
+
+group('a paper citation is a paper section', () => {
+  // §7 in this paper is ROLLBACK-RETRY. Complexity, eq. 8 and the (T+1)/2 closed
+  // form are §3.3 — and `state.md`, this project's own implementer's guide, listed
+  // its normative sections in its DOCUMENT numbering under the label "sections",
+  // one line below a line giving the PAPER numbering for the same content. Two
+  // schemes, one label, adjacent lines.
+  //
+  // The code inherited both: `token-tracker.ts` and `harness.ts` cite
+  // `paper §3.3 eq.5-7` correctly, while eq. 8 was cited as `§7` in nine places in
+  // code and tests and thirteen in the documentation. A reader following §7 to
+  // check the paper's central cost claim lands on rollback-retry, and the error
+  // is invisible because §7 is a real section — of the wrong content.
+  //
+  // This is the same shape as everything else in this project, one level up: a
+  // citation nobody followed, checked against nothing.
+
+  const SELF = 'tests/core/paper-fidelity.test.ts';
+  const sources = [
+    ...walk('packages/core/src'),
+    ...walk('packages/opencode/src'),
+    ...walk('packages/bench/src'),
+    ...walk('tests'),
+    // Excluding this file is not a loophole. A guard that quotes the pattern it
+  // forbids matches itself -- the first version flagged its own regex, which is
+    // the tidiest possible demonstration that the thing it hunts is easy to
+  // create by accident. The rule is about CITATIONS; a line that reads `§7` as a
+  // string in a check for it is not a citation.
+  ].filter((f) => !f.endsWith('.d.ts') && path.resolve(f) !== path.resolve(SELF));
+
+  const COMPLEXITY = /§3\.3/;
+  // Anything that talks about eq. 8, the closed form, the ceiling, or the
+  // cumulative character cost is §3.3 by the paper's own table of contents.
+  const isComplexityClaim = (line: string): boolean =>
+    /eq\. ?8|(T\+1)\/2|closed form|cumulative.{0,20}char|prefix-?sum|Σ\|A|O\(T|complexity/i.test(line);
+
+  it('never cites §7 for complexity, eq. 8, or the closed form', () => {
+    const wrong: string[] = [];
+    for (const file of sources) {
+      const lines = fs.readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (line.includes('§7') && isComplexityClaim(line) && !COMPLEXITY.test(line)) {
+          wrong.push(`${file}:${i + 1}: ${line.trim().slice(0, 110)}`);
+        }
+      });
+    }
+    expect(wrong, `§7 cited for §3.3 content:\n${wrong.join('\n')}`).toEqual([]);
+  });
+
+  it('cites §3.3 for the closed form, in code, so the guard has a positive case', () => {
+    // A guard that only ever forbids is satisfied by deleting every citation. The
+    // claim must still be made, in the same words, against the right section.
+    const core = fs.readFileSync('packages/core/src/token-tracker.ts', 'utf-8');
+    expect(core).toMatch(/§3\.3\s+eq\./);
+    const harness = fs.readFileSync('packages/bench/src/harness.ts', 'utf-8');
+    expect(harness).toContain('§3.3');
+  });
+
+  it('still cites §7 for rollback-retry, which is what §7 is', () => {
+    // The other direction, and the one an over-eager fix would break: §7 is a real
+    // section and for the retry cycle it is the right citation. A sweep that
+    // rewrote every §7 would have replaced correct citations with wrong ones.
+    const runtime = fs.readFileSync('packages/core/src/runtime.ts', 'utf-8');
+    expect(runtime).toContain('§7 rollback-retry');
+  });
+
+  it('gives both schemes in state.md and says which is the paper\'s', () => {
+    // The file that started it. It must name its own sections as NOT paper
+    // numbers, or the next reader inherits the ambiguity.
+    const spec = fs.readFileSync('state.md', 'utf-8');
+    expect(spec).toMatch(/NOT paper section numbers/);
+    expect(spec).toMatch(/in the paper's numbering/);
   });
 });

@@ -721,7 +721,7 @@ group('the documentation agrees with the records', () => {
 
 
 group('eq. 8 is re-derivable from the runs it is claimed for', () => {
-  // §7's arithmetic is the paper's central claim, and for most of a day the table
+  // §3.3's arithmetic is the paper's central claim, and for most of a day the table
   // carrying it quoted Σ|Aₜ| = 100,040 at T=45 and 155,672 at T=61. No run
   // produces either number: T=45 means 45 patches and 45 × 2517 = 113,270, and
   // T=61 is the signature of a superseded fixture generation whose transcripts are
@@ -739,7 +739,7 @@ group('eq. 8 is re-derivable from the runs it is claimed for', () => {
 
   it('reproduces eq. 8 exactly on every run, from the number of patches', () => {
     // (T+1)/2 is the closed form. It holds because mean |Aₜ| barely moves relative
-    // to its own size, and that is the whole of §7's argument — so if a run ever
+    // to its own size, and that is the whole of §3.3's argument — so if a run ever
     // fails it, something about Aₜ changed and that is a finding, not a bug.
     expect(runs.length).toBeGreaterThan(0);
     for (const [id, run] of runs) {

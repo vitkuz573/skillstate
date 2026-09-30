@@ -12,7 +12,7 @@ them.**
 
 `measurements/` holds the scorer's output for every run behind a figure in
 `FINDINGS.md` and `README.md` — eleven runs, all derived, none hand-written — plus
-`derived.json` for the §7 arithmetic, produced by `scripts/replay-at.mjs`. A test
+`derived.json` for the §3.3 arithmetic, produced by `scripts/replay-at.mjs`. A test
 fails if the prose disagrees with a record: every bounded-arm file count has to
 appear, every derived Σ|Aₜ| has to be in the table it is claimed for, eq. 8 has to
 equal `(T+1)/2`, and no table may quote a Σ no run produces.
@@ -32,7 +32,7 @@ because Σ|Aₜ| grows linearly while the prefix-sum baseline grows quadraticall
 run that kept 90 of 90 filenames the bounded arm makes fewer requests and wins
 twice — 46.9x on content, and the H condition stops binding at −266,648. Against
 the control run that kept 10 of 90 it makes 32 more requests — 4.3x, and the
-condition binds at 37,917. Same bounded run, both true. §7 on its own, which does
+condition binds at 37,917. Same bounded run, both true. §3.3 on its own, which does
 not depend on a control at all, is the claim that survives.
 
 **Added: `at_timeout` — the harness's own clock, measured.** The stand's `timeout`
@@ -231,7 +231,7 @@ transcript" was shorter than it looked; this is the first fixture that is
 actually longer. The cost claim holds and strengthens — the bounded arm made
 *fewer* calls than the control, so the ceiling on the host's per-call overhead
 stops binding at all. The accuracy claim does not hold: 78/90, a total 245 low,
-and an answer below its own state. §7's arithmetic is about `SUM |Aₜ|` and is
+and an answer below its own state. §3.3's arithmetic is about `SUM |Aₜ|` and is
 exactly right; §1–§10 say nothing about a model holding 78 filenames' running sum
 with no transcript to check it against. Those are two claims and only one of them
 is made.

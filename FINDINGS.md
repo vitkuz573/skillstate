@@ -348,7 +348,7 @@ back takes out 2 of 6 and 1 of 6 respectively.
 Worth recording, because a findings document that only lists failures reads as a
 post-mortem.
 
-- **§7's ceiling reproduces exactly.** Constant prompt gives 50.50 at T=100 and
+- **§3.3's ceiling reproduces exactly.** Constant prompt gives 50.50 at T=100 and
   100.50 at T=200, the figures Table 1 reports. Growing prompt gives 44.93 at 1%
   per step and 38.51 at 5% — always below, never above, as *"an upper bound, not
   a deployment claim"* requires. Pinned by test `7b`.
@@ -779,7 +779,7 @@ one patch built in code, and an answer of 3804 *below its own state's 4314* — 
 whatever ended the run, the model did distrust its own total before it stopped.
 
 **What this says, precisely.** Almost nothing about accuracy, because the run did
-not finish. §7's arithmetic about `SUM |A_t|` is exactly right and is unaffected:
+not finish. §3.3's arithmetic about `SUM |A_t|` is exactly right and is unaffected:
 a truncated run sends less, never more. §1–§10 say nothing about a model's
 ability to hold 78 filenames' worth of running sum, and **this run is not evidence
 either way** — a socket closed at file 79. The accuracy question is open, not
@@ -790,10 +790,10 @@ answered, and the honest next step is a run that finishes.
 ## 14. Where the saving goes
 
 **Read this section next to the one about wall clock, because they point opposite
-ways.** §7 counts characters and by characters the mechanism wins by 46.9x. By
+ways.** §3.3 counts characters and by characters the mechanism wins by 46.9x. By
 elapsed time at the same thirty files it **loses by 3.7x**: the control runs took
 1.7, 5.5 and 9.1 minutes and the bounded arm 15.6, 21.6 and 34.6. Neither number
-is wrong and §7 is the one the paper defines — but a reader deciding whether to
+is wrong and §3.3 is the one the paper defines — but a reader deciding whether to
 use this needs both, and for most of a day the project only had the flattering one.
 
 It is also a hard limit, not merely a comparison. The slowest thirty-file run used
@@ -806,7 +806,7 @@ Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
 transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
 separates them.
 
-**The mechanism does what §7 says.** Replaying each trial's patches through the
+**The mechanism does what §3.3 says.** Replaying each trial's patches through the
 runtime's own merge, with `node scripts/replay-at.mjs <run>/out.json`:
 
 | run | files | T | Σ\|Aₜ\| | mean \|Aₜ\| | baseline | eq. 8 | (T+1)/2 |
@@ -834,7 +834,7 @@ claimed.** T went 45 → 130 (2.89x) and Σ\|Aₜ\| went 3.28x — linear in T, 
 `mean |Aₜ|` up only 14%. The prefix-sum baseline over the same runs went 9.3x,
 which is quadratic (2.89² = 8.35, the rest is file sizes growing). **So the
 reduction ratio itself grows with length: 23.00x at 45 steps, 65.50x at 130.** The
-paper's §7 predicts exactly that, and the old "56% growth" understated it.
+paper's §3.3 predicts exactly that, and the old "56% growth" understated it.
 
 The condition, stated as `scripts/crossover.mjs` states it — the host's per-call
 overhead below which the bounded context wins:
@@ -860,7 +860,7 @@ ratio falls to 4.3x, and the condition binds at 37,917.
 **The ninety-file cost claim is therefore a range with a control's behaviour at one
 end of it, not a number.** The 46.9x quoted earlier in this section is the
 favourable instance and the weak one, and both are true of the runs they name.
-What §7 says on its own — 65.50x on Σ|Aₜ|, exact, from the run's own patches —
+What §3.3 says on its own — 65.50x on Σ|Aₜ|, exact, from the run's own patches —
 does not depend on the control at all, which is why it is the claim that survives.
 
 Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
@@ -875,7 +875,7 @@ measurement. The report is guarded by a test that fails if a `%` appears in it.
 base is 1944 chars of a 2406-char Aₜ — **81%**, so the state the entire argument
 is about is 19% of the request. At 90 files the split moves the other way: 1867
 chars of base against a state listing 38 filenames, so the state is the larger
-part. §7's ratio is measured against a component that starts as a fifth of what
+part. §3.3's ratio is measured against a component that starts as a fifth of what
 is sent.
 
 **Then the host re-sends its own context on every call.** The system prompt and

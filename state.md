@@ -505,8 +505,18 @@ A minimal conformance harness checks, in this order:
 
 - **Source paper:** arXiv:2608.26263 — *SKILL.state: Scalable Long-Horizon Agent Skills* (Badhe, Tiwari, Chung, 2026). Sections cited throughout: §3 (execution state), §3.1 (schema), §3.2 (Algorithm 1), §3.3 (complexity), §4.3 (metrics), §5.7 (failure taxonomy), §7 (rollback-retry), Appendix A.4 (prompt template).
 - **Specification version:** `1.0.0`.
-- **Normative sections:** §2 (definitions), §3 (⊕), §4 (schema), §5 (Algorithm 1 + A.4), §6 (transition semantics), §7 (complexity), §8 (metrics).
-- **Non-normative sections:** §1 (motivation), §9 (interop patterns), §10 (reference code), §12 (adoption checklist).
+- **Normative sections, in the paper's numbering:** §2 (definitions), §3 (execution state, §3–§3.3), §4 (schema, §4.1–§4.3), §5 (Algorithm 1 + A.4), §6 (transition semantics), §7 (rollback-retry).
+- **Non-normative sections, in the paper's numbering:** §1 (motivation), §9 (interop patterns), §10 (reference code), §12 (adoption checklist).
+- **This document's own sections**, which are numbered 1–12 and are NOT paper section numbers. The mapping is at the head of each heading above: document 2 is paper §2, document 3 is paper §3, document 4 is paper §3.1, document 5 is paper §3.2, document 6 is paper §4, document 7 is paper §3.3, document 8 is paper §4.3, and so on.
+
+  A previous version of this file listed the normative sections in the DOCUMENT
+  numbering under the label "sections" — `§7 (complexity), §8 (metrics)` — one line
+  below a line giving the PAPER numbering for the same content. Both were called
+  sections. The implementer's guide is what the paper's numbers are, and it had
+  picked up the document's: eq. 8 was cited as §7 in this repository's code,
+  tests and documentation, while `token-tracker.ts` and `harness.ts` correctly
+  cited the same content as `paper §3.3 eq.5-7`. Following §7 to check the cost
+  claim lands on rollback-retry.
 - Any citation to a specific JavaScript/TypeScript package, SDK function, or host integration in the companion repository is **informational only** and does not bind this specification.
 
 ---

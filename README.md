@@ -272,7 +272,7 @@ reproduces eq. 8 exactly. Re-derived from the transcripts in
 **Exact on all five, and exact for a visible reason:** `mean |Aₜ|` barely moves
 across a 3x difference in length — 2490 to 2896 — so the prefix sum collapses
 onto the closed form. Aₜ grows with the work, not with the transcript, and that
-is the whole of §7's argument.
+is the whole of §3.3's argument.
 
 **And the ratio itself grows with length, more strongly than this page claimed
 before today.** T went 45 → 130 and Σ\|Aₜ\| went 3.28x, while the prefix-sum
@@ -307,7 +307,7 @@ control did, the content ratio falls to 4.3x, and the condition binds again at
 **So the ninety-file cost claim is not a number, it is a range with a control's
 behaviour at one end of it.** The 46.9x in the table above the 90-file section is
 the favourable instance and the weak one, and both are true of the runs they name.
-What §7 alone says — 65.50x on Σ|Aₜ|, exact, from the run's own patches — does
+What §3.3 alone says — 65.50x on Σ|Aₜ|, exact, from the run's own patches — does
 not depend on the control at all.
 
 Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
@@ -321,7 +321,7 @@ Thirty files, three trials each, spans of the transcripts' own timestamps:
 | notes — transcript | 1.7, 5.5, 9.1 min |
 | paper — bounded | **15.6, 21.6, 34.6 min** |
 
-`§7` counts characters, and by characters the bounded arm wins by 46.9x. The
+`§3.3` counts characters, and by characters the bounded arm wins by 46.9x. The
 character count does not see that a turn carrying `Aₜ` also costs the host
 re-sending its own context, re-rendering the state hint, and running the step
 boundary — so the number the paper defines and the number a user pays point in

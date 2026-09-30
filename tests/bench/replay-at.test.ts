@@ -106,7 +106,7 @@ describe('replay-at prices a live transcript in chars', () => {
   it('reports the base prompt share, because the state is not most of A_t', () => {
     // 81% of a real A_t on a 30-file run was the constant base. Quoting a
     // reduction without that share is how (T+1)/2 turns into a deployment
-    // claim — which §7 says it is not.
+    // claim — which §3.3 says it is not.
     const out = replay('share', transcript([1, 2, 3], 'done'));
     const share = /base prompt chars\s*:\s*\d+ \((\d+)%/.exec(out)![1];
     expect(Number(share)).toBeGreaterThan(50);

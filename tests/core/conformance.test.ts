@@ -209,8 +209,8 @@ group('§10.2 conformance harness', () => {
     expect(validatePatch(SPEC.schema, { nope: 1 })).toEqual(unknown);
   });
 
-  it('7b. §7 eq. 8 — (T+1)/2 is a CEILING, and the code stays under it', () => {
-    // §7's closed form is the claim most likely to be misquoted as a result: the
+  it('7b. §3.3 eq. 8 — (T+1)/2 is a CEILING, and the code stays under it', () => {
+    // §3.3's closed form is the claim most likely to be misquoted as a result: the
     // paper says plainly that it is "an upper bound, not a deployment claim,
     // because real observation sizes vary". Asserting the number alone would let
     // a regression into the model that looks like a PASS.
