@@ -469,6 +469,11 @@ describe('the merge operator has no append, and the model is told so', () => {
   it('states that an array is replaced whole', () => {
     const flat = GENERIC_PROCEDURE_SPEC.instructions.replace(/\s+/g, ' ');
     expect(flat).toMatch(/array is replaced whole rather than appended to/i);
+    // And the CONSEQUENCE, not just the rule. The measured 90-file run read
+    // "replaced whole" as "send the item you just added", and `done` sat at one
+    // entry for the whole run: a true statement about the operator, read as
+    // guidance about the field, which is what makes a correct rule harmful.
+    expect(flat).toMatch(/including everything it already held/i);
   });
 
   it('keeps the two rules adjacent, because they are one instruction', () => {
