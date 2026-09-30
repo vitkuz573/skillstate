@@ -45,7 +45,11 @@ for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
   } catch {
     continue; // a torn line in a live stream is not an event
   }
-  const part = event.part ?? {};
+  // `JSON.parse('null')` is null, and null.part throws — measured, and it
+    // took all three of these instruments down on the same line. A torn
+    // stream is not an event; neither is a scalar.
+    if (event === null || typeof event !== 'object') continue;
+    const part = event.part ?? {};
   if (part.type === 'text') texts.push(part.text ?? part.content ?? '');
   if (part.type === 'tool') {
     toolCalls += 1;

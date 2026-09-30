@@ -381,3 +381,52 @@ describe('paths are normalised, because not doing so reported 80% lag', () => {
     expect(rowOf(census(body))[5]).toBe('1');
   });
 });
+
+
+describe('a transcript that is not a stream of objects', () => {
+  // Measured, not hypothetical: a bare `null` on a line made census.mjs,
+  // replay-at.mjs and crossover.mjs all die on the same property read, and those
+  // three are the scripts behind every number in FINDINGS. `JSON.parse` is happy
+  // with `null`, a string, a number and an array, and only the last two of those
+  // survive `.part` -- so a torn or foreign line takes the instrument down rather
+  // than being skipped.
+  //
+  // The scorer's four readers had the same defect for the same reason, and the
+  // fix there existed on only the newest reader. Same mistake, three files.
+  const withFile = (body: string): string => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'garbage-')), 'out.json');
+    fs.writeFileSync(file, body);
+    return file;
+  };
+
+  const run = (script: string, file: string): string =>
+    execFileSync('node', [path.join(ROOT, 'scripts', script), file], { encoding: 'utf8' });
+
+  const GARBAGE = '[]\nnull\n"a string"\n42\n{}\nnot json at all\n{\n';
+
+  it('census counts nothing and exits clean', () => {
+    const out = run('census.mjs', withFile(GARBAGE));
+    expect(out).toContain('patches');
+  });
+
+  it('replay-at prices zero and exits clean', () => {
+    const out = run('replay-at.mjs', withFile(GARBAGE));
+    expect(out).toMatch(/\d/);
+  });
+
+  it('crossover reports a condition and not a percentage', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-garbage-'));
+    for (const arm of ['p', 'n']) {
+      const sub = path.join(dir, arm);
+      fs.mkdirSync(path.join(sub, '.skillstate'), { recursive: true });
+      fs.writeFileSync(path.join(sub, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: {} }));
+      fs.writeFileSync(path.join(sub, 'out.json'), GARBAGE);
+    }
+    const out = execFileSync(
+      'node',
+      [path.join(ROOT, 'scripts', 'crossover.mjs'), path.join(dir, 'p'), path.join(dir, 'n')],
+      { encoding: 'utf8' },
+    );
+    expect(out).not.toContain('%');
+  });
+});

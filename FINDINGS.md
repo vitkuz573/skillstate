@@ -610,6 +610,37 @@ last event and reports `ended_on_error` with the message — **the ninth
 instrument**, and like the eighth it was *absent* rather than wrong. Two absences
 in a row, both about the same thing: **whether a run finished at all.**
 
+**The retest, and what it settled.** Same fixture, ceiling raised from 100 to 200,
+so the hypothesis got its test:
+
+| | first run | retest, ceiling 200 |
+| --- | --- | --- |
+| files reached | 78/90 | **84/90** |
+| state total | 4314 | 4342 |
+| reads | 96 | 91 |
+| tool calls | 128 | 134 |
+| how it ended | closed socket | **closed socket** |
+
+**The ceiling was not the binding constraint. The connection is.** Doubling the
+step budget bought six more files and then the same failure at the same place, and
+`ended_on_error` — added an hour earlier, from reading the first run's last line —
+flagged it on the live run with no interpretation required.
+
+**So 90 files is not measurable with this host, and the finding is about the
+mechanism rather than about the fixture.** The control arm at 90 files completed
+all ninety: 90/90, total 4559, clean finish. The bounded arm's session runs longer
+and patches on more turns, and that is what outlives the connection. **The cost
+table does not show this**, because Σ|Aₜ| counts content and a dropped
+connection costs nothing in characters. A real operational cost of the mechanism,
+invisible to the metric the paper defines.
+
+**And `run` came back `null` again, which is correct and worth saying.** A dropped
+connection produces no event — the stream simply ends — so `advance()` is never
+asked to decline and the run record is never written. The record covers the loop's
+own endings; it cannot cover the host's. That is not a gap to close, it is the
+right division of labour: the loop knows why it stopped, and the transcript's last
+line is the only place that knows the host stopped at all.
+
 And the eighth, which came first and is the deeper one: §10.1's loop has three
 exits and one return value — `break` on `isDone`, `break` on an invalidated
 step, and falling out of `range(maxSteps)` — and the third is indistinguishable

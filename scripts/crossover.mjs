@@ -65,6 +65,10 @@ function texts(file) {
     } catch {
       continue;
     }
+    // `JSON.parse('null')` is null, and null.part throws -- measured, and the
+    // same fix was needed in census.mjs and replay-at.mjs. A torn stream is not
+    // an event; neither is a scalar.
+    if (e === null || typeof e !== 'object') continue;
     const p = e.part ?? {};
     if (p.type === 'text') out.push(String(p.text ?? p.content ?? ''));
   }
@@ -83,6 +87,10 @@ function results(file) {
     } catch {
       continue;
     }
+    // `JSON.parse('null')` is null, and null.part throws -- measured, and the
+    // same fix was needed in census.mjs and replay-at.mjs. A torn stream is not
+    // an event; neither is a scalar.
+    if (e === null || typeof e !== 'object') continue;
     const p = e.part ?? {};
     if (p.type === 'tool') out.push({ tool: String(p.tool ?? ''), chars: String(p.state?.output ?? '').length });
   }

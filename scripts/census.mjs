@@ -82,6 +82,10 @@ function scan(file) {
     } catch {
       continue;
     }
+    // `JSON.parse('null')` is null, and null.part throws — measured, and it
+    // took all three of these instruments down on the same line. A torn
+    // stream is not an event; neither is a scalar.
+    if (event === null || typeof event !== 'object') continue;
     const part = event.part ?? {};
 
     // The sequence is built from BOTH kinds of part. A patch arrives as text and
