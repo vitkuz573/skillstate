@@ -208,6 +208,62 @@ group('§10.2 conformance harness', () => {
     expect(validatePatch(SPEC.schema, { nope: 1 })).toEqual(unknown);
   });
 
+  it('3b. §3.3 — the operator contract, all four clauses', () => {
+    // §3.3 verbatim, as four assertions. Check 2 covers semantics; this covers
+    // the properties the operator PROMISES, which are what a second
+    // implementation is entitled to rely on.
+    const src: Record<string, unknown> = { a: 1, keep: 'x', list: [1, 2], obj: { p: 1, q: 2 } };
+    const frozen = JSON.stringify(src);
+
+    // "deterministic: the same (Sigma, delta) always yields the same Sigma'."
+    expect(JSON.stringify(mergeState(src, { a: 9 }))).toBe(JSON.stringify(mergeState(src, { a: 9 })));
+
+    // "non-mutating on Sigma: a rejected or unapplied patch can be abandoned at
+    // zero cost because there is nothing to undo." This is the rollback
+    // guarantee of §6.4 resting on one property, so it is asserted on the
+    // source object graph, not on the result.
+    expect(JSON.stringify(src)).toBe(frozen);
+
+    // "treats any non-object value (including arrays) as an atomic replacement
+    // target" — which is exactly the property a model exploited to truncate its
+    // own record, so it belongs in the conformance suite rather than only in a
+    // finding.
+    expect(mergeState(src, { list: [7] })).toEqual({ a: 1, keep: 'x', list: [7], obj: { p: 1, q: 2 } });
+
+    // "A patch is sparse by definition: omitted keys are untouched."
+    expect(mergeState(src, {})).toEqual(src);
+
+    // Rule 4 of §3.1: a plain object over a non-object replaces; the reverse
+    // also replaces. Only object-to-object recurses.
+    expect(mergeState({ v: 5 }, { v: { a: 1 } })).toEqual({ v: { a: 1 } });
+    expect(mergeState({ v: { a: 1 } }, { v: 5 })).toEqual({ v: 5 });
+  });
+
+  it('3c. §6.2 — validation is deterministic, and true is not 1', () => {
+    // §6.2: "every non-null value matches the field's declared type".
+    // JavaScript's typeof says `typeof true === 'boolean'` and
+    // `typeof 1 === 'number'`, so that clause is easy to satisfy by accident and
+    // wrong to satisfy loosely — a boolean in a number field is a different
+    // state, and the paper's types are a closed set (§4.2).
+    const schema = SPEC.schema;
+    for (const [name, patch] of [
+      ['unknown key', { nope: 1 }],
+      ['type mismatch', { count: 'x' }],
+      ['boolean for number', { count: true }],
+      ['array for object', { extra: [1, 2] }],
+    ] as const) {
+      void name;
+      const result = validatePatch(schema, patch as never);
+      expect(result.valid).toBe(false);
+      // Deterministic: the same patch, the same structured error, twice.
+      expect(validatePatch(schema, patch as never)).toEqual(result);
+    }
+    // null is always legal, on every declared field, whatever its type.
+    for (const key of Object.keys(schema)) {
+      expect(validatePatch(schema, { [key]: null }).valid).toBe(true);
+    }
+  });
+
   it('4. Rollback safety — a malformed response leaves Σ untouched', async () => {
     // "Simulate a malformed response and assert Σ is unchanged after the step
     // and the sentinel action is reported."
