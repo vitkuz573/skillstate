@@ -41,12 +41,6 @@ function project(pkg: string, extraInclude: string[] = []): object {
         reporter: ['text', 'json', 'html'],
         include: [`packages/${pkg}/src/**/*.ts`],
         exclude: [...GLOBALS_NODE, `packages/${pkg}/src/**/*.d.ts`, `packages/${pkg}/src/**/index.ts`],
-        thresholds: {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-          statements: 100,
-        },
       },
     },
   };
@@ -55,6 +49,27 @@ function project(pkg: string, extraInclude: string[] = []): object {
 export default defineConfig({
   test: {
     globals: true,
+    // The gate lives HERE, at the root, and not inside each project's `coverage`
+    // block — where it used to be, and where vitest ignored it.
+    //
+    // Under `projects`, thresholds declared in a child project config are not
+    // applied: the run reported 99.85% and exited 0, and a function with zero
+    // coverage could be added to a package and still pass. The project believed
+    // it was gated at 100% — the note said so, in more than one place — while
+    // nothing was checking. So this is the root block, and the number below is
+    // enforced against the merged report.
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'html'],
+      include: ['packages/*/src/**/*.ts'],
+      exclude: [...GLOBALS_NODE, 'packages/*/src/**/*.d.ts', 'packages/*/src/**/index.ts'],
+      thresholds: {
+        branches: 100,
+        functions: 100,
+        lines: 100,
+        statements: 100,
+      },
+    },
     projects: [
       project('core', ['tests/schemas/**/*.ts']),
       project('claude'),

@@ -19,6 +19,7 @@ import {
   dumpPromptShape,
   dumpStepTrace,
   maxStepsFromEnv,
+  maxToollessStepsFromEnv,
 } from '@skillstate/opencode';
 
 let dirs: string[] = [];
@@ -263,6 +264,40 @@ group('maxStepsFromEnv', () => {
     for (const bad of ['0', '-5', 'abc', '12.5', '']) {
       process.env['SKILLSTATE_MAX_STEPS'] = bad;
       expect(maxStepsFromEnv()).toBeUndefined();
+    }
+  });
+});
+
+group('maxToollessStepsFromEnv', () => {
+  afterEach(() => {
+    delete process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'];
+  });
+
+  it('keeps the default when unset or empty', () => {
+    delete process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'];
+    expect(maxToollessStepsFromEnv()).toBeUndefined();
+    process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'] = '';
+    expect(maxToollessStepsFromEnv()).toBeUndefined();
+  });
+
+  it('reads a positive whole number', () => {
+    process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'] = '8';
+    expect(maxToollessStepsFromEnv()).toBe(8);
+  });
+
+  it('reads 0 as "no ceiling", which is the one value that differs from maxSteps', () => {
+    // This is the escape hatch for reproducing the spin on purpose. The step
+    // ceiling cannot use 0 for the same purpose because it has no default to
+    // fall back to — its 0 would be a ceiling, not an absence — and treating
+    // the two the same way is how a run gets silently disabled by a typo.
+    process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'] = '0';
+    expect(maxToollessStepsFromEnv()).toBe(0);
+  });
+
+  it('ignores anything that is not a whole number', () => {
+    for (const bad of ['-1', 'abc', '2.5']) {
+      process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'] = bad;
+      expect(maxToollessStepsFromEnv()).toBeUndefined();
     }
   });
 });
