@@ -16,7 +16,11 @@ count, a lag rate, a drift counter, a liveness check with a false negative, and 
 probe whose output was read as evidence when it was the confound. Each ran, each
 printed, and none was compared against a second opinion. Two are corrected in
 place with the counter that produced them, so the mistake is as findable as the
-finding; the rest have sections of their own. Where a
+finding; the rest have sections of their own.
+
+An eighth was not wrong but *absent*, which is harder to see than a wrong number:
+nothing recorded why a loop stopped, so a run cut at the step ceiling was read as
+a run that lost track of its work. See 13a. Where a
 section reports one trial it says so; `n=3` appears where three ran, and at n=3
 nothing here supports a claim about accuracy in either direction.
 
@@ -548,12 +552,38 @@ actually longer and not truncated by the host. Truth 4559.
 measured on, because it is the number in this document most likely to be quoted
 without its caveat.
 
-**The bounded arm's row is a FAILED run.** It reached 78/90 and a total 245 low;
-the control reached 90/90 and the exact sum. So "128 calls against 192" is a
-comparison between a run that finished its work and a run that did not, and a
-cheaper incomplete run is not a saving — it is a run that stopped. The
-project's own criterion, from the harness gate: *a cost win with no task
-completion is worth nothing.*
+**The bounded arm's row is a run that STOPPED, and the reason is a ceiling.** It
+reached 78/90 and a total 245 low; the control reached 90/90 and the exact sum.
+The last events in the transcript are `read cfg79.ts` and nothing after — the
+work was still going.
+
+§10.1's `Run(..., maxSteps = 100)` is the default, a step advances once per
+applied patch, and 90 files at 1.67 patches per file needs about 150. So the run
+was cut at step 100, mid-file-79. **This is not evidence that a model cannot hold
+78 filenames' running sum.** It is evidence that this adapter needs more steps per
+file than the paper's one-action-per-step, so §10.1's step budget buys less
+work per step. The number is faithful to §10.1 and the consequence is not the
+paper's.
+
+Either way, "128 calls against 192" compares a finished run with a stopped one,
+and a cheaper unfinished run is not a saving — this project's own harness
+criterion: *a cost win with no task completion is worth nothing.*
+
+**Nothing in the library said so.** §10.1's loop has three exits and one
+return value — `break` on `isDone`, `break` on an invalidated step, and falling
+out of `range(maxSteps)` — and the third is indistinguishable from completion.
+The host adapter was worse: `advance()` returns `null` for a terminal action, a
+host refusal, an empty turn, and the ceiling, and the caller discarded the return
+value entirely. **That is the eighth instrument in this project**, and the first
+one that was missing rather than wrong: no counter, no gate, no number — just
+an absence, which is the hardest kind to notice.
+
+`run()` now reports which exit it took (`lastRunStop`: `done`, `invalidated`,
+`max_steps`), the adapter reports which of its four (`lastStop`), the plugin
+writes both with the ceiling to `.skillstate/.run.json`, and the scorer surfaces
+`stopped_by_ceiling` — three-valued, because `false` on a run with no record
+would be a false negative on the one number that decides whether a cost figure
+means anything. Every run in this document predates the file and reads `null`.
 
 **What the number does still support:** `Σ|Aₜ|` is 371,747 chars against a
 control context of 17,437,234, and eq. 8 reproduces at 65.50 against a

@@ -302,6 +302,14 @@ sending 46.9x less content, and the ceiling stops binding at all:
 not by the model: §10.1's `Run(..., maxSteps = 100)` is the default, a step
 advances per applied patch, and 90 files at 1.67 patches per file needs about 150.
 
+**And nothing in the library said so** — §10.1's loop has three exits and one
+return value, and the third (`range(maxSteps)` running out) is indistinguishable
+from completion. A run now reports which exit it took, and the plugin writes it
+with the ceiling to `.skillstate/.run.json`; the scorer surfaces
+`stopped_by_ceiling`. That gap is the eighth instrument in this project and the
+first that was *missing* rather than wrong — no counter, no gate, no number,
+just an absence.
+
 So this is not evidence that a model cannot hold 78 filenames' running sum. It is
 evidence that this adapter needs more steps per file than the paper's
 one-action-per-step, so §10.1's step budget buys less work per step. The number
