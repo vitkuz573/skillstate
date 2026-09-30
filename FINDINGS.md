@@ -544,12 +544,28 @@ actually longer and not truncated by the host. Truth 4559.
 | control's prefix-sum context | — | 17,437,234 chars |
 | eq. 8 | **65.50x** | — |
 
-**On content the bounded arm wins by 46.9x** and it wins *unconditionally* — the
-ceiling is negative, because it made 128 calls against the control's 192, so it
-pays the host's per-call overhead less often as well as sending less content. The
-condition that bound every earlier measurement (`H < ~56,000 chars/call`) is gone
-at this length, and the sign has flipped for the right reason rather than a lucky
-one.
+**On content the bounded arm wins by 46.9x** — but read what that number is
+measured on, because it is the number in this document most likely to be quoted
+without its caveat.
+
+**The bounded arm's row is a FAILED run.** It reached 78/90 and a total 245 low;
+the control reached 90/90 and the exact sum. So "128 calls against 192" is a
+comparison between a run that finished its work and a run that did not, and a
+cheaper incomplete run is not a saving — it is a run that stopped. The
+project's own criterion, from the harness gate: *a cost win with no task
+completion is worth nothing.*
+
+**What the number does still support:** `Σ|Aₜ|` is 371,747 chars against a
+control context of 17,437,234, and eq. 8 reproduces at 65.50 against a
+theoretical 65.50. Those are properties of the *content*, and a run that stops
+early cannot flatter them — a shorter run sends less. So the content result is
+sound in the conservative direction: a run that got 78 of 90 files done already
+cost a seventh of what the control cost to get all 90.
+
+**What it does not support:** any statement that the mechanism is cheaper *at 90
+files*, because the comparison is not like-for-like. To make it so, the bounded
+arm has to finish — which is finding 13a's own conclusion, now applied to its own
+cost row.
 
 **And it lost the task.** 78/90 and a total 245 too low, where the control got
 90/90 and the exact sum. The state is not merely short — it stopped at cfg78 and
