@@ -20,14 +20,20 @@ printf '\n\033[1m▸ pre-commit\033[0m\n'
 # not cost 40 seconds of coverage; a source change always pays.
 staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
 
+# scripts/ is gated because it is not only scripts. `ab-blind.sh` and
+# `blind-score.py` carry the experiment's logic and tests assert on their
+# contents, so a change there can break the instrument while looking like a docs
+# edit. Verified rather than assumed: staging a broken `ab-blind.sh` alone ran
+# the hook, and the hook said "no source changes staged" without running a
+# single test.
 needs_gate () {
   case "$1" in
-    packages/*|tests/*|vitest.config.ts|tsconfig*.json|package.json) return 0 ;;
+    packages/*|tests/*|scripts/*|justfile|vitest.config.ts|tsconfig*.json|package.json) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-if [ -z "$(printf '%s\n' "$staged" | grep -E '^(packages/|tests/|vitest\.config\.ts|tsconfig.*\.json|package\.json)')" ]; then
+if [ -z "$(printf '%s\n' "$staged" | grep -E '^(packages/|tests/|scripts/|justfile|vitest\.config\.ts|tsconfig.*\.json|package\.json)')" ]; then
   printf '  no source changes staged — skipping the gate\n'
   exit 0
 fi
