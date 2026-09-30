@@ -149,7 +149,7 @@ PY
   "id": "accumulate",
   "name": "Accumulate",
   "version": "1.0.0",
-  "instructions": "Read each src file one at a time. Add its REAL_n to `total` and its filename to `done`, then emit the patch. `done` names every file already read, so you can tell what is left. A patch is sparse: a field it does not mention is left exactly as it is, so `{total: N}` alone keeps every filename already in `done`. Resending To add a file to `done`, send the whole list including every file already in it — an array is replaced whole rather than appended to, so sending only the new file leaves `done` holding just that one. The state is a record, not a scratchpad: it is meant to still be there and readable once the work is finished. A patch merges into the state; a null value deletes that key.",
+  "instructions": "Read each src file one at a time. Add its REAL_n to `total` and its filename to `done`, then emit the patch. `done` names every file already read, so you can tell what is left. A patch is sparse: a field it does not mention is left exactly as it is, so `{total: N}` alone keeps every filename already in `done`. To add a file to `done`, send the whole list including every file already in it — an array is replaced whole rather than appended to, so sending only the new file leaves `done` holding just that one, and a mistyped filename is a file you will read again. The state is a record, not a scratchpad: it is meant to still be there and readable once the work is finished. A patch merges into the state; a null value deletes that key.",
   "schema": {
     "total": { "type": "number", "default": 0, "description": "running sum" },
     "done": { "type": "array", "default": [], "description": "filenames already read" }
@@ -191,6 +191,9 @@ for t in $(seq 1 "$TRIALS"); do
     dir="$ROOT/${arm:0:1}-$t"
     setup "$dir" "$arm"
     printf 'trial %s %s: running\n' "$t" "$arm"
+    # SKILLSTATE_DRIVE passes through: 0 turns the step loop off, which is the
+    # configuration that batches and therefore the one that keeps the request
+    # count down. 1 or unset is the paper's mechanism, one action per step.
     ( cd "$dir" && timeout 2400 opencode run --standalone \
         --model "$MODEL" --format json "$(task_text)" > out.json 2> err.txt ) || true
     BLIND_TRUTH="$TRUTH" BLIND_FILES="$FILES" python3 "$SCRIPTER" "$dir" "$arm" "$arm-$t" \
