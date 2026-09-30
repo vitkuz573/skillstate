@@ -10,8 +10,8 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
-**How to read a number in this document.** Twelve instruments in this project were
-wrong or missing, and the counts are worth separating because the two kinds are
+**How to read a number in this document.** Thirteen instruments in this project were
+wrong or missing, and a thirteenth of them is not a counter at all, and the counts are worth separating because the two kinds are
 found differently.
 
 **Eight were wrong**, each in a different direction: a correctness column, an
@@ -28,6 +28,23 @@ host had dropped the run, nothing compared the run's own duration against the ca
 the harness gave it, and nothing checked this document against the runs it quotes.
 **The three absences are one question — did the run finish at all — and a day's
 headline number sat on a run that a `timeout 2400` had killed at 39.9 minutes.**
+
+**And a thirteenth is not a counter at all, which is why it went unnoticed
+longest.** `state.md` — this project's implementer's guide, and the only record of
+the paper it works from — listed its normative sections in its own DOCUMENT
+numbering under the word "sections": `§7 (complexity), §8 (metrics)`, one line
+below a line giving the PAPER numbering for the same content. So `§7 eq. 8`,
+cited in nineteen places, sent a reader to rollback-retry — and a reader who
+followed it could not know they were wrong, because `§7` is a real section of the
+paper, of the wrong content. The same file cites the paper's Limitations as
+`§7 Limitations`, a number nothing in the project records, so four sites were
+citing a section they could not have checked at all.
+
+**A citation that cannot be followed is indistinguishable from one that was
+followed and found fine, and nothing in the build noticed either.** `state.md`
+carries both tables now — the paper's sections and its own, with the mapping — and
+a test requires every `§` in the code to resolve against one of them, or to carry
+the document it means.
 Reading the last line of a transcript is cheap. Not having any reason to is not.
 
 The fourth absence is why the records are committed in
