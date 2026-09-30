@@ -230,12 +230,25 @@ That is the length axis, and it is the one that decides the question:
 | 90 files | 338k chars | 155,672 | 31.00x | 31.00 |
 
 Tripling the transcript grew the state's cost by 56%, against a baseline that
-grows quadratically. **The saving is real and its condition is not weakening with
-length.** What has not changed is the call count — 60 against the control's 31 —
-so the host re-sends its own context nearly twice as often, and
-`scripts/crossover.mjs` puts the ceiling at 56,146 chars/call: below that, the
-bounded context is cheaper; above it, it is not. The arithmetic is right. The
-condition is the whole claim.
+grows quadratically. On *content*, the saving improves with length.
+
+On wall tokens it does not, and the reason is the request count:
+
+| fixture | paper calls | control calls | H ceiling |
+| --- | --- | --- | --- |
+| 30 files | 59 | 31 | ~60,000 chars/call |
+| 90 files | 60 | 31 | ~56,000 chars/call |
+
+The state is cheaper per step, the transcript is three times longer, and the arm
+is still making twice as many requests — so it pays the host's per-call overhead
+twice as often, and the ceiling does not move. Below that ceiling the bounded
+context is cheaper; above it, it is not. Nothing in §5.1 addresses request count,
+because §5.1 assumes the runtime owns the loop, which is exactly what this host
+cannot give it.
+
+**No percentage is claimed.** A ratio built from those numbers would be a ratio
+of two things the model never paid, and a test fails if a `%` appears in the
+report.
 
 ## How it works
 

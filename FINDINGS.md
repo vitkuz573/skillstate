@@ -524,11 +524,28 @@ the closed form. The paper's arithmetic is right.
 
 **And the length axis is the one that matters.** Three times the files tripled
 the transcript (115k → 338k) and Σ\|Aₜ\| grew by 56%, against a baseline that
-would grow quadratically. The H ceiling — the host's per-call overhead below
-which the bounded context wins — moved from 60,262 to 56,146 chars/call: it does
-not improve much, because the arm is still making 60 calls against the control's
-31. **The saving is real and the condition on it is not weakening with length; the
-call count is what has to change.**
+would grow quadratically.
+
+The condition, stated as `scripts/crossover.mjs` states it — the host's per-call
+overhead below which the bounded context wins:
+
+| fixture | paper calls | control calls | H ceiling |
+| --- | --- | --- | --- |
+| 30 files | 59 | 31 | ~60,000 chars/call |
+| 90 files | 60 | 31 | ~56,000 chars/call |
+
+**The ceiling barely moved, and the reason is the call count: 60 against 31.** The
+state is cheaper per step, the transcript is three times longer, and the arm is
+still making twice as many requests — so it pays the host's overhead twice as
+often. The saving on *content* improves with length; the saving on *wall tokens*
+is held hostage by the request count, and nothing in §5.1 addresses request count
+because §5.1 assumes the runtime owns the loop, which is the thing this host
+cannot give it.
+
+**No percentage is claimed anywhere**, deliberately. A ratio built from these
+numbers would be a ratio of two things the model never paid, and three headline
+numbers in this project's history were a constant standing in for a
+measurement. The report is guarded by a test that fails if a `%` appears in it.
 
 **And most of Aₜ is the constant base prompt, not the state.** At 30 files the
 base is 1944 chars of a 2406-char Aₜ — **81%**, so the state the entire argument
