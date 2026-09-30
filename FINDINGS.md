@@ -10,7 +10,7 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
-**How to read a number in this document.** Six instruments in this project were
+**How to read a number in this document.** Seven instruments in this project were
 confidently wrong, each in a different direction: a correctness column, an erasure
 count, a lag rate, a drift counter, a liveness check with a false negative, and a
 probe whose output was read as evidence when it was the confound. Each ran, each
@@ -680,9 +680,32 @@ thirty-one times from inside `execute` with not one direct tool call in its
 transcript, and the first version of the check missed it and called that run
 **dead**.
 
-Re-scored against every run taken for this document: the paper arms carry 45 and
-130 fenced responses, one notes trial wrote through the sandbox, all live. The
-measurements stand — and now for a reason that is checked rather than assumed.
+And the liveness check itself was wrong twice before it was right, which is the
+seventh instrument and the reason this section is here rather than in a commit
+message. It first missed the sandbox case and called a run **dead** that had
+written the state thirty-one times. It then counted any json fence as engagement
+and called a run **live** that had written nothing — a model that reads the state
+file and quotes it back has a fence. Both directions wrong, in the one signal
+every other verdict in the run is grounded in.
+
+Re-scored, both bits, every run taken for this document:
+
+| run | plugin_live | how | state_ok |
+| --- | --- | --- | --- |
+| paper 30 ×3 | live | 45 / — / — fenced patches | 2 of 3 |
+| notes 30 #1 | **not live** | — | no |
+| notes 30 #2 | live | through the sandbox | yes |
+| notes 30 #3 | **not live** | — | no |
+| paper 90 | live | 130 fenced patches | no |
+| notes 90 | live | through the sandbox | yes |
+
+Two control trials genuinely never touched the state, and the gate now says so
+rather than inferring it. Every run reads `build: null`, which is the honest value
+for a run taken before the stamp existed — the stamp was added precisely because
+a run's behaviour depends on a build named nowhere in its own output, and the host
+resolves that build by workspace rather than by what `opencode.json` asks for.
+
+The measurements stand, and now for a checked reason rather than an assumed one.
 
 **The open question stays open.** Whether `ctx.session.generate` is one model call
 with no agent loop is still unknown, because nothing has run it.
@@ -693,8 +716,9 @@ symlink points into this repository — and it is invisible, because a symlink t
 repo and a resolution to the repo are the same bytes. It also means a measurement
 of this project can be made with the *wrong* plugin and look perfectly healthy.
 
-**The six instruments in this project**, each wrong in a different direction, and
+**The seven instruments in this project**, each wrong in a different direction, and
 each found by comparing against a second opinion rather than by being green: the
 correctness column, the erasure count, the lag rate, the drift counter, the plugin
-liveness check (which had a false negative on the known instance), and this probe.
+probe, and the liveness check — which was wrong twice, once dead on a run that
+wrote and once live on a run that did not.
 
