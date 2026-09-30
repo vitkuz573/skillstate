@@ -327,6 +327,39 @@ directory. No model required.
 
 ---
 
+## 7a. The state that is hardest to keep right is the one §4.1 requires
+
+**What it is.** The model is handed a set of files and asked to record which it
+has read. §4.1 insists on a *set*, not a count: a count is not well-defined
+without a conversation, which is the whole argument for having a state at all.
+And a set is the one kind of state that has to be kept in sync.
+
+An *absolute* value is idempotent. `{total: 88}` then `{total: 139}` is a
+progressing record whether or not the second patch is late. A *set* is not:
+`{done: [cfg1]}` after reading cfg1 and cfg2 is stale the moment it lands, and
+nothing in §1–§10 reconciles a patch with what the environment has actually done.
+§6.2 validates the patch's types. It cannot know which files exist.
+
+So the state that makes progress legible is the state that is hardest to keep
+accurate, and the paper's own §4.1 is what requires the hard version. The control
+arm has the same schema pressure and none of the problem, because it also has the
+transcript to check against — 3% re-reads against 37%.
+
+**What §Limitations does and does not say.** It lists *"Validation is
+loss-preserving, not semantic … it does not verify that the content of a patch is
+a correct or desirable decision."* That covers a patch that is wrong. It does not
+name a patch that is *well-formed and stale* — which is a different failure,
+because no amount of better validation reaches it, and because the fix is not in
+the model but in the host's ability to batch.
+
+**What the paper offers.** §5.1's answer is structural: the runtime chooses `aₜ`
+and executes it, so a step is one action and Σ cannot trail. There is no second
+answer. An implementation that cannot own the executor — this one, on this host
+— inherits the failure the mechanism was designed to make impossible.
+
+
+---
+
 ## 8. The result that argues for the mechanism
 
 Same task, same model, same fixture, one variable: whether the model could see

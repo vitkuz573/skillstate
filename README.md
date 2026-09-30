@@ -100,6 +100,22 @@ plugin has no execute capability and the agent loop batches, so a model can read
 three files in a turn and name one. Three prompt-level fixes for it have been
 tried and measured; all three reached the model and all three were declined.
 
+There is a structural reason this is the interesting failure, and it is a point
+about §4.1 rather than about this model. An *absolute* value is idempotent —
+`{total: 88}` then `{total: 139}` is a progressing record whether or not the
+second patch is late. A *set* is not: `{done: [cfg1]}` after reading cfg1 and
+cfg2 is stale the moment it lands, and nothing in §1–§10 reconciles a patch with
+what the environment has actually done. §4.1 requires a set precisely because a
+count is not well-defined without a conversation — which is the whole argument
+for having a state. So the state that makes progress legible is the state that is
+hardest to keep accurate, and the control arm has the same schema pressure and
+none of the problem because it also has the transcript to check against.
+
+§Limitations covers *"validation is loss-preserving, not semantic … it does not
+verify that the content of a patch is a correct or desirable decision"*, which is
+a patch that is **wrong**. It does not name a patch that is **well-formed and
+stale**, and no amount of better validation reaches that one.
+
 ### What live runs showed that the conformance suite cannot test
 
 The suite above pins the implementation to `state.md`. It cannot say what
