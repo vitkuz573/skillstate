@@ -149,16 +149,31 @@ describe('A.4 is byte-exact', () => {
   // from A.4 and (b) inject a behavioural instruction into the one surface
   // that is supposed to be the operator's spec.
 
-  it('carries a correction into the observation line', () => {
+  it('appends a correction to the PROMPT, not to the observation', () => {
+    // §5.1 line 8: `A_t <- A_t + corrective_feedback`. §6.3 says the same in
+    // words: "appended to the same bounded prompt". The adapter used to prepend
+    // the correction to O_t, which claimed the ENVIRONMENT rejected the patch,
+    // and the core runtime has always put it on the prompt — so the same event
+    // landed in two slots depending on the entry point.
     const built = buildPaperPrompt({
       spec: SPEC,
       state: { step: 1 },
       messages: [tool('the test run finished')],
       feedback: 'your previous response contained no JSON block',
     });
+
     expect(built.prompt).toContain(
-      'Latest Observation: [state patch rejected] your previous response contained no JSON block\nthe test run finished',
+      '[state patch rejected] your previous response contained no JSON block',
     );
+    expect(built.prompt).not.toContain('Latest Observation: [state patch rejected]');
+    // The observation is the environment's reply, untouched.
+    expect(built.observation.content).toBe('the test run finished');
+    // And A.4 is intact above the suffix, which is what line 8 describes.
+    const at = built.prompt.indexOf('[state patch rejected]');
+    const head = built.prompt.slice(0, at);
+    expect(head).toContain('Instructions:');
+    expect(head).toContain('Skill Execution State:');
+    expect(head).toContain('Latest Observation: the test run finished');
   });
 
   it('leaves the instructions byte-identical to A.4 when correcting', () => {
@@ -1598,10 +1613,12 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const prompt = promptOf(payload.messages);
     expect(prompt).toContain('[state patch rejected]');
     expect(prompt).toContain('no JSON block');
-    // And the tool result is still there, after the correction — the order the
-    // events actually happened in.
-    expect(prompt.indexOf('[state patch rejected]')).toBeLessThan(
-      prompt.indexOf('the test run finished'),
+    // §5.1 line 8: the correction is a SUFFIX on the rendered prompt, so the
+    // A.4 template and the tool result both come first. It used to be
+    // prepended to the observation, which put the correction ahead of the tool
+    // result and inside the line that is supposed to be the environment's reply.
+    expect(prompt.indexOf('the test run finished')).toBeLessThan(
+      prompt.indexOf('[state patch rejected]'),
     );
   });
 

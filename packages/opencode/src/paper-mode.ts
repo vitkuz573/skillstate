@@ -403,9 +403,7 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
   // why pinning the first message cost a real task.
   const instruction = currentInstruction(messages);
   const observed = latestObservation(messages);
-  // A rejected patch is itself an observation, so the correction rides in Oₜ
-  // and the A.4 template is untouched. The `observed` object keeps the
-  // host-derived source and timestamp; only the rendered content changes.
+  // The runtime's own report rides in Oₜ, which is the environment's channel.
   let content = observed.content;
   if (options.continuation !== undefined) {
     // The marker is chosen here, beside the text, because a report labelled
@@ -419,14 +417,25 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
       options.continuation,
     );
   }
-  if (options.feedback !== undefined) {
-    content = applyFeedback(content, options.feedback);
-  }
   const observation: PaperObservation =
     content === observed.content ? observed : { ...observed, content };
   const effective = proceduralSpecWithTask(spec, instruction);
+  // A rejected patch is NOT an observation, and putting it in Oₜ said so.
+  //
+  // §5.1 line 8 is explicit: `A_t ← A_t + corrective_feedback` — the correction
+  // is appended to the PROMPT, not to the environment's reply. §6.3 repeats it
+  // in words: "appended to the same bounded prompt". The core runtime has always
+  // done that, and the adapter did not, so the same event landed in two
+  // different slots depending on which entry point ran.
+  //
+  // The adapter's original reason was that Oₜ was the only place that could
+  // carry an addition without touching the A.4 render. That reason confuses the
+  // template with the prompt: §5.2 makes A.4 the template, and §5.1 line 8
+  // makes the prompt that template plus a corrective suffix. Byte-verbatim is a
+  // property of the template, and appending after it keeps it.
+  const base = transformer.formatPaper(effective, state, observation);
   return {
-    prompt: transformer.formatPaper(effective, state, observation),
+    prompt: options.feedback === undefined ? base : `${base}\n\n${applyFeedback('', options.feedback)}`,
     task: instruction,
     observation,
     observationSource: observed.source,
