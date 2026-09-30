@@ -52,10 +52,54 @@ def _assistant_texts(path: str) -> list[str]:
                 event = json.loads(line)
             except ValueError:
                 continue
+            # `isinstance` first: a transcript is a file on disk that nothing
+            # validates, and a bare `[]` in it took the whole scorer down with an
+            # AttributeError. The guard was added to the newest reader only, which
+            # is how three readers came to disagree about what a transcript is.
+            if not isinstance(event, dict):
+                continue
             part = event.get("part", {})
+            if not isinstance(part, dict):
+                continue
             if part.get("type") == "text" and isinstance(part.get("text"), str):
                 texts.append(part["text"])
     return texts
+
+
+def _stream_health(path: str) -> tuple[list[str], bool]:
+    """Errors in the transcript, and whether the run ENDED on one.
+
+    Did the HOST drop the run? Not the model's fault, not the mechanism's, and the
+    most expensive thing to miss: a 90-file run that stopped at 78 of 90 files was
+    read first as a model that lost track of its running sum, then as a step
+    ceiling, and nobody looked at the last line of the transcript. It is a closed
+    socket.
+
+    The stand runs the model under `|| true`, so a crashed, timed-out or
+    quota-starved run and a run that finished cleanly leave the same files behind:
+    an empty stderr, a plausible state file, and no exit code. Every verdict
+    computed from a run that ended on an error is a verdict about a truncated run,
+    so this is a gate on the others rather than a finding of its own.
+    """
+    errors: list[str] = []
+    last_type = None
+    with open(path, errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            last_type = event.get("type")
+            if event.get("type") == "error":
+                message = (event.get("error") or {}).get("message", "")
+                if isinstance(message, str) and message:
+                    errors.append(message)
+    return errors, bool(errors) and last_type == "error"
 
 
 def _patch_in_text(text: str) -> bool:
@@ -84,6 +128,8 @@ def _parts(out: str) -> list[dict[str, Any]]:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
             part = event.get("part")
             if isinstance(part, dict):
                 parts.append(part)
@@ -101,8 +147,10 @@ def _tool_census(path: str) -> dict[str, int]:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
             part = event.get("part", {})
-            if part.get("type") == "tool":
+            if isinstance(part, dict) and part.get("type") == "tool":
                 name = str(part.get("tool"))
                 census[name] = census.get(name, 0) + 1
     return census
@@ -163,7 +211,11 @@ def _code_delegation(out: str) -> tuple[int, int]:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
             part = event.get("part") or {}
+            if not isinstance(part, dict):
+                continue
             if part.get("type") != "tool":
                 continue
             if str(part.get("tool")) not in _CODE_TOOLS:
@@ -184,8 +236,10 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     if os.path.exists(out):
         texts = _assistant_texts(out)
         census = _tool_census(out)
+        errors, ended_on_error = _stream_health(out)
     else:
         texts, census = [], {}
+        errors, ended_on_error = [], False
 
     match = ANSWER.search("\n".join(texts))
     answered = int(match.group(1)) if match else None
@@ -289,6 +343,11 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         # number from it is not a saving -- this project's own criterion: a cost
         # win with no task completion is worth nothing.
         "stopped_by_ceiling": stopped_by_ceiling,
+        # True means the transcript ENDS on an error, so the run did not finish for
+        # any reason this project controls. Every verdict above it is then about a
+        # truncated run.
+        "ended_on_error": ended_on_error,
+        "errors": errors,
         "plugin_live": engaged,
         "engagement": {
             "patch_in_text": paper_engaged,

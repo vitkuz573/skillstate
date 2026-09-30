@@ -19,8 +19,15 @@ place with the counter that produced them, so the mistake is as findable as the
 finding; the rest have sections of their own.
 
 An eighth was not wrong but *absent*, which is harder to see than a wrong number:
-nothing recorded why a loop stopped, so a run cut at the step ceiling was read as
-a run that lost track of its work. See 13a. Where a
+nothing recorded why a loop stopped, and nothing recorded that the host had
+dropped the run at all. See 13a.
+
+A ninth came with it and has the same shape: the stand runs the model under
+`|| true`, so a crashed, timed-out or quota-starved run leaves the same files
+behind as a clean one. **Both absences are about one question — did the run finish
+at all — and a day's headline number sat on a run whose answer was a closed
+socket.** Reading the last line of a transcript is cheap. Not having any reason to
+is not. Where a
 section reports one trial it says so; `n=3` appears where three ran, and at n=3
 nothing here supports a claim about accuracy in either direction.
 
@@ -552,31 +559,63 @@ actually longer and not truncated by the host. Truth 4559.
 measured on, because it is the number in this document most likely to be quoted
 without its caveat.
 
-**The bounded arm's row is a run that STOPPED, and the reason is a ceiling.** It
-reached 78/90 and a total 245 low; the control reached 90/90 and the exact sum.
-The last events in the transcript are `read cfg79.ts` and nothing after — the
-work was still going.
+**The bounded arm's row is a TRUNCATED run, and the transcript says so in its
+last line.** It reached 78/90 and a total 245 low; the control reached 90/90 and
+the exact sum. The final events are `read cfg79.ts`, `step_finish`,
+`step_start`, and then:
 
-§10.1's `Run(..., maxSteps = 100)` is the default, a step advances once per
-applied patch, and 90 files at 1.67 patches per file needs about 150. So the run
-was cut at step 100, mid-file-79. **This is not evidence that a model cannot hold
-78 filenames' running sum.** It is evidence that this adapter needs more steps per
-file than the paper's one-action-per-step, so §10.1's step budget buys less
-work per step. The number is faithful to §10.1 and the consequence is not the
-paper's.
+```
+{"type":"error","error":{"type":"unknown","message":"Transport: The socket
+connection was closed unexpectedly. ..."}}
+```
 
-Either way, "128 calls against 192" compares a finished run with a stopped one,
-and a cheaper unfinished run is not a saving — this project's own harness
-criterion: *a cost win with no task completion is worth nothing.*
+The host dropped the connection mid-turn. **It is the only run of the eight
+taken for this document with an error in its transcript at all, and the only one
+that ends on one** — every other ends cleanly on a text event.
 
-**Nothing in the library said so.** §10.1's loop has three exits and one
-return value — `break` on `isDone`, `break` on an invalidated step, and falling
-out of `range(maxSteps)` — and the third is indistinguishable from completion.
-The host adapter was worse: `advance()` returns `null` for a terminal action, a
-host refusal, an empty turn, and the ceiling, and the caller discarded the return
-value entirely. **That is the eighth instrument in this project**, and the first
-one that was missing rather than wrong: no counter, no gate, no number — just
-an absence, which is the hardest kind to notice.
+So 78/90 measures nothing about the mechanism and nothing about the model. It is
+the point where a socket closed.
+
+**I read it three times and got it wrong twice**, which is why it is written out
+rather than quietly replaced. First as a model losing track of its running sum,
+which is what the state file alone invites. Then as §10.1's step ceiling: 130
+patches emitted at ~1.67 per file against a default of 100 looked like arithmetic
+that had to be right. It was arithmetic about the wrong quantity — patches
+*emitted* are not steps *taken*, and the difference is exactly what the missing
+report (below) was hiding. I then built an instrument to prove the ceiling theory
+and only looked at the last line of the transcript afterwards, where the answer
+had been the whole time.
+
+**Neither claim survives, and the ceiling is untested rather than refuted.** 130
+emitted patches against a ceiling of 100 steps is suggestive and not conclusive;
+the run has no `.run.json` to settle it. What is settled is that the row is not a
+like-for-like measurement.
+
+**So the like-for-like cost claim does not exist yet**, and "128 calls against
+192" is a finished run measured against a dropped one. A cheaper unfinished run
+is not a saving — this project's own harness criterion: *a cost win with no
+task completion is worth nothing.*
+
+**What survives is the content, and it survives in the conservative direction.**
+`Σ|Aₜ|` is 371,747 chars against a control context of 17,437,234, and eq. 8
+reproduces at 65.50 against a theoretical 65.50. A run that is cut short can only
+shrink a content measurement, never inflate it — 78 files of patches cannot
+weigh more than 90 would. So the content claim is sound precisely because the run
+underperformed.
+
+**The gate that would have caught it in one line.** The stand runs the model under
+`|| true`, so a dropped run and a clean one leave the same files behind: an empty
+stderr, a plausible state, no exit code. The scorer now reads the transcript's
+last event and reports `ended_on_error` with the message — **the ninth
+instrument**, and like the eighth it was *absent* rather than wrong. Two absences
+in a row, both about the same thing: **whether a run finished at all.**
+
+And the eighth, which came first and is the deeper one: §10.1's loop has three
+exits and one return value — `break` on `isDone`, `break` on an invalidated
+step, and falling out of `range(maxSteps)` — and the third is indistinguishable
+from completion. The host adapter was worse: `advance()` returns `null` for a
+terminal action, a host refusal, an empty turn, and the ceiling, and the caller
+discarded the return value entirely.
 
 `run()` now reports which exit it took (`lastRunStop`: `done`, `invalidated`,
 `max_steps`), the adapter reports which of its four (`lastStop`), the plugin
@@ -621,39 +660,34 @@ arm has to finish — which is finding 13a's own conclusion, now applied to its 
 cost row.
 
 **And it did not finish** — 78/90 and a total 245 low, where the control got
-90/90 and the exact sum. **The ceiling stopped it at 100 steps, mid-file-79,**
-which is a fact about this adapter's step economics and not about the model's
-arithmetic. The answer it reported (3804) is *below its own state* (4314), so it
-distrusted its total before it stopped; the `+194` drift accumulated separately.
+90/90 and the exact sum. The socket closed mid-file-79; that is not a fact about
+this adapter's step economics nor about the model's arithmetic, it is a fact about
+a connection. The answer it reported (3804) is *below its own state* (4314), so
+whatever else went wrong, the model distrusted its total before it stopped; the
+`+194` drift accumulated separately.
 
-**What the run is made of, and why it stopped.** 96 reads for 90 files is almost
+**What the run is made of, and where it ended.** 96 reads for 90 files is almost
 efficient, and 130 patches at ~1.67 per file. The last events in the transcript
-are `read cfg79.ts` and nothing after it — the run was still working when it
-ended.
+are `read cfg79.ts`, `step_finish`, `step_start`, then a transport error — it
+was still working when the connection went.
 
-**It was stopped by the step ceiling, not by the model.** §10.1's
+**The step ceiling remains a live hypothesis and nothing more.** §10.1's
 `Run(..., maxSteps = 100)` is the default, a step advances once per applied
-patch, and 90 files at 1.67 patches per file needs about 150. So the 78/90 is a
-ceiling, and the reading of it has to change: this is not evidence that a model
-cannot hold 78 filenames' running sum. It is evidence that **this adapter needs
-more steps per file than the paper's one-action-per-step, and 100 of them does
-not cover 90 files.**
-
-That is the same shape as everything else in this document — the adapter cannot
-own the executor, so the host batches, so a step carries more than one action, so
-the paper's step budget buys less work per step. The number is faithful to §10.1
-and the consequence is not the paper's.
+patch, and 130 *emitted* patches against 100 *taken* steps is suggestive. It is
+not conclusive, because emitted is not taken, and this run has no `.run.json` to
+settle it. The two six-file and ninety-file measurements bracket the default at
+roughly 60 files' worth of work, which is why the retest uses a raised ceiling.
 
 The rest of the run's shape stands: 10 sum-outsourcing attempts, 17 shell calls,
 one patch built in code, and an answer of 3804 *below its own state's 4314* — so
-whatever the ceiling did to the run, the model did distrust its own total before
-it stopped.
+whatever ended the run, the model did distrust its own total before it stopped.
 
-**What this says, precisely.** The paper's cost claim survives at 90 files and its
-accuracy claim does not — and they are different claims. §7's arithmetic is about
-`SUM |A_t|` and it is exactly right. §1–§10 say nothing about a model's ability to
-hold 78 filenames' worth of running sum in a context with no other copy of it, and
-this run is what that looks like when it runs out.
+**What this says, precisely.** Almost nothing about accuracy, because the run did
+not finish. §7's arithmetic about `SUM |A_t|` is exactly right and is unaffected:
+a truncated run sends less, never more. §1–§10 say nothing about a model's
+ability to hold 78 filenames' worth of running sum, and **this run is not evidence
+either way** — a socket closed at file 79. The accuracy question is open, not
+answered, and the honest next step is a run that finishes.
 
 ---
 

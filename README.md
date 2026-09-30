@@ -296,47 +296,55 @@ sending 46.9x less content, and the ceiling stops binding at all:
 | state | 78/90, total 4314 | **90/90, total 4559** |
 | answer | 3804 | **4559** |
 
-**Read the bounded arm's row as an unfinished run, and the reason matters.**
-78/90, a total 245 low, the control all 90 — and the transcript ends on
-`read cfg79.ts` with the work still going. **It was stopped by the step ceiling**,
-not by the model: §10.1's `Run(..., maxSteps = 100)` is the default, a step
-advances per applied patch, and 90 files at 1.67 patches per file needs about 150.
+**Read the bounded arm's row as a TRUNCATED run. Its transcript says so in its
+last line.** 78/90, a total 245 low, the control all 90 — and the final events
+are `read cfg79.ts`, `step_finish`, `step_start`, then:
 
-**And nothing in the library said so** — §10.1's loop has three exits and one
-return value, and the third (`range(maxSteps)` running out) is indistinguishable
-from completion. A run now reports which exit it took, and the plugin writes it
-with the ceiling to `.skillstate/.run.json`; the scorer surfaces
-`stopped_by_ceiling`. That gap is the eighth instrument in this project and the
-first that was *missing* rather than wrong — no counter, no gate, no number,
-just an absence.
+```
+{"type":"error","error":{"type":"unknown","message":"Transport: The socket
+connection was closed unexpectedly. ..."}}
+```
 
-So this is not evidence that a model cannot hold 78 filenames' running sum. It is
-evidence that this adapter needs more steps per file than the paper's
-one-action-per-step, so §10.1's step budget buys less work per step. The number
-is faithful to §10.1 and the consequence is not the paper's.
+**It is the only run of the eight with an error in its transcript at all, and the
+only one that ends on one.** So 78/90 measures nothing about the mechanism and
+nothing about the model — it is the point where a socket closed. I read it three
+times and got it wrong twice: first as a model losing track of its running sum,
+then as §10.1's step ceiling (130 *emitted* patches against a default of 100
+*taken* steps is arithmetic about the wrong quantity). I built an instrument to
+prove the ceiling theory and only read the transcript's last line afterwards.
 
-Which also means "128 calls against 192" compares a finished run with a stopped
-one, and a cheaper unfinished run is not a saving — this project's own harness
-criterion: *a cost win with no task completion is worth nothing.*
+**The step ceiling is untested, not refuted.** That run has no `.run.json` to
+settle it. A six-file control takes 11 steps (1.83 per file) and this one reached
+1.67 per file, which brackets §10.1's default of 100 at roughly 60 files of work
+— which is why the retest runs with a raised ceiling.
+
+**Two instruments were missing, and both were about the same thing: whether a run
+finished at all.** §10.1's loop has three exits and one return value, and the third
+(`range(maxSteps)` running out) is indistinguishable from completion; the host
+adapter was worse, returning `null` for four different endings and having the
+caller discard it. And the stand runs the model under `|| true`, so a dropped run
+and a clean one leave the same files behind — empty stderr, plausible state, no
+exit code. A run now reports which exit it took and the ceiling it ran under, in
+`.skillstate/.run.json`; the scorer surfaces `stopped_by_ceiling` (three-valued —
+absent is `null`, never `false`) and `ended_on_error` with the message.
+
+**So "128 calls against 192" compares a finished run with a dropped one**, and a
+cheaper unfinished run is not a saving — this project's own harness criterion: *a
+cost win with no task completion is worth nothing.*
 
 **What survives is the content, and it survives in the conservative direction** —
 `SUM |Aₜ|` 371,747 against a control context of 17,437,234, eq. 8 at 65.50
-against a theoretical 65.50 — because a run that got 78 of 90 files done already
-cost a seventh of what the control cost to get all 90. A run that stops early
-cannot flatter a content measurement; it can only shrink it.
+against a theoretical 65.50 — because a run cut short sends less, never more. 78
+files of patches cannot weigh more than 90 would.
 
-**So the cost claim survives at 90 files, the accuracy claim does not, and the
-cost row is not yet like-for-like.** §7's arithmetic is about `SUM |Aₜ|` and it
-is exactly right — 65.50x, against a theoretical 65.50. §1–§10 say nothing about a model's ability to hold 78
-filenames' worth of running sum with no transcript to check it against, and that
-is what ran out: 10 attempts to outsource the sum, 17 shell calls, one patch
-built in code, and a final answer of 3804 — *below its own state's 4314*, so it
-distrusted what it had and went further wrong. The control read each file once,
-wrote nothing until the end, and got the sum right.
+**What does not survive is any accuracy claim, in either direction.** §1–§10 say
+nothing about a model's ability to hold 78 filenames' worth of running sum with
+no transcript to check it against, and this run is not evidence either way — a
+socket closed at file 79. The question is open, not answered.
 
-Those are two different claims and only one of them holds. **No percentage is
-claimed** — a ratio built from these numbers would be a ratio of two things the
-model never paid, and a test fails if a `%` appears in the report.
+**No percentage is claimed** — a ratio built from these numbers would be a ratio
+of two things the model never paid, and a test fails if a `%` appears in the
+report.
 
 ## How it works
 

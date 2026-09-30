@@ -413,3 +413,70 @@ group('a run records why its loop stopped', () => {
     expect(score(runDir({ maxSteps: 100 })).stopped_by_ceiling).toBe(false);
   });
 });
+
+group('a host-dropped run is not a model result', () => {
+  // The stand runs the model under `|| true`, so a crashed, timed-out or
+  // quota-starved run and a run that finished cleanly leave the same files
+  // behind: an empty stderr, a plausible state file, and no exit code. A 90-file
+  // run that stopped at 78 of 90 files was read first as a model that lost track
+  // of its running sum, then as a step ceiling — and the transcript's last line
+  // was a closed socket both times. Every verdict computed from such a run is a
+  // verdict about a truncated run, so this gates the others.
+  const score = (lines: string[]): Record<string, unknown> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'health-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), lines.join('\n'));
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [] } }),
+    );
+    return JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+  };
+
+  const event = (type: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ type, ...extra });
+  const text = (body: string): string =>
+    event('text', { part: { type: 'text', text: body } });
+
+  it('is true when the transcript ends on an error, and names it', () => {
+    // The real shape, taken from the run in question.
+    const result = score([
+      text('working'),
+      event('step_finish'),
+      event('step_start'),
+      event('error', {
+        error: { type: 'unknown', message: 'Transport: The socket connection was closed unexpectedly.' },
+      }),
+    ]);
+    expect(result.ended_on_error).toBe(true);
+    expect((result.errors as string[])[0]).toContain('socket connection was closed');
+  });
+
+  it('is false when an error appears but the run carried on', () => {
+    // A retried tool call, or a transient error the host rode out. The signal is
+    // where the transcript STOPS, not whether it ever contained an error — a
+    // run with any error would otherwise be discarded for a recoverable one.
+    const result = score([
+      event('error', { error: { message: 'rate limited, retrying' } }),
+      text('recovered'),
+      text('done'),
+    ]);
+    expect(result.ended_on_error).toBe(false);
+    expect((result.errors as string[])).toHaveLength(1);
+  });
+
+  it('is false for a clean finish', () => {
+    const result = score([text('all six read'), event('step_finish'), text('TOTAL=165')]);
+    expect(result.ended_on_error).toBe(false);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('does not fail on a transcript it cannot read', () => {
+    expect(score(['not json at all', '{', '[]']).ended_on_error).toBe(false);
+  });
+});
