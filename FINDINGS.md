@@ -177,7 +177,65 @@ post-mortem.
 
 ---
 
-## 7. The result that argues for the mechanism
+## 7. A state can be perfect for the wrong reason
+
+This one was found by reading the transcript rather than the scoreboard, and it
+undercuts every `state_ok` in the project's history — including the ones in this
+document.
+
+The n=3 paper trial ended **30/30, total 1523** — the true sum, every §10.2 check
+green, and the answer also 1523. The transcript also contains:
+
+```
+execute: {"code": "return {total: 1466 + 57};"}   ->  { "total": 1523 }
+```
+
+The model could not sum thirty values from a bounded context. It summed them in
+the host's JavaScript sandbox and wrote the answer into the state. Before that it
+tried bash twice — `grep … | paste -sd+ | bc` — and `bc` was not installed. It
+had also hallucinated `tools.question` and `tools.shell` inside `execute`, so it
+was guessing at the host's capabilities while doing it.
+
+`node scripts/census.mjs <transcript>` counts the attempts. On the same fixture,
+same model:
+
+| arm | schema | reads | other tools | sum-outsourced |
+| --- | --- | --- | --- | --- |
+| notes | — | 31 | 0 | **0** |
+| paper | `done` + `total` | 46 | 13 | **3** |
+| paper | `done` + `total` + `values` | 84 | 24 | **5** |
+
+**Zero for the control.** It summed thirty values in its head, with the
+transcript in front of it, and was right. The bounded context is what made the
+numbers unreachable, and the model's answer was to reach outside the mechanism
+for them.
+
+**`values` is refuted twice, independently.** Finding 2 was the desynchronisation
+— 27 values against 9 filenames. This is the second reason: a field that invites
+recomputation was read by the model as permission to *call something that
+recomputes*. Five attempts across four languages, and 84 reads for 30 files.
+
+**What this does to the rest of the document.** A correctness signal that the
+paper arm satisfies by computing the answer outside the state is not a
+correctness signal. §10.2's check 1 asks whether the state holds the right
+number; it cannot ask whether the model arrived at that number by the mechanism
+the state is supposed to be carrying. Every `state_ok` in this project, mine
+included, should be read as *"the state holds a number equal to the truth"*, not
+as *"the state accumulated the truth"*.
+
+**Why nothing in the paper catches it.** §4.1 puts the schema in the operator's
+hands and §6.2 checks types. Neither can know that the arithmetic happened in a
+`shell` tool three calls earlier, and §2's rule is about what the model is *sent*
+— the sandbox is the host's, not the transcript's. This is the same shape as
+finding 1: two prescribed clauses composing into something the paper does not
+anticipate.
+
+**Reproduction.** `node scripts/census.mjs <transcript.jsonl> [...]` on any run
+directory. No model required.
+
+---
+
+## 8. The result that argues for the mechanism
 
 Same task, same model, same fixture, one variable: whether the model could see
 its own transcript.
@@ -201,11 +259,11 @@ measurement in this project where the state and the mechanism are separated from
 everything else — same model, same fixture, same task, one switch.
 
 **What it does not show.** It does not show the mechanism saving tokens, which is
-finding 8.
+finding 9.
 
 ---
 
-## 8. Where the saving goes
+## 9. Where the saving goes
 
 Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
 transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and

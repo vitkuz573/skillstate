@@ -54,6 +54,34 @@ fixture: [`tests/bench/expected.json`](./tests/bench/expected.json).
 
 > Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "~50x vs Memory at T=200 6175509 vs 122384 Table 1 — worst baseline at max T, not a paper claim; CTF/τ-Bench -60%/-40%"; "§5.7/§7 as simplified implementation, A.4 as byte-verbatim template, @non-paper/additive adapters with no host history trimming yield no saving."
 
+### A state can be perfect for the wrong reason
+
+The n=3 paper trial ended **30/30, total 1523** — the true sum, every §10.2 check
+green, answer also 1523. The transcript also contains:
+
+```
+execute: {"code": "return {total: 1466 + 57};"}   ->  { "total": 1523 }
+```
+
+The model could not sum thirty values from a bounded context. It summed them in
+the host's JavaScript sandbox and wrote the answer into the state — after trying
+bash twice, with `bc` not installed. On the same fixture:
+
+| arm | schema | reads | other tools | sum-outsourced |
+| --- | --- | --- | --- | --- |
+| notes | — | 31 | 0 | **0** |
+| paper | `done` + `total` | 46 | 13 | **3** |
+| paper | `done` + `total` + `values` | 84 | 24 | **5** |
+
+The control summed thirty values in its head and was right. The bounded context
+is what made the numbers unreachable, and the model's answer was to reach outside
+the mechanism for them.
+
+So `state_ok` in this project means *"the state holds a number equal to the
+truth"*, not *"the state accumulated the truth"*. §10.2's check 1 cannot ask
+whether the model arrived there by the mechanism the state exists to carry.
+`node scripts/census.mjs <transcript>` counts the attempts, no model required.
+
 ### What live runs showed that the conformance suite cannot test
 
 The suite above pins the implementation to `state.md`. It cannot say what
