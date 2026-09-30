@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { SkillStateRuntime } from '@skillstate/core';
 import type { LLMFn, ActionExecutor } from '@skillstate/core';
 import { TokenTracker } from '@skillstate/core';
-import { PromptTransformer } from '@skillstate/core';
+import { PromptTransformer, GENERIC_PROCEDURE_SPEC } from '@skillstate/core';
 import type {
   ProceduralSpec,
   Observation,
@@ -363,5 +363,58 @@ describe('§4.3 primary metrics — exactly three fields (bookkeeping separate)'
     expect(report.metrics.totalTokens).toBe(600);
     expect(report.metrics.totalChars).toBe(600);
     expect(report.metrics.stepCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The spec's own text is part of what reaches the model, so it is part of
+// fidelity. These guard the failure mode that cost a run: a clause added to
+// stop a behaviour, which then described that behaviour closely enough to invite
+// it.
+// ---------------------------------------------------------------------------
+
+describe('GENERIC_PROCEDURE_SPEC.instructions is descriptive, not directive', () => {
+  const spec = GENERIC_PROCEDURE_SPEC;
+  const text = spec.instructions;
+
+  it('carries no prohibition', () => {
+    // The removed clause was "a null value means a field no longer applies - it
+    // is not a way to finish up". It was two errors at once: it misdescribed
+    // the merge (a deleted key is absent, not inapplicable) and it stated a rule
+    // the paper does not contain. Worse, it invited the behaviour it was
+    // written to prevent, and the erasure in FINDINGS 1 is what came back.
+    for (const pattern of [
+      /\bnot a way to\b/i,
+      /\bnever\b/i,
+      /\bdon'?t\b/i,
+      /\bmust not\b/i,
+      /\bdo not\b/i,
+      /\bshould not\b/i,
+      /\bavoid\b/i,
+    ]) {
+      expect(text, `instructions now contain a prohibition: ${pattern}`).not.toMatch(pattern);
+    }
+  });
+
+  it('describes null once, with the paper\'s word for it', () => {
+    // §3.1 rule 2: null removes the key, and "it is not set to any sentinel".
+    // A second, softer description of the same thing is how the two ended up
+    // contradicting each other in one instructions block.
+    const mentions = text.match(/null/gi) ?? [];
+    expect(mentions.length).toBe(1);
+    expect(text).toMatch(/a null value deletes that key/i);
+  });
+
+  it('names every schema field, and no field that does not exist', () => {
+    // §4.1: the schema is authored once per domain and is what makes the state
+    // well-defined without a conversation. A spec whose prose and schema
+    // disagree is worse than either alone.
+    for (const key of Object.keys(spec.schema)) {
+      expect(text, `${key} is declared but never described`).toContain(key);
+    }
+    const described = [...text.matchAll(/^- (\w+)\s{2,}/gm)].map((m) => m[1]!);
+    for (const key of described) {
+      expect(spec.schema, `${key} is described but not declared`).toHaveProperty(key);
+    }
   });
 });
