@@ -10,6 +10,25 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
+**How to read a number in this document.** Three of them were confidently wrong
+for most of a day — a correctness column, an erasure count, and a lag rate — each
+a counter that ran, printed, and was never compared against a second opinion.
+Two of them are corrected in place with the counter that produced them, so the
+mistake is as findable as the finding. Where a section reports one trial it says
+so; `n=3` appears where three ran, and at n=3 nothing here supports a claim about
+accuracy in either direction.
+
+**Reproduction.** Every figure comes from a script that runs no model:
+
+```
+node scripts/census.mjs     <run>/out.json [...]   # the counters in 1, 3, 4, 10
+node scripts/replay-at.mjs  <run>/out.json         # SUM |A_t| and eq. 8, in section 14
+node scripts/crossover.mjs <paper>/ <notes>/       # the H ceiling, in section 14
+```
+
+`just ab-blind` produces the runs. `npm run build` first — these import the
+compiled core, so the merge they use is the merge the runtime uses.
+
 ---
 
 ## 1. The erasure mechanism, exactly
@@ -61,11 +80,11 @@ it is *not* the defaults, and asserts that a second step does not re-seed it.
 Asserting only the first would pass against the wrong implementation. The rate
 is counted by `scripts/census.mjs`, and the counter had to be corrected first: it
 fired on patches that merely omitted fields, and sparse is the *definition* of a
-patch. See `1b`.
+patch. See section 3.
 
 ---
 
-## 1a. Why this was almost shipped as the opposite claim
+## 2. Why that was nearly shipped as the opposite claim
 
 The erasure was first found and described as a state *reset* — "replaced with
 the schema's defaults, and `create_initial_state` then looks like a fresh
@@ -83,7 +102,7 @@ was *absent*, which is true under both accounts.
 
 ---
 
-## 1b. A count that was wrong in the direction that flattered the finding
+## 3. A count that was wrong in the direction that flattered the finding
 
 I reported **9 erasures in 45 patches** — a fifth of the steps. The counter fired
 on patches that merely *omitted* fields. Nine of that run's forty-five patches
@@ -94,7 +113,7 @@ deletions, and the real count was **0**.
 The direction matters. A finding that reads "models erase the state in a fifth of
 all steps" is a much stronger claim than "this happened once", and it was
 manufactured by a predicate that could not tell an absent key from an absent
-*mention*. The erasure was still real — it is finding 1, and it is one instance
+*mention*. The erasure was still real — it is section 1, and it is one instance
 in 112 patches across four runs — but the evidence is a single self-contradicting
 patch, not a rate.
 
@@ -110,7 +129,7 @@ blind probe's correctness column was one. This was another.
 
 ---
 
-## 1c. The re-reads, and a counter that was wrong about why
+## 4. The re-reads, and a second counter that was wrong
 
 `scripts/census.mjs` counts four things per run. Same model, same 30 files, same
 truth:
@@ -128,7 +147,7 @@ day, and the cause was in the counter: it compared a read's **basename** against
 the **relative path** the model records, so `cfg1.ts` never matched `src/cfg1.ts`
 and every read looked unnamed. The number was confident, plausible, produced by a
 script, and wrong — which is the same failure as the blind probe's correctness
-column and as the erasure count in `1b`. Three of this document's numbers came
+column and as the erasure count in section 3. Three of this document's numbers came
 from counters nobody compared against a second opinion.
 
 **So what causes 37% of reads to be repeats?** Not the state trailing the work.
@@ -138,7 +157,7 @@ consecutive: `cfg7, cfg7, cfg8, cfg7, cfg8, cfg7` — the same two files, back a
 forth, before it moves on. It is not losing track of progress; it is not
 confident in a value it has already accumulated, and it goes back to check.
 
-That is the arithmetic finding of §3 showing up as reads. The model reads
+That is the arithmetic finding in section 6 showing up as reads. The model reads
 `cfg15`, adds 84, never records the name, and later re-reads to recover the
 value it never wrote down. Re-reads and drift are the same behaviour: the model
 does not fully trust its own state, and the transcript is where it goes to
@@ -165,10 +184,10 @@ six sum-outsourcing attempts, and the `done` list built in a JavaScript loop.
 
 ---
 
-## 2. A schema with two views of one fact desynchronises
+## 5. A schema with two views of one fact desynchronises
 
 **Observed.** A spec carrying both `done: string[]` and
-`values: Record<string, number>` — the natural fix for finding 1, since
+`values: Record<string, number>` — the natural fix for section 1, since
 `values` makes progress legible without a list — reached **27 values against 7
 filenames in `done`**. The two fields were asserting the same thing and
 disagreeing by 20.
@@ -187,7 +206,7 @@ a *correct* total over a *wrong* set — is invisible to every check in §10.2.
 
 ---
 
-## 3. Arithmetically wrong state is indistinguishable from right state
+## 6. A complete state, numerically wrong
 
 **Observed, and it is one file.** Paper trial 2 of the n=3 ended with
 `{total: 1607, done: [all 30]}`. The truth is 1523. The state is 84 too high,
@@ -225,14 +244,14 @@ no opinion.
 
 **What was done.** Left as a finding, deliberately. A `values` map would let the
 runtime *recompute* rather than *accumulate*, turning the drift into a detectable
-difference — and finding 2 is what that cost: the model desynchronised the two
+difference — and section 5 is what that cost: the model desynchronised the two
 views 29-against-9 and escalated to a calculator. A fix that produces a worse
 failure is not a fix, so the honest outcome is that the state carries a model's
 arithmetic and nothing checks it.
 
 ---
 
-## 4. The model narrates an order it was given
+## 7. The model narrates an order it was given
 
 **Observed.** With the pending action placed in Oₜ as a directive — `[next step]
 read src/cfg2.ts` — the model answered with a sentence confirming it before
@@ -255,7 +274,7 @@ its number attached, is worth more than a fix nobody can price.
 
 ---
 
-## 5. A verdict read off the answer is not a verdict
+## 8. A verdict read off the answer is not a verdict
 
 **Observed.** Every fixture before the blind probe named the expected total in
 the task text — `output exactly TOTAL=1523`. The model echoed it. The scoreboard
@@ -277,7 +296,7 @@ back takes out 2 of 6 and 1 of 6 respectively.
 
 ---
 
-## 6. Where the two agree
+## 9. Where the two agree
 
 Worth recording, because a findings document that only lists failures reads as a
 post-mortem.
@@ -293,11 +312,11 @@ post-mortem.
   tool call carrying `__invalid_patch__` as its command: zero. §6.4's promise
   holds in a run, not only in a unit test. Pinned by test `4d`.
 - **§3.3's four clauses hold** under adversarial input, including the array
-  clause that made finding 1 expressible in the first place.
+  clause that made section 1's mechanism expressible in the first place.
 
 ---
 
-## 7. A state can be perfect for the wrong reason
+## 10. A state can be perfect for the wrong reason
 
 This one was found by reading the transcript rather than the scoreboard, and it
 undercuts every `state_ok` in the project's history — including the ones in this
@@ -347,7 +366,7 @@ as *"the state accumulated the truth"*.
 hands and §6.2 checks types. Neither can know that the arithmetic happened in a
 `shell` tool three calls earlier, and §2's rule is about what the model is *sent*
 — the sandbox is the host's, not the transcript's. This is the same shape as
-finding 1: two prescribed clauses composing into something the paper does not
+section 1: two prescribed clauses composing into something the paper does not
 anticipate.
 
 **Reproduction.** `node scripts/census.mjs <transcript.jsonl> [...]` on any run
@@ -355,7 +374,7 @@ directory. No model required.
 
 ---
 
-## 7a. The state that is hardest to keep right is the one §4.1 requires
+## 11. The state that is hardest to keep right is the one §4.1 requires
 
 **What it is.** The model is handed a set of files and asked to record which it
 has read. §4.1 insists on a *set*, not a count: a count is not well-defined
@@ -387,7 +406,7 @@ answer. An implementation that cannot own the executor — this one, on this hos
 
 ---
 
-## 7b. The merge has no append, and the model was never told
+## 12. The merge has no append, and the model was never told
 
 **The gap.** §3.1 rule 1 is *"Add / overwrite"* — `Σ'[k] = v`, the value
 replaced. Rule 2 is delete. Rule 3 recurses only into *plain objects*. The
@@ -446,7 +465,7 @@ gives no way to know that in advance.
 
 ---
 
-## 8. The result that argues for the mechanism
+## 13. What the three trials actually show
 
 Same task, same model, same fixture, one variable: whether the model could see
 its own transcript. Three trials per arm.
@@ -481,11 +500,11 @@ the mechanism's *purpose*: the state is the only record available when the
 transcript is not, and in every bounded trial the model used it.
 
 **What it does not show.** It does not show the mechanism saving tokens, which is
-finding 9.
+section 14.
 
 ---
 
-## 9. Where the saving goes
+## 14. Where the saving goes
 
 Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
 transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
