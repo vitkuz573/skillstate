@@ -892,12 +892,20 @@ project's record** rather than an optional side channel, and — after
 `DRIFT_NOTICE_AFTER_TURNS` model requests with no change — that the file has
 not moved.
 
-**Be clear about what that second half is worth.** It was measured twice, on
-two models, and it did nothing: a 40-file run, notice sent at request 12, 30
-requests after it, zero writes — while the model answered the task correctly
-throughout. A model told a fact about its own silence keeps being silent, and
-this one never calls `skillstate_update` in a long read-only run. The notice is
-kept because it is honest and cheap, not because it is proven to help.
+**Be clear about what that second half is worth.** It was measured on two models
+at 40 and 70 files and did nothing: the notice sent at request 12, thirty requests
+after it, zero writes, while the model answered correctly throughout.
+
+At 30 files on a different model the picture is not "never" but "unreliable" —
+one of three control trials wrote no state at all, and one wrote a complete one.
+And the two that did write reached the tool in a way the notice was never built
+around: **from inside the host's `execute` sandbox**, as
+`await tools.skillstate_update({patch: …})`, thirty-one times in one run. So the
+model does use the tool when it decides to; what varies is whether it decides to,
+and a sentence about its own silence does not move that.
+
+The notice is kept because it is honest and cheap, not because it is proven to
+help. What the measurements support is a rate, not a control.
 
 Notes mode is therefore advisory, and honestly so. If you need the state to be
 load-bearing rather than merely available, that is what [paper
