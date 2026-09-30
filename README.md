@@ -116,6 +116,37 @@ verify that the content of a patch is a correct or desirable decision"*, which i
 a patch that is **wrong**. It does not name a patch that is **well-formed and
 stale**, and no amount of better validation reaches that one.
 
+There is also a cost §3.3 does not price. The merge has **no append**: rule 1
+overwrites, rule 2 deletes, rule 3 recurses only into plain objects, and the
+contract closes with *"any non-object value (including arrays) is an atomic
+replacement target"*. So a growing set is O(n) per step, and its failure is a
+mistyped rewrite rather than a missed append. At 90 files it shows:
+
+```
+read  cfg11.ts
+patch total=559  done=11       <- clean alternation
+read  cfg12.ts
+read  cfg12.ts                 <- a re-read inside one turn
+patch total=629  done=1        <- the list collapsed from eleven to one
+```
+
+Twenty reads, twelve distinct, `done: 3/90`, base prompt 97% of a full Aₜ. A
+patch carrying `{total: 629}` alone would have left `done` at eleven — sparse
+means the merge leaves it alone. The model rewrote the field and got it wrong, and
+the merge did exactly what it was told.
+
+It rewrote it because **A.4 says `<dict: your state updates>` and does not say the
+patch is sparse, nor that an array is replaced whole.** §3.1 knows both. Both are
+now stated in P, which §4.1 makes the operator's specification and which the model
+reads alongside A.4.
+
+If you author a schema, the choice §4.1 does not warn you about is this:
+
+| shape | cost per step | what breaks |
+| --- | --- | --- |
+| a set of filenames | O(n), rewritten whole | a mistyped rewrite at around ten entries |
+| a cursor (`next: 12`) | O(1), two scalars | only correct for ordered work |
+
 ### What live runs showed that the conformance suite cannot test
 
 The suite above pins the implementation to `state.md`. It cannot say what

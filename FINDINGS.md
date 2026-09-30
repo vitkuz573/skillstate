@@ -357,6 +357,64 @@ and executes it, so a step is one action and Σ cannot trail. There is no second
 answer. An implementation that cannot own the executor — this one, on this host
 — inherits the failure the mechanism was designed to make impossible.
 
+---
+
+## 7b. The merge has no append, and the model was never told
+
+**The gap.** §3.1 rule 1 is *"Add / overwrite"* — `Σ'[k] = v`, the value
+replaced. Rule 2 is delete. Rule 3 recurses only into *plain objects*. The
+contract closes with: *"treats any non-object value (including arrays) as an
+atomic replacement target"*. So a list in Σ can only be replaced whole, and there
+is no operator that appends to it.
+
+That is not a defect — it is what makes the operator a small, portable,
+deterministic function. But it has a cost the paper does not price: **a growing
+set is O(n) per step, and its failure mode is a mistyped rewrite rather than a
+missed append.**
+
+**Measured, 90 files.**
+
+```
+read   cfg11.ts
+patch  total=559  done=11       <- clean alternation, growing steadily
+read   cfg12.ts
+read   cfg12.ts                 <- a re-read inside one turn
+patch  total=629  done=1        <- the list collapsed from eleven to one
+```
+
+Everything after rebuilt from one. Twenty reads, twelve distinct, `done: 3/90`,
+and the base prompt 97% of a full `Aₜ` because there was almost no state left to
+carry. A single patch carrying `{total: 629}` would have left `done` at eleven,
+because that is what sparse means — the merge would have left it alone. The model
+rewrote the field and got it wrong, and the merge did exactly what it was told.
+
+**Why the model rewrote it.** A.4 says `<dict: your state updates>`. It does not
+say the patch is sparse, and it does not say an array is replaced whole. §3.1
+knows both. A model reading only A.4 can reasonably conclude it must resend the
+state, and a model told about sparseness but not about arrays can conclude the
+other thing — "leave the list alone" — which is the same paragraph read the other
+way.
+
+**What was done.** Both clauses went into P, which §4.1 makes the operator's
+procedural specification and which the model reads next to A.4. It is §3.1's own
+sentences, stated descriptively, and a test asserts they are **adjacent** — the
+failure of having one without the other is a model that concludes "send nothing"
+from "a field you omit is untouched". Re-measuring at 90 files with the
+sparseness clause alone is the test of which half was load-bearing.
+
+**The trade-off this exposes for a spec author**, which §4.1 does not mention:
+
+| schema shape | cost per step | what breaks |
+| --- | --- | --- |
+| a set of filenames | O(n) — rewritten whole | a mistyped rewrite at around ten entries |
+| a cursor (`next: 12`) | O(1) — two scalars | only correct for ordered work |
+
+§4.1 insists on a set over a count because a count is not well-defined without a
+conversation. That is right, and it is a choice with a scaling consequence the
+section does not say out loud. An author picking a set for ordered work is
+paying O(n) per step to record what a cursor would record in O(1), and the paper
+gives no way to know that in advance.
+
 
 ---
 
