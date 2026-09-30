@@ -322,12 +322,17 @@ Thirty files, three trials each, spans of the transcripts' own timestamps:
 | notes — transcript | 1.7, 5.5, 9.1 min |
 | paper — bounded | **15.6, 21.6, 34.6 min** |
 
-`§3.3` counts characters, and by characters the bounded arm wins by 46.9x. The
-character count does not see that a turn carrying `Aₜ` also costs the host
-re-sending its own context, re-rendering the state hint, and running the step
-boundary — so the number the paper defines and the number a user pays point in
-opposite directions. **Both are real and the mechanism's advantage is in the one
-the paper measures.** Anyone deciding whether to use this should read both.
+`§3.3` counts characters, and by characters the bounded arm wins — by **7.9x at
+sixty files against a control that did its job properly**, which is the comparison
+this page is built around, and by 46.9x at ninety against a control that kept only
+10 of 90 filenames in its state. **The first number is the one to trust and the
+second is the one that gets quoted, because the ratio depends on how much the
+control chose to keep.** The character count also does not see that a turn carrying
+`Aₜ` costs the host re-sending its own context, re-rendering the state hint, and
+running the step boundary — so the number the paper defines and the number a user
+pays point in opposite directions. **Both are real and the mechanism's advantage is
+in the one the paper measures.** Anyone deciding whether to use this should read
+both.
 
 It is also a hard operational limit, not only a comparison: the slowest
 thirty-file run used 2075 of the stand's 2400 seconds, **87% of the harness budget
@@ -342,7 +347,10 @@ the next one says so by itself. The records for all of this are in
 against it — against the control run that kept every filename.** At 90 files that
 control run needed 192 tool calls and the bounded arm 128, so the bounded arm pays
 the host's overhead *less* often as well as sending 46.9x less content, and the
-ceiling stops binding.
+ceiling stops binding — against THAT control. Against the 96-call one the bounded
+arm makes 32 more requests and the ceiling is back at +37,917, and at sixty files
+against a proper control it makes twelve more with the ceiling at +266,808. **The
+sign of this conclusion is a property of the control, not of the mechanism.**
 
 **Name the run, because the other control run is 96 calls.** Both control runs at
 ninety files read all ninety and answer 4559 correctly; one kept all 90 filenames
