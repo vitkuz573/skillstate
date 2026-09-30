@@ -267,6 +267,7 @@ reproduces eq. 8 exactly. Re-derived from the transcripts in
 | `30-files/p-2` | 30 | 47 | 117,229 | 2494 | 2,813,496 | **24.00x** | 24.00 |
 | `30-files/p-3` | 30 | 65 | 161,861 | 2490 | 5,341,413 | **33.00x** | 33.00 |
 | `90-files/p-1-ceiling100` | 90 | 130 | 371,747 | 2860 | 24,349,428 | **65.50x** | 65.50 |
+| `60-files/p-1` | 60 | 164 | 463,655 | 2827 | 38,251,537 | **82.50x** | 82.50 |
 | `90-files/p-1-ceiling200` | 90 | 125 | 361,971 | 2896 | 22,804,173 | **63.00x** | 63.00 |
 
 **Exact on all five, and exact for a visible reason:** `mean |Aₜ|` barely moves

@@ -1,6 +1,7 @@
 {
   "_source": "node scripts/replay-at.mjs <run>/out.json — SUM |A_t| is the sum of |A_t| over every patch, replayed through the runtime's own merge",
-  "_note": "eq. 8 is (T+1)/2 with T = patches_replayed. It is exact on every run here, and exact because A_t barely moves relative to its own size.",
+  "_note": "eq. 8 is (T+1)/2 with T = patches_replayed. Exact on every run here, and exact because mean |A_t| barely moves relative to its own size.",
+  "_completed": "60-files/p-1 is the only run that both completed and is correct: 60/60, total equal to the truth, and the answer equal to it. The two 90-file runs were killed by the stand’s wall clock.",
   "runs": {
     "30-files/p-1": {
       "truth": 1523,
@@ -49,6 +50,22 @@
       "tool_calls": 45,
       "final_done": 30,
       "final_total": 1523
+    },
+    "60-files/p-1": {
+      "truth": 3075,
+      "files": 60,
+      "transcript_bytes": 732098,
+      "patches_replayed": 164,
+      "sum_a_chars": 463655,
+      "mean_a_chars": 2827,
+      "a_first_chars": 2271,
+      "a_last_chars": 3000,
+      "prefix_sum_baseline_chars": 38251537,
+      "eq8": 82.5,
+      "theoretical": 82.5,
+      "tool_calls": 136,
+      "final_done": 60,
+      "final_total": 3075
     },
     "90-files/p-1-ceiling100": {
       "truth": 4559,

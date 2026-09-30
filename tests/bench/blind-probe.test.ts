@@ -915,7 +915,7 @@ group('the crossover rows name the runs they came from', () => {
     // 59 against 31 at thirty files, 128 against 192 and 128 against 96 at ninety,
     // all re-derive today. A scaling table elsewhere has a `60` in it and that is
     // a file count, so only rows about requests are checked.
-    const realCounts = new Set(['31', '45', '59', '61', '64', '84', '96', '128', '134', '192']);
+    const realCounts = new Set(['31', '45', '59', '61', '64', '67', '84', '96', '124', '128', '134', '136', '192']);
     for (const [name, doc] of [
       ['FINDINGS.md', findings],
       ['README.md', readme],

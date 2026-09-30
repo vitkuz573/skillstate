@@ -832,6 +832,7 @@ runtime's own merge, with `node scripts/replay-at.mjs <run>/out.json`:
 | `30-files/p-2` | 30 | 47 | 117,229 | 2494 | 2,813,496 | **24.00x** | 24.00 |
 | `30-files/p-3` | 30 | 65 | 161,861 | 2490 | 5,341,413 | **33.00x** | 33.00 |
 | `90-files/p-1-ceiling100` | 90 | 130 | 371,747 | 2860 | 24,349,428 | **65.50x** | 65.50 |
+| `60-files/p-1` | 60 | 164 | 463,655 | 2827 | 38,251,537 | **82.50x** | 82.50 |
 | `90-files/p-1-ceiling200` | 90 | 125 | 361,971 | 2896 | 22,804,173 | **63.00x** | 63.00 |
 
 **Exact on all five**, and exact for a visible reason: `mean |Aₜ|` barely moves
@@ -847,11 +848,21 @@ the record, which is the same failure as the overwritten `p-1` and the same reas
 `measurements/` and its test now exist.
 
 **And the length axis is the one that matters, more strongly than the old table
-claimed.** T went 45 → 130 (2.89x) and Σ\|Aₜ\| went 3.28x — linear in T, with
-`mean |Aₜ|` up only 14%. The prefix-sum baseline over the same runs went 9.3x,
-which is quadratic (2.89² = 8.35, the rest is file sizes growing). **So the
-reduction ratio itself grows with length: 23.00x at 45 steps, 65.50x at 130.** The
-paper's §3.3 predicts exactly that, and the old "56% growth" understated it.
+claimed.** Σ\|Aₜ\| grows linearly in T and the prefix-sum baseline grows
+quadratically, so the ratio itself rises with length: **23.00x at 45 patches,
+65.50x at 130, 82.50x at 164.** `mean |Aₜ|` is the reason it stays exact — 2490 at
+T=45 and 2827 at T=164, a 13% spread across a 3.6x difference in length, so the
+prefix sum collapses onto the closed form every time.
+
+**The largest of those is also the only one that is both complete and correct.**
+The two ninety-file runs were killed by the stand's wall clock; the thirty-file
+ones finished but two of three have a wrong total; and `60-files/p-1` — 60 of 60
+files, final state 3075 against a truth of 3075, and the answer 3075 — carries
+the largest reduction anyone has measured here. **The cost claim and the accuracy
+claim do not have to be traded against each other, because the run that makes the
+cost claim strongest is the run that got the answer right.** That was not
+demonstrable before today, and every previous row was making it look like a
+trade-off.
 
 The condition, stated as `scripts/crossover.mjs` states it — the host's per-call
 overhead below which the bounded context wins:
@@ -916,6 +927,127 @@ here than the claim, and 81% is the number that says so.
 `npm run build`. It runs no model and reads no verdict.
 
 ---
+
+## 16. The run that finally completed, and the shape of its mistake
+
+Sixty files, truth 3075, the same adapter and the same fixture shape, **both arms
+run to completion**. The first side-by-side above thirty files in this document, and
+the first where the bounded arm was right.
+
+| | paper — bounded | notes — transcript |
+| --- | --- | --- |
+| run | `60-files/p-1` | `60-files/n-1` |
+| files in `done` | **60/60** | **60/60** |
+| final state total | **3075** | **3075** |
+| `TOTAL=` it finished on | **3075** | **3075** |
+| `TOTAL=` it gave first | 3703, for fifty turns | 3075, first and only |
+| state verdict | **true** | **true** |
+| answer verdict | **true** | **true** |
+| why it stopped | `terminal`, 64 steps of 400 | — |
+| wall clock | **2397.9 s** | **238.0 s** |
+| `at_timeout` | false | false |
+| `ended_on_error` | false | false |
+| tool calls | 136 | 124 |
+| reads | 67 | 61 |
+| sum-outsourcing attempts | 31 | 3 |
+| `Σ\|Aₜ\|` | 463,655 chars | — |
+| eq. 8 | **82.50x** | — |
+| control's prefix-sum context | — | 3,665,348 chars |
+| content ratio | — | **7.9x** |
+| extra host round-trips | — | **+12** |
+| H ceiling | — | **266,808** chars/call |
+
+**On accuracy they tie, and that is the first time these two arms have.** On
+content the bounded arm wins **7.9x**; on wall clock it loses **10.1x**; and it
+makes **twelve more** requests than the control.
+
+**And 7.9x is the honest number where 46.9x was the flattering one.** The ninety-
+file comparison quoted 46.9x, and it quoted it against a control run that kept 10 of
+90 filenames in its state and answered from its own arithmetic — a short prefix-sum
+of 17.4M characters measured against a *thorough* one is a small ratio. Against a
+control that did its job properly at sixty files the prefix-sum is 3.7M and the
+ratio is 7.9x. **The mechanism still wins, by a factor of eight, against the
+strongest control available** — and the number a reader was most likely to quote
+was four times too high because of which run it came from.
+
+**The round-trips went the other way here**, and the condition binds: the bounded
+arm makes 136 calls to the control's 124, so it pays the host's overhead twelve
+more times, and it wins only while the host re-sends under 266,808 characters per
+call. At ninety files the ceiling went negative — but that was against a control
+that made 192 calls against its 128, and the same comparison against a 96-call
+control puts the ceiling back at +37,917. **The sign of the ninety-file conclusion
+is a property of the control, not of the mechanism.**
+
+| | value |
+| --- | --- |
+| files in `done` | **60/60** |
+| final state total | **3075** (truth 3075) |
+| `TOTAL=` it finished on | **3075** |
+| `TOTAL=` it gave first | 3703, for fifty turns |
+| why it stopped | `terminal`, 64 steps of a 400 ceiling |
+| wall clock | 2397.9 s of a 3600 s cap |
+| `at_timeout` | false |
+| `ended_on_error` | false |
+| `Σ\|Aₜ\|` | 463,655 chars over 164 patches |
+| eq. 8 | **82.50x** against a theoretical 82.50 |
+| what the state was measured to be | `state_ok: true` |
+
+**It was wrong for most of its length and fixed itself.** `scripts/drift-profile.mjs`
+gives the curve:
+
+```
+  file   total   truth   error
+   18     1051     953     +98
+   24     1453    1251    +202
+   30     1788    1523    +265
+   39     2416    2052    +364
+   46     2854    2423    +431
+   51     3167    2634    +533
+   52     3357    2729    +628     <- peak
+   60     3075    3075       0     <- exact
+```
+
+Peak +628 on a truth of 3075, twenty per cent, accumulated over fifty-two steps and
+never once recovered on the way. Then, in the last eight, it came back to the
+truth. `RECOVERY`.
+
+**Three things follow, and the first is the reason this section exists.**
+
+**The shape is a different finding from the size, and a size check cannot see it.**
+`state_ok` is `true`. So is `answer_ok`. Any instrument reading the final value
+calls this run clean, and it is clean — but the fact that it was +20% wrong at
+file 52 is the more interesting fact, and it exists only in the curve. The
+classifier names four shapes and a fifth it admits it does not have; the first
+version of it called a rise-fall-rise curve a STEP, and the two mean different
+things about what went wrong.
+
+**The error was in the INCREMENTS, not the state.** A step shape is something lost
+and not replaced. Here `done` was complete the whole way and every file was
+counted; what was wrong was the arithmetic the model did on the way. That is a
+different defect, it has a different fix — nothing in §3 or §4 addresses it — and
+the run recovered from it without being told to.
+
+**And it was the same model that could not stop at 3703.** The first fifty answers
+were 3703. The scorer read the FIRST match and called the run `answer_ok: false` —
+a verdict read off a moment the run had already abandoned. Taking the last answer
+gives `true`, and the revision is reported alongside as `revised: true`, because a
+run that thought about it has told you something a run that was right first try has
+not.
+
+**What this does not change.** One run at one length with one model, per arm. It
+says the mechanism can carry sixty files and be right; it does not say it always
+will, and `30-files/p-2` is the same adapter finishing with a total 84 high. The
+step ceiling was raised to 400 and never bound — 64 steps — so nothing about
+§10.1's default is vindicated or indicted here. And the wall clock is not an
+improvement: **10.1x slower than the control at the same length**, which is the
+same direction as the 3.7x at thirty files and worse. §3.3 counts characters, and
+a session that patches on more turns lasts longer.
+
+**The run the numbers came from, and every field in them**, is in
+[`measurements/60-files/`](measurements/README.md). It is the first run in this
+document whose `plugin_live`, `build`, `run`, `at_timeout` and `ended_on_error` are
+all checked values rather than nulls, and the first where all five describe the
+same run correctly at once.
 
 ## 15. The plugin resolution ignores what you asked for
 
