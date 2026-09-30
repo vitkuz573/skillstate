@@ -42,18 +42,34 @@ set -euo pipefail
 MODEL="${1:-opencode-go/space-bunny-free}"
 TRIALS="${2:-3}"
 FILES="${3:-30}"
-# Decoy fields per file. This is the TRANSCRIPT-LENGTH axis, and it is separate
-# from FILES on purpose.
+# Decoy fields per file. Read the warning below before raising it.
 #
-# FILES sets how much arithmetic there is. DECOYS sets how much text the model
-# reads to do it. At 38 the whole transcript is 115k chars, which is short
-# enough that a host handing it over for free costs nothing — so the mechanism
-# has nothing to save and 30 files cannot say whether it pays. At 150 the same
-# thirty files read 480k chars, and now the question is real: does the bounded
-# context win once the transcript is expensive to carry?
+# FILES sets how much arithmetic there is. DECOYS was added to set how much text
+# the model reads to do it, on the assumption that bigger files mean a longer
+# transcript. THAT ASSUMPTION IS FALSE AND THE ASSUMPTION IS CHECKED, because
+# the host's read tool truncates.
 #
-# The truth is a function of FILES alone, so raising DECOYS does not move it.
+# Measured, same host, same session format:
+#
+#   40-line / 3,760-char file  ->  returned whole, "lines 1-40"
+#   152-line / 14,754-char file ->  returned as "lines 1-3", 250 chars
+#
+# So a file past roughly 3.8k chars is CUT to its first few lines. A fixture
+# built on larger files does not have a longer transcript; it has a SHORTER one,
+# and one that no longer contains the content the task needs. A 150-decoy run
+# measured 42,583 chars of transcript against 115,427 for the 38-decoy run — the
+# opposite of the intended direction, and invisible unless you read the
+# transcript back rather than the fixture.
+#
+# The transcript-length axis is FILES, and only FILES. A read that is not
+# truncated contributes its full size, so length comes from how many there are.
+# DECOYS stays as a knob for the arithmetic's difficulty, and this guard is what
+# keeps it from silently becoming a truncation knob.
 DECOYS="${4:-38}"
+
+# The host's read output budget, from the two measurements above. Not the paper's
+# number, not a guess: the smaller one passed whole and the larger one did not.
+READ_BUDGET_CHARS=3800
 ROOT="${BLIND_AB_ROOT:-/tmp/ss-blind-ab}"
 SEED="$ROOT/seed"
 SCRIPTER="$(dirname "$0")/blind-score.py"
@@ -97,6 +113,21 @@ for i in range(1, n_files + 1):
     with open(os.path.join(root, "src", f"cfg{i}.ts"), "w") as fh:
         fh.write("\n".join(body) + "\n")
 PY
+  # The truncation guard. A fixture that will be cut is a fixture whose
+  # transcript is not the length it looks like, and the run is then not a
+  # measurement of anything the caller asked for. Refuse rather than report.
+  biggest=$(wc -c "$SEED"/src/*.ts | grep -v total | sort -n | tail -1 | awk '{print $1}')
+  if [ "$biggest" -gt "$READ_BUDGET_CHARS" ]; then
+    echo "refusing to run: src/cfg$FILES.ts is $biggest chars, past the host's" >&2
+    echo "read budget of $READ_BUDGET_CHARS. Reads past it are truncated to the" >&2
+    echo "first few lines, so the transcript would be SHORTER, not longer." >&2
+    echo >&2
+    echo "For a longer transcript, raise FILES (argument 3). A read that is not" >&2
+    echo "truncated contributes its whole size; a bigger one contributes less." >&2
+    echo >&2
+    echo "  scripts/ab-blind.sh $MODEL $TRIALS 90 $DECOYS   # 90 files instead" >&2
+    exit 3
+  fi
   printf '{"name":"blind-ab","type":"module"}\n' > "$SEED/package.json"
   mkdir -p "$SEED/node_modules/@skillstate"
   ln -sfn "$(cd "$(dirname "$0")/.." && pwd)/packages/opencode" \
