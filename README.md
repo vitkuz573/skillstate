@@ -194,15 +194,29 @@ If you author a schema, the choice §4.1 does not warn you about is this:
 
 ### What live runs showed that the conformance suite cannot test
 
-The suite above pins the implementation to `state.md`. It cannot say what
-happens when a model is handed that implementation, and the answers are not what
-you would guess. Six findings, each with the observation, why the paper's own
-clauses permit it, and what was done about it — state erasure that is
-well-typed by §6.2, a two-view schema that desynchronises 29-against-9, an
-arithmetic drift nothing in §1–§10 can detect, and the model narrating an order
-it was given back. Plus where the two agree.
+The suite above pins the implementation to `state.md`. It cannot say what happens
+when a model is handed that implementation, and the answers are not what you would
+guess. Fourteen findings in [`FINDINGS.md`](./FINDINGS.md), each with the
+observation, the paper clause that permits it, and what was done — a state erased
+by a patch §6.2 accepts, a schema whose two views of one fact desynchronise
+29-against-9, a complete state that is 84 too high because one file's name was
+never recorded, a model narrating an order quoted back from its own past, and a
+merge operator with no append. Plus the measurements that argue for the mechanism
+and the two that bound it.
 
-[`FINDINGS.md`](./FINDINGS.md)
+Read the preamble there before a number. Three of them were confidently wrong for
+most of a day — a correctness column, an erasure count, a lag rate — each a counter
+that ran, printed, and was never compared against a second opinion. Corrections
+are kept in place next to the findings they correct.
+
+**Every figure comes from a script that runs no model**, so the whole record is
+checkable without a provider:
+
+```
+node scripts/census.mjs     <run>/out.json [...]   # re-reads, lag, erasure, outsourcing
+node scripts/replay-at.mjs  <run>/out.json         # SUM |A_t| and eq. 8
+node scripts/crossover.mjs <paper>/ <notes>/       # the ceiling on the host's overhead
+```
 
 The one measurement that argues *for* the mechanism, with every other variable
 held fixed — same model, same fixture, one switch:
