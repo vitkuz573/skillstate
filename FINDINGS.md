@@ -1112,8 +1112,34 @@ resolves that build by workspace rather than by what `opencode.json` asks for.
 
 The measurements stand, and now for a checked reason rather than an assumed one.
 
-**The open question stays open.** Whether `ctx.session.generate` is one model call
-with no agent loop is still unknown, because nothing has run it.
+**And the open question closes, from the installed type declarations — which is
+where it should have been answered a day ago.**
+
+    ctx.session.generate(input)  ->  Promise<{ text: string }>
+    ctx.generate.text(input)      ->  Promise<{ text: string }>
+
+One model call, returning text. No step counter, no action dispatch, no
+continuation, and nothing in the return type by which a caller could say *now
+execute the action inside that answer*. §10.1's `Run(...)` needs the runtime to own
+three things — the model call, the executor, and the decision to take another step —
+and this host can lend the first and has no surface for the other two.
+
+**So the adapter is not an accident of this host's design. It is required by what
+the host offers**, and the whole shape of this package — the `RuntimeDriver`, the
+`session.step.ended` handler, the `CONTINUE_ACTION` wake-up, the reason the paper
+mode has to reach the host's event stream at all — follows from a return type of
+`{ text: string }`.
+
+**A day of probe packaging to answer a question the types answered on the first
+line of the file.** The probe was the right instinct and the wrong instrument: it
+asked the host to *do* something to find out what it could *do*, and the host's own
+declarations were sitting in `node_modules` the whole time. Same shape as the rest
+of this document — the answer was available and nothing looked at it, because a
+question you can *run* feels more like a question than one you can *read*.
+
+A test now pins the answer against the installed declarations, so if the host ever
+grows a looping `generate` — a step counter, an executor, a continuation — the
+project finds out instead of carrying an adapter it no longer needs.
 
 **Why it matters beyond the probe.** This host resolves plugins by workspace, not
 by the name in `opencode.json`. That is why `scripts/ab-blind.sh` works — its

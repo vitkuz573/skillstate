@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Answered: the host has no agent loop to borrow, so the adapter is not optional.**
+
+    ctx.session.generate(input)  ->  Promise<{ text: string }>
+    ctx.generate.text(input)      ->  Promise<{ text: string }>
+
+§10.1's `Run(P, Σ0, O0, llm, execute, isDone, maxSteps = 100)` needs the runtime to own
+three things: the model call, the executor, and the decision to take another step.
+This host lends the first. There is no step counter, no action dispatch and no
+continuation on the session domain, and the return type leaves no way to say *now
+execute the action inside that answer*.
+
+**So `RuntimeDriver`, the `session.step.ended` handler, the `CONTINUE_ACTION`
+wake-up and the fact that paper mode has to reach the host's event stream all
+follow from a return type of `{ text: string }`** — they are not an accident of this
+host's design. A test pins the answer against the installed declarations, so a host
+that grows a looping `generate` will be noticed rather than worked around.
+
+This question sat open for a day behind a probe plugin that could not load, because
+the host resolves plugins by workspace. The answer was in `node_modules` the whole
+time: a question you can *run* feels more like a question than one you can *read*.
+
 **Added: the records behind the numbers are in the repository, and a test reads
 them.**
 

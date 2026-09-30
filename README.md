@@ -142,7 +142,14 @@ doubt. Re-reads and the arithmetic drift are the same behaviour.
 That is the structural half: §5.1 has the runtime choose the action and execute
 it, one per step, so the model is never asked whether it believes its own state.
 This host's plugin has no execute capability and the agent loop batches, so it is
-asked every turn. Three prompt-level fixes have been tried and measured; all three
+asked every turn — and the absence of an execute capability is not incidental:
+
+    ctx.session.generate(input)  ->  Promise<{ text: string }>
+
+One model call, returning text. No step counter, no action dispatch, no
+continuation. §10.1's `Run(...)` needs the runtime to own the model call, the
+executor, and the decision to take another step; this host lends the first and has
+no surface for the other two. The adapter exists because of that return type. Three prompt-level fixes have been tried and measured; all three
 reached the model and all three were declined.
 
 There is a structural reason this is the interesting failure, and it is a point

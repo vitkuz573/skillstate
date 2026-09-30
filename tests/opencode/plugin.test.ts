@@ -377,3 +377,69 @@ describe('the run record', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+
+describe('the host has no agent loop to borrow', () => {
+  // §10.1's `Run(P, Σ0, O0, llm, execute, isDone, maxSteps = 100)` needs the
+  // runtime to own three things: the model call, the EXECUTOR, and the decision to
+  // take another step. This host can lend the first.
+  //
+  // The question sat open for a day because the answer was being looked for with a
+  // probe plugin, and the probe could not load — the host resolves plugins by
+  // workspace, so asking for a package that does not exist loaded the one that
+  // does. The answer was in the installed type declarations the whole time.
+  //
+  //   ctx.session.generate(input) -> Promise<{ text: string }>
+  //   ctx.generate.text(input)     -> Promise<{ text: string }>
+  //
+  // One model call, returning text. No step counter, no tool dispatch, no
+  // continuation, no way for the caller to say "now execute the action in the
+  // answer". **So the adapter is not an accident of this host's design; it is
+  // required by what the host offers.** The runtime can own the model call, and it
+  // has to keep owning the other two.
+  // This test is in the `opencode` project and lives two directories below the
+  // repo root, resolved from the module rather than from `process.cwd()` — the
+  // mistake the plugin's own setup comment warns about, in a test about a host
+  // that resolves things by the wrong place.
+  const REPO = path.resolve(import.meta.dirname, '..', '..');
+  const types = (relative: string): string =>
+    fs.readFileSync(path.join(REPO, 'node_modules', ...relative.split('/')), 'utf-8');
+  const pluginTypes = (): string => types('@opencode/plugin/dist/promise/plugin.d.ts');
+  const clientTypes = (): string => types('@opencode/client/dist/promise/client.d.ts');
+
+  it('exposes generate on the context, and it returns text and nothing else', () => {
+    expect(pluginTypes()).toMatch(/readonly generate: GenerateApi;/);
+    // A return type that grew a step counter, an action, or a continuation would
+    // mean the host had started owning the loop, and this project's central
+    // architectural claim — that the adapter must exist — would be wrong.
+    const client = clientTypes();
+    expect(client).toMatch(/generate: \(input: import\([^)]*\)\.SessionGenerateInput[^)]*\)[\s\S]*?Promise<\{\s*text: string;\s*\}>/);
+    // And the OTHER generate, the stateless one on the context root, is the same
+    // shape — so there is no variant of it that is richer.
+    expect(client).toMatch(/text: \(input: import\([^)]*\)\.GenerateTextInput[^)]*\)[\s\S]*?Promise<\{\s*text: string;\s*\}>/);
+  });
+
+  it('has no executor or step surface on the session domain', () => {
+    // The two halves of the loop the runtime must own. If either appears here, the
+    // adapter's reason to exist weakens and someone should move the loop.
+    const session = types('@opencode/plugin/dist/promise/session.d.ts');
+    for (const forbidden of ['execute', 'step(', 'continue_', 'resume']) {
+      expect(session, `the session domain now offers ${forbidden}`).not.toMatch(
+        new RegExp(`readonly ${forbidden.replace('(', '\\(')}`),
+      );
+    }
+    // And what it does offer, so the test is not vacuous: a session can be
+    // prompted, generated for, interrupted and waited on.
+    for (const present of ['prompt', 'generate', 'interrupt', 'wait']) {
+      expect(session).toContain(present);
+    }
+  });
+
+  it('records the answer where the record already said it was open', () => {
+    // The open question is now closed, and a stale "open" is worse than a wrong
+    // "closed": someone will read it and not re-check.
+    const findings = fs.readFileSync(path.join(REPO, 'FINDINGS.md'), 'utf-8');
+    expect(findings).toMatch(/session\.generate/);
+    expect(findings).toMatch(/Promise<\{\s*text: string\s*\}>/);
+  });
+});
