@@ -199,7 +199,7 @@ export function recordEvent(path: string | undefined, type: string): void {
  * two here as well as the more available one.
  */
 /** Tool-result parts in the newest tool message, counted. */
-function countToolResults(messages: ReadonlyArray<{ role: string; content: unknown }>): number {
+export function countToolResults(messages: ReadonlyArray<{ role: string; content: unknown }>): number {
   const last = messages[messages.length - 1];
   if (last === undefined || last.role !== 'tool') return 0;
   if (!Array.isArray(last.content)) return 0;
@@ -209,6 +209,11 @@ function countToolResults(messages: ReadonlyArray<{ role: string; content: unkno
       part !== null &&
       String((part as { type?: unknown }).type).startsWith('tool-result'),
   ).length;
+}
+
+/** Whether the newest message carries a tool result. One definition, one use. */
+function hasToolResult(messages: ReadonlyArray<{ role: string; content: unknown }>): boolean {
+  return countToolResults(messages) > 0;
 }
 
 /** How much of an observation the diagnostic records. */
@@ -702,15 +707,20 @@ export const SkillStatePlugin = Plugin.define({
         // SKILLSTATE_STEP_BOUNDARY=1, and the default stays the behaviour that
         // measurably goes further. Turning it on is a claim to be measured, not
         // a setting to leave flipped.
-        // What the environment actually ran, counted from the host's own tool
-        // results. `RuntimeDriver.stepReport` reports this rather than
-        // asserting that nothing happened, which was true on the day it was
-        // written and is not a property of the code.
-        const ran = countToolResults(target.messages);
-        if (ran > 0) {
-          boundary.actionTaken(event.sessionID);
-          for (let i = 0; i < ran; i += 1) runtime?.noteExecution(event.sessionID);
-        }
+        // Two different questions, deliberately two different answers.
+        //
+        // Did an action run? That is the boundary's question and it is about the
+        // turn, so it asks the turn — `hasToolResult` looks at the newest message
+        // and does not care whether this hook has seen it before.
+        //
+        // How many ran, for the report? That is the driver's question and it has
+        // to be about *new* results: this hook runs on every model request, so a
+        // tool message still newest across two requests would be counted twice,
+        // and "2 actions ran" for one `read` is exactly the kind of lie the
+        // report exists to stop. So the driver keeps the watermark and the
+        // caller does not have to know it exists.
+        if (hasToolResult(target.messages)) boundary.actionTaken(event.sessionID);
+        runtime?.noteExecutions(event.sessionID, target.messages);
         if (stepBoundaryEnabled && boundary.reportRequired(event.sessionID)) {
           target.tools = {};
         }

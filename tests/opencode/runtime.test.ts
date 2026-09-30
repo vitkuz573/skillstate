@@ -229,6 +229,13 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
   // worse than no report.
   const driver = (): RuntimeDriver => new RuntimeDriver({ maxSteps: 100, prompt: ok });
 
+  /** A tool message carrying `n` tool results, as the host hands them over. */
+  const tools = (id: string, n: number) => ({
+    id,
+    role: 'tool',
+    content: Array.from({ length: n }, () => ({ type: 'tool-result', value: 'x' })),
+  });
+
   it('says nothing ran when the host ran nothing', async () => {
     const d = driver();
     void d.record('s', true);
@@ -244,8 +251,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     // workaround was a guess.
     const d = driver();
     void d.record('s', true);
-    d.noteExecution('s');
-    d.noteExecution('s');
+    d.noteExecutions('s', [tools('m1', 2)]);
     await d.advance('s', 'read src/cfg1.ts');
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 2 actions ran.');
   });
@@ -253,7 +259,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
   it('uses the singular for one, because a count of 1 is not a plural', async () => {
     const d = driver();
     void d.record('s', true);
-    d.noteExecution('s');
+    d.noteExecutions('s', [tools('m1', 1)]);
     await d.advance('s', 'x');
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 1 action ran.');
   });
@@ -263,7 +269,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     // fiction that grows without anything running.
     const d = driver();
     void d.record('s', true);
-    d.noteExecution('s');
+    d.noteExecutions('s', [tools('m1', 1)]);
     await d.advance('s', 'a');
     expect(d.stepReport('s')).toMatch(/1 action ran/);
 
@@ -275,7 +281,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
   it('keeps the two sessions apart', async () => {
     const d = driver();
     void d.record('a', true);
-    d.noteExecution('a');
+    d.noteExecutions('a', [tools('m1', 1)]);
     await d.advance('a', 'x');
     void d.record('b', true);
     await d.advance('b', 'y');
@@ -285,5 +291,108 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
 
   it('returns nothing before a step has run', () => {
     expect(driver().stepReport('never-started')).toBeUndefined();
+  });
+});
+
+describe('the count is of NEW results, because the context hook runs on every request', () => {
+  // This is the bug the watermark exists to prevent, and it was introduced by
+  // the fix that made the report truthful in the first place.
+  //
+  // The context hook is the only place the host's tool results are visible, and
+  // it fires on every model request. A tool message that is still the newest one
+  // across two requests — which happens whenever the model is re-asked before it
+  // has produced a message of its own — is counted once per request. So a
+  // single `read` would be reported as "2 actions ran", in the environment's own
+  // channel, about the environment's own work.
+  const driver = (): RuntimeDriver => new RuntimeDriver({ maxSteps: 100, prompt: () => Promise.resolve(true) });
+  const tools = (id: string, n: number) => ({
+    id,
+    role: 'tool',
+    content: Array.from({ length: n }, () => ({ type: 'tool-result', value: 'x' })),
+  });
+
+  it('counts the same tool message once, however many requests see it', async () => {
+    const d = driver();
+    d.noteExecutions('s', [tools('m1', 1)]);
+    d.noteExecutions('s', [tools('m1', 1)]);
+    d.noteExecutions('s', [tools('m1', 1)]);
+    void d.record('s', true);
+    await d.advance('s', 'read');
+    expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 1 action ran.');
+  });
+
+  it('counts a genuinely new message on top of the old one', async () => {
+    const d = driver();
+    d.noteExecutions('s', [tools('m1', 1)]);
+    expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(1);
+    expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(0);
+    void d.record('s', true);
+    await d.advance('s', 'read');
+    expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 2 actions ran.');
+  });
+
+  it('returns how much was new, so a caller can tell 0 from "not called"', () => {
+    // The boundary asks a different question — did an action run THIS turn — and
+    // conflating the two is what put the double count in.
+    const d = driver();
+    expect(d.noteExecutions('s', [tools('m1', 3)])).toBe(3);
+    expect(d.noteExecutions('s', [tools('m1', 3)])).toBe(0);
+  });
+
+  it('ignores a message with no tool results, and still advances', () => {
+    // A model message between two tool messages must not become the watermark in
+    // a way that loses the tool results behind it — so the watermark advances
+    // past everything, and only results after it count.
+    const d = driver();
+    const text = { id: 'm2', role: 'assistant', content: 'thinking' };
+    expect(d.noteExecutions('s', [tools('m1', 1), text])).toBe(1);
+    expect(d.noteExecutions('s', [tools('m1', 1), text, tools('m3', 2)])).toBe(2);
+  });
+
+  it('does not leak a watermark between sessions', () => {
+    const d = driver();
+    expect(d.noteExecutions('a', [tools('m1', 1)])).toBe(1);
+    // The same message id in a different session is a different message.
+    expect(d.noteExecutions('b', [tools('m1', 1)])).toBe(1);
+  });
+});
+
+describe('a trimmed history does not lose counts', () => {
+  // The watermark lives in a Map, not in the transcript, so a host that trims
+  // history takes the message it points at away. The rule is: if the watermark
+  // is not in the list, everything present is new. That over-counts nothing and
+  // loses nothing, and the alternative — refusing to count — would report "0
+  // actions ran" for a turn that demonstrably ran some.
+  const driver = (): RuntimeDriver => new RuntimeDriver({ maxSteps: 100, prompt: () => Promise.resolve(true) });
+  const tools = (id: string, n: number) => ({
+    id,
+    role: 'tool',
+    content: Array.from({ length: n }, () => ({ type: 'tool-result', value: 'x' })),
+  });
+
+  it('counts what is present when the watermark has been trimmed away', () => {
+    const d = driver();
+    expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(2);
+    // m1 is gone; m2 and m3 are not. m2 was counted before, so it must not be
+    // counted again — the watermark is found and the walk starts after it.
+    expect(d.noteExecutions('s', [tools('m2', 1), tools('m3', 1)])).toBe(1);
+  });
+
+  it('counts everything when the watermark names a message that is gone entirely', () => {
+    const d = driver();
+    d.noteExecutions('s', [tools('m1', 1)]);
+    expect(d.noteExecutions('s', [tools('m9', 1), tools('m10', 1)])).toBe(2);
+  });
+
+  it('reports nothing for an empty message list, and keeps the watermark', () => {
+    // An empty request must not MOVE the watermark. Moving it to nothing would
+    // make the next request's findIndex return -1, the walk would start at 0,
+    // and every already-counted result would be counted again — the exact bug
+    // the watermark is for, re-created by the fix for it.
+    const d = driver();
+    d.noteExecutions('s', [tools('m1', 1)]);
+    expect(d.noteExecutions('s', [])).toBe(0);
+    // m1 is still in this list and still counted, so it is not counted again.
+    expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(1);
   });
 });

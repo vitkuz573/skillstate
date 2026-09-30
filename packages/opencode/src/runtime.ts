@@ -114,6 +114,15 @@ export class RuntimeDriver {
    */
   readonly #executed = new Map<string, number>();
 
+  /**
+   * The id of the last message counted, per session.
+   *
+   * The context hook runs on every model request, so without this a tool
+   * message that stays newest across two requests is counted twice. See
+   * {@link noteExecutions}.
+   */
+  readonly #counted = new Map<string, string>();
+
   /** What {@link record} decided, so `advance` does not re-decide it. */
   readonly #decisions = new Map<string, 'retry' | 'advance'>();
   /** Every advancement made, for diagnostics and tests. */
@@ -275,13 +284,45 @@ export class RuntimeDriver {
   }
 
   /**
-   * Note that the environment executed something on this session's behalf.
+   * Note what the environment executed on this session's behalf, and return how
+   * much of it is new.
    *
-   * Called from the context hook, which is the only place the host's own tool
-   * results are visible. Called once per result, so the count is a count.
+   * The context hook is the only place the host's own tool results are visible,
+   * and it runs on EVERY model request. A tool message that is still the newest
+   * one across two requests — which happens whenever the model is re-asked
+   * before it has produced a message of its own — would therefore be counted
+   * twice, and a report of "2 actions ran" for one `read` is a lie of exactly
+   * the kind this whole method exists to stop.
+   *
+   * So the driver keeps a watermark per session: the id of the last message it
+   * counted, and only results after it are new. Idempotent by construction —
+   * calling it with the same messages twice is a no-op, which is also what makes
+   * it testable without a host.
    */
-  noteExecution(sessionID: string): void {
-    this.#executed.set(sessionID, (this.#executed.get(sessionID) ?? 0) + 1);
+  noteExecutions(sessionID: string, messages: ReadonlyArray<{ id: string; role: string; content: unknown }>): number {
+    const seen = this.#counted.get(sessionID);
+    // Everything up to and INCLUDING the watermark was already counted. Skipping
+    // only the matching id is not enough: a request that carries three new
+    // messages would advance the watermark three times, and the next request
+    // would re-count the first two.
+    const start = seen === undefined ? 0 : messages.findIndex((m) => m.id === seen) + 1;
+    let fresh = 0;
+    for (const message of messages.slice(start)) {
+      if (message.role === 'tool' && Array.isArray(message.content)) {
+        fresh += message.content.filter(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            String((part as { type?: unknown }).type).startsWith('tool-result'),
+        ).length;
+      }
+    }
+    const last = messages[messages.length - 1];
+    // A watermark that is not in this list means the host trimmed the history.
+    // Everything present is then new, and `start` is 0, so nothing is lost.
+    if (last !== undefined) this.#counted.set(sessionID, last.id);
+    if (fresh > 0) this.#executed.set(sessionID, (this.#executed.get(sessionID) ?? 0) + fresh);
+    return fresh;
   }
 
   /**
