@@ -940,20 +940,28 @@ project's record** rather than an optional side channel, and — after
 `DRIFT_NOTICE_AFTER_TURNS` model requests with no change — that the file has
 not moved.
 
-**Be clear about what that second half is worth.** It was measured on two models
-at 40 and 70 files and did nothing: the notice sent at request 12, thirty requests
-after it, zero writes, while the model answered correctly throughout.
+**Be clear about what that second half is worth.** The measurement that said "it
+does nothing" was reading a counter with a blind spot, and the counter is now
+fixed — so the honest statement is that the notice has never been measured
+properly.
 
-At 30 files on a different model the picture is not "never" but "unreliable" —
-one of three control trials wrote no state at all, and one wrote a complete one.
-And the two that did write reached the tool in a way the notice was never built
-around: **from inside the host's `execute` sandbox**, as
-`await tools.skillstate_update({patch: …})`, thirty-one times in one run. So the
-model does use the tool when it decides to; what varies is whether it decides to,
-and a sentence about its own silence does not move that.
+What was wrong: `turnsSinceWrite` and `stateWrites` reset only from the
+paper-mode state sink, and the sink is `mode !== 'paper' ? undefined : new
+PaperStateSink(...)`. **In notes mode there is no sink, so the counter never
+moved.** The notice fired at its threshold and reported silence for runs in which
+the model wrote the state on every step. Writes now reset it through the tool
+path, in both modes, and a refused patch does not — because §6.4 guarantees Σ is
+unchanged, so in that one case the state really has not moved.
 
-The notice is kept because it is honest and cheap, not because it is proven to
-help. What the measurements support is a rate, not a control.
+What survives from the earlier runs: the model reaches the tool in ways the
+notice was never built around — **from inside the host's `execute` sandbox**, as
+`await tools.skillstate_update({patch: …})`, thirty-one times in one trial, so
+there is not one direct call in that transcript. And at 30 files it writes state
+in 1 of 3 trials, unprompted.
+
+The notice is kept because it is honest and cheap. Whether it helps is now an open
+question with a working instrument behind it, which is a different and better
+position than the one it was in this morning.
 
 Notes mode is therefore advisory, and honestly so. If you need the state to be
 load-bearing rather than merely available, that is what [paper

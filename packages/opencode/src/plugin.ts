@@ -527,6 +527,14 @@ export const SkillStatePlugin = Plugin.define({
           store,
           sessions,
           scopeFor,
+          // Every write resets the drift counter, in every mode. The paper-mode
+          // sink resets it from the event stream; this is the notes-mode path,
+          // and without it the notice is a false statement for the whole of
+          // notes mode — the state is on disk and the counter never learns it.
+          onWrite: (scope) => {
+            turnsSinceWrite.set(scope, 0);
+            stateWrites.set(scope, (stateWrites.get(scope) ?? 0) + 1);
+          },
           ...(resolution.source === 'file' && spec !== undefined ? { schema: spec.schema } : {}),
         });
       }

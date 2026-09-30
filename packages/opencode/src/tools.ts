@@ -115,6 +115,21 @@ export interface ToolDeps {
    * own fallback schema as the project's would be a false claim.
    */
   readonly schema?: StateSchema;
+  /**
+   * Called after a patch is written, with the scope it was written to.
+   *
+   * The drift counter resets on it, and the counter is what the system prompt
+   * says out loud: "this state file has not changed across the last N steps of
+   * work". So it has to be reset by *every* write path, not just the one the
+   * paper-mode sink owns.
+   *
+   * Measured: in notes mode there is no sink, `stateWrites` never increments and
+   * `turnsSinceWrite` is never reset — so the notice fires at its threshold and
+   * reports silence for a run in which the model wrote the state on every step.
+   * The drift measurement that "the notice does not work" rested on was reading
+   * a counter that could not see the writes it was counting.
+   */
+  readonly onWrite?: (scope: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -421,6 +436,7 @@ export function registerTools(editor: ToolEditor, deps: ToolDeps): void {
       const scope = resolveScope(undefined, context, deps);
       try {
         const { state, changes } = await deps.store.patch(scope, checked.patch);
+        deps.onWrite?.(scope);
         return render<UpdateValue>(
           ok({ state, changes, path: deps.store.pathFor(scope), scope }),
         );

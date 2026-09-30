@@ -658,3 +658,85 @@ describe('the write path a model actually found', () => {
     expect(store.read('')).toEqual({ total: 51, done: ['a'] });
   });
 });
+
+describe('every write resets the drift counter, in every mode', () => {
+  // The system prompt says out loud: "this state file has not changed across
+  // the last N steps of work". So the counter behind that sentence has to be
+  // reset by every write path.
+  //
+  // It was not. `turnsSinceWrite` and `stateWrites` reset only from the
+  // paper-mode sink, and `const sink = mode !== 'paper' ? undefined : new
+  // PaperStateSink(...)` — so in NOTES MODE there is no sink, the counter never
+  // moves, and the notice reports silence for a run in which the model wrote the
+  // state on every step.
+  //
+  // The drift measurement that concluded "the notice does not work" was reading a
+  // counter that could not see the writes it was counting. That is a measurement
+  // instrument with a blind spot, which is the fourth of its kind in this project.
+  it('fires once per accepted write, with the scope it was written to', async () => {
+    const dir = makeProject();
+    const store = new ProjectStateStore({ directory: dir, home: makeHome() });
+    const sessions = new SessionRegistry();
+    const editor = new FakeToolEditor();
+    const seen: string[] = [];
+    registerTools(editor, {
+      store,
+      sessions,
+      scopeFor: (sessionID: string) => stateScopeFor(sessions, sessionID),
+      onWrite: (scope) => seen.push(scope),
+    });
+
+    await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { decisions: ['a'] } }, fakeToolContext({ sessionID: 'ses_root' }));
+    await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { decisions: ['a', 'b'] } }, fakeToolContext({ sessionID: 'ses_root' }));
+
+    expect(seen).toEqual(['', '']);
+  });
+
+  it('does not fire for a refused patch, because nothing was written', async () => {
+    // A refusal is the one case where the counter MUST keep climbing: §6.4
+    // guarantees Σ is unchanged, so the state really has not moved.
+    const dir = makeProject();
+    const store = new ProjectStateStore({ directory: dir, home: makeHome() });
+    const sessions = new SessionRegistry();
+    const editor = new FakeToolEditor();
+    const seen: string[] = [];
+    registerTools(editor, {
+      store,
+      sessions,
+      scopeFor: (sessionID: string) => stateScopeFor(sessions, sessionID),
+      schema: { total: { type: 'number', default: 0, description: 't' } },
+      onWrite: (scope) => seen.push(scope),
+    });
+
+    const refused = await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { nope: 1 } }, fakeToolContext({ sessionID: 'ses_root' }));
+    expect(refused).toBeDefined();
+    expect(seen).toEqual([]);
+  });
+
+  it('carries the sub-agent scope, so a sub-agent does not silence the parent', async () => {
+    // The counter is per scope for exactly this reason, and an `onWrite` that
+    // reported the root scope for every writer would put that back.
+    const dir = makeProject();
+    const store = new ProjectStateStore({ directory: dir, home: makeHome() });
+    const sessions = new SessionRegistry();
+    const editor = new FakeToolEditor();
+    const seen: string[] = [];
+    registerTools(editor, {
+      store,
+      sessions,
+      scopeFor: (sessionID: string) => stateScopeFor(sessions, sessionID),
+      onWrite: (scope) => seen.push(scope),
+    });
+
+    await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { decisions: ['a'] } }, fakeToolContext({ sessionID: 'ses_child' }));
+    expect(seen).toEqual(['']);
+  });
+});
