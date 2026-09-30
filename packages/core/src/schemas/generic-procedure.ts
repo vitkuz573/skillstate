@@ -63,8 +63,7 @@ export const GENERIC_PROCEDURE_SPEC: ProceduralSpec = {
     'them otherwise. Keep doing what the user asked.',
     '',
     'The state is a record, not a scratchpad: it is meant to still be there',
-    'and readable once the work is finished, by whoever comes next. A null value',
-    'means a field no longer applies — it is not a way to finish up.',
+    'and readable once the work is finished, by whoever comes next.',
   ].join('\n'),
   schema: {
     goal: {

@@ -102,12 +102,23 @@ PY
   ln -sfn "$(cd "$(dirname "$0")/.." && pwd)/packages/opencode" \
     "$SEED/node_modules/@skillstate/opencode"
   printf '{ "plugins": ["@skillstate/opencode"] }\n' > "$SEED/opencode.json"
+  # The instructions carry one clause that is not in the paper: "the state is a
+  # record, not a scratchpad". It is descriptive, it was added after watching a
+  # model treat the state as somewhere to park work in progress, and it is
+  # worded as a statement about what the state IS rather than as an order.
+  #
+  # A second clause was here and is now gone. "A null value means a field no
+  # longer applies - it is not a way to finish up." It was wrong twice: the
+  # paper says null DELETES the key (3.1 rule 2), so a deleted field is not
+  # inapplicable, it is absent; and "it is not a way to finish up" is a rule the
+  # paper does not have. It was also the sentence that made erasure look like a
+  # reasonable reading of the spec, which is the failure it was meant to prevent.
   cat > "$SEED/skill-spec.json" <<'JSON'
 {
   "id": "accumulate",
   "name": "Accumulate",
   "version": "1.0.0",
-  "instructions": "Read each src file one at a time. Add its REAL_n to `total` and its filename to `done`, then emit the patch. `done` names every file already read, so you can tell what is left. The state is a record, not a scratchpad: it is meant to still be there and readable once the work is finished. A null value means a field no longer applies - it is not a way to finish up.",
+  "instructions": "Read each src file one at a time. Add its REAL_n to `total` and its filename to `done`, then emit the patch. `done` names every file already read, so you can tell what is left. The state is a record, not a scratchpad: it is meant to still be there and readable once the work is finished. A patch merges into the state; a null value deletes that key.",
   "schema": {
     "total": { "type": "number", "default": 0, "description": "running sum" },
     "done": { "type": "array", "default": [], "description": "filenames already read" }
