@@ -133,6 +133,12 @@ All three are correct with a complete state. Driving the step loop is what costs
 2.9×, and both paper configurations cost more than the plain transcript at this
 length.
 
+> **Historical.** The "correct" column in this table and the ones around it was
+> read off the model's answer, and every one of these fixtures named the expected
+> total in the task text — so it was measuring a model copying a number out of a
+> prompt. The states were real and were checked; the verdicts were not. The
+> blind re-measurement is above, and it is the one to believe.
+
 **This is not evidence against the 70.4% figure — it is out of its range.** The
 saving requires a growing transcript to outrun a bounded prompt, and at 9–17
 requests there is nothing to outrun: a bounded prompt of ~15k per step simply
