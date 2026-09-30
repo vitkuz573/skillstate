@@ -263,6 +263,60 @@ group('§10.2 conformance harness', () => {
     expect(factors[2]).toBeLessThan(factors[1]!);
   });
 
+  it('3d. §4.2 — a deleted key does not come back, and defaults are NOT re-applied', async () => {
+    // §4.2, verbatim: "In state, a key that was deleted simply does not exist;
+    // a key that exists holds a value of its declared type." And §3.1 rule 2:
+    // "k is removed entirely from Sigma'. The key no longer exists; it is not
+    // set to any sentinel."
+    //
+    // The clause being pinned is the one that is easy to satisfy by accident
+    // and wrong to satisfy loosely. The natural implementation of a merge that
+    // deletes is to fall back to the schema default — the state would then
+    // always have every declared key, and `null` would be a reset rather than a
+    // deletion. It is not. The state becomes {} and stays that way until the
+    // model names the key again.
+    //
+    // This is the mechanism a model used to end a run early (finding 1 in
+    // FINDINGS.md): an empty patch with an action, then {total: null, done: null}
+    // in the same turn.
+    const full = { mood: 'calm', count: 7, log: ['a'] };
+
+    const erased = mergeState(full, { mood: null, count: null, log: null });
+    expect(erased).toEqual({});
+    expect('mood' in erased).toBe(false);
+
+    // Not a reset. createInitialState would give {mood:'neutral',count:0,log:[]}
+    // and the merge must NOT be that.
+    expect(erased).not.toEqual(core.createInitialState(SPEC.schema));
+
+    // And it does not self-heal: one later patch re-introduces only the key it
+    // names. A consumer reading `state.log.length` after that throws, which is
+    // the paper's semantics and not a defect in them.
+    const oneKey = mergeState(erased, { count: 3 });
+    expect(oneKey).toEqual({ count: 3 });
+    expect('log' in oneKey).toBe(false);
+    expect(() => (oneKey as { log: string[] }).log.length).toThrow();
+
+    // The same through the runtime, because §10.1 assigns Sigma = newState and
+    // never calls create_initial_state again. If a step re-seeded defaults, the
+    // erase would be undone by the next step and this assertion would fail.
+    const seen: SkillState[] = [];
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: scriptedLlm([
+        llmText('erasing', { mood: null, count: null, log: null }, ''),
+        llmText('one key back', { count: 5 }, ''),
+      ]),
+      execute: () => obs('ok'),
+    });
+    const first = await runtime.step(obs('OBS'));
+    seen.push({ ...first.newState });
+    const second = await runtime.step(obs(first.newObservation));
+
+    expect(seen[0]).toEqual({});
+    expect(second.newState).toEqual({ count: 5 });
+  });
+
   it('3b. §3.3 — the operator contract, all four clauses', () => {
     // §3.3 verbatim, as four assertions. Check 2 covers semantics; this covers
     // the properties the operator PROMISES, which are what a second

@@ -18,22 +18,53 @@ mechanism was run.
 `action=''` carrying a full patch, then in the same turn sends
 `{"total": null, "done": null}`.
 
-**Why it works.** `null` is legal on every declared field whatever its type
-(§6.2), and `done: null` is not an array, so §3.1's merge treats it as an atomic
-replacement target. The state is not corrupted — it is *replaced* with the
-schema's defaults, and `create_initial_state` then looks like a fresh start.
+**Why it works.** §3.1 rule 2: *"If `ΔΣ[k] = null`, then `k` is **removed
+entirely** from `Σ'`. The key no longer exists; it is not set to any sentinel."*
+So the state does not reset to its defaults — it becomes `{}`. §10.1 then
+assigns `Σ = stepResult.newState` and never calls `create_initial_state` again,
+so nothing re-seeds it. On the next step the model is shown an empty state and
+nothing else.
 
-**Consequence.** The run does not fail. It ends, cleanly, with a small state and
-an answer. Nothing in the mechanism notices, because §6.2 checks types and this
-is a well-typed patch.
+The wrong answer, and the one I first wrote down, is that `null` restores
+defaults. It does not, and the difference is the whole mechanism: a defaulting
+merge would still show the model `total: 0, done: []`, which reads as *no
+progress yet*. An empty object reads as *nothing was ever recorded*, which on
+step 47 is indistinguishable from a fresh run — and it is also what a scorer
+looking for `done` and `total` finds when both are gone.
 
-**What the paper offers.** Nothing. §6.2's `null` clause and §3.1's atomic
-replacement are both prescribed, and together they make erasure expressible. The
-article's own claim — that an action is O(1) regardless of transcript size — does
-not imply that erasure is detectable.
+**It does not self-heal.** One later patch re-introduces only the key it names.
+After `{count: 3}` on an erased state, `state.log` does not exist, and a consumer
+writing `state.log.length` throws. That is §4.2's semantics — *"a key that was
+deleted simply does not exist"* — and the throw is the consumer's problem, not
+the merge's.
 
-**Where it is recorded in code.** `packages/core/src/merge.ts`, the array
-clause, now pinned by test `3b`.
+**What the paper offers.** Nothing that would catch it. §6.2 checks types, and
+`{"total": null, "done": null}` is a perfectly typed patch against a schema that
+declares both fields. The paper's own two clauses — null is always legal, and
+null removes the key — compose into erasure without either being wrong.
+
+**Where it is recorded.** Test `3d`, which asserts the empty state, asserts
+that it is *not* the defaults, and asserts that a second step does not re-seed
+it. Asserting only the first would pass against the wrong implementation.
+
+---
+
+## 1a. Why this was almost shipped as the opposite claim
+
+The erasure was first found and described as a state *reset* — "replaced with
+the schema's defaults, and `create_initial_state` then looks like a fresh
+start." That is a plausible-sounding account of the same events, and it is
+false, because §3.1 rule 2 says the key is removed and not set to a sentinel.
+
+The distinguishing observation is one line: after the erase, does the next step
+show `{"total":0,"done":[]}` or `{}`? It shows `{}`. Running it is what
+separated the two accounts; reading the code path would have been a guess.
+
+Recorded because the wrong account is the more natural one. A merge that deletes
+is a natural place to fall back to a schema default, and that fallback would
+have passed every test written before this one — they all asserted that the key
+was *absent*, which is true under both accounts.
+
 
 ---
 
