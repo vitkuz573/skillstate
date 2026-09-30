@@ -92,6 +92,27 @@ files:
 | paper | 37 | 29 | 8 (22%) | 43 | 36 (84%) | 0 | 3 |
 | `values` | 87 | 30 | 57 (66%) | 112 | 70 (63%) | 1 | 6 |
 
+Lag is not only wasted reads — it silently corrupts. One n=3 trial ended
+`{total: 1607, done: [all 30]}` against a truth of 1523, and the whole 84 is
+`REAL_15`:
+
+```
+patch total=770  done=[cfg1..cfg15]   <- correct
+patch {}
+patch total=854  done=[cfg1..cfg15]   <- +84, and no new filename
+```
+
+`cfg15` was read and added; its **name was never recorded**, and nothing
+re-derives a total from a list, so the error is permanent. At 19 files the model
+wrote `cfg1..18 + cfg20` — `cfg19`'s value in the total, its name skipped — and
+the next patch put `cfg19` in, moving the drift from +121 back to +84. A double
+count cancelling a missed file by accident.
+
+§6.2 validates type, not value, and cannot do otherwise: checking 1523 needs the
+fixture, and the fixture is what the state is being scored on. `state_ok` caught
+this trial as a **failure** — the two verdicts are separate for a reason — but the
+failure is the whole 84, and nothing in the mechanism points at which file.
+
 **Lag** is a patch naming fewer files than have been read. It happens on four
 fifths of the paper arm's steps, so the state trails the work and 37% of its reads
 are re-reads going back for what it lost. §5.1 has the runtime choose the action

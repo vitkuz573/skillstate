@@ -184,23 +184,46 @@ a *correct* total over a *wrong* set — is invisible to every check in §10.2.
 
 ## 3. Arithmetically wrong state is indistinguishable from right state
 
-**Observed.** Over 30 successive additions the model drifted: 37 off on a sum of
-1523, in a run whose `done` was complete and whose `total` was a well-typed
-number throughout.
+**Observed, and it is one file.** Paper trial 2 of the n=3 ended with
+`{total: 1607, done: [all 30]}`. The truth is 1523. The state is 84 too high,
+and 84 is exactly `REAL_15`.
 
-**Why nothing catches it.** §6.2 validates *type*, not *value*. The runtime
-cannot check 1523 without knowing the fixture, and the fixture is the thing it
-is being scored on. A correctness signal in the runtime would be the paper
-measuring its own benchmark.
+**Where the 84 came from**, from the transcript:
 
-**What the paper offers.** §8.1's three metrics include `accuracy`, defined over
-step success, not over state value. Nothing in §1–§10 claims the state is
-arithmetically correct — only that the loop converges to it given a model that
-can do the arithmetic.
+```
+patch  total=770  done=[cfg1..cfg15]      <- correct: sum(truth[:15]) = 770
+patch  {}                               <- sparse, correct
+patch  total=854  done=[cfg1..cfg15]      <- +84, and NO new filename
+```
 
-**What was done.** Left as a finding rather than patched. A `values` field with
-per-file inputs would let the runtime *recompute* rather than *accumulate*, which
-converts the drift into a detectable difference — at the cost of finding 2.
+`cfg15` had been read and its value added, and its **name was never recorded**.
+Every subsequent total carries the +84: at 18 files the state said 1037 where the
+files sum to 953, at 21 files it said 1165 where they sum to 1081. The drift
+never grows and never self-corrects, because nothing re-derives the total from
+the list.
+
+It is worse than a constant offset, for one step. At 19 files the model wrote
+`cfg1..18 + cfg20` — `cfg19` had been read, its value was in the total, and its
+name was skipped. The next patch put `cfg19` in and the drift went **+121 back to
++84**, because a double count cancelled a missed file by accident.
+
+**Why nothing catches it.** §6.2 validates *type*, not *value*, and cannot:
+checking 1523 requires knowing the fixture, and the fixture is what the state is
+being scored on. A runtime that knew the answer would be the paper measuring its
+own benchmark.
+
+**What the paper offers.** §8.1's `accuracy` is over step success, not state
+value. Nothing in §1–§10 claims the state is arithmetically correct — only that
+the loop converges given a model that can do the arithmetic. So this is not a
+conformance failure. It is a run where the model could not, and the mechanism has
+no opinion.
+
+**What was done.** Left as a finding, deliberately. A `values` map would let the
+runtime *recompute* rather than *accumulate*, turning the drift into a detectable
+difference — and finding 2 is what that cost: the model desynchronised the two
+views 29-against-9 and escalated to a calculator. A fix that produces a worse
+failure is not a fix, so the honest outcome is that the state carries a model's
+arithmetic and nothing checks it.
 
 ---
 
