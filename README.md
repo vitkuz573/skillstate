@@ -78,6 +78,24 @@ Each step:
 5. On success the patch is merged: **Σₜ₊₁ = Σₜ ⊕ ΔΣₜ** — null values *delete* keys, nested objects merge recursively, the original state is never mutated (rollback is free).
 6. The action is executed against the environment, producing Oₜ₊₁.
 
+Two things this omits, because both are implementation decisions rather than
+the paper's, and both change what the model sees:
+
+- **What the runtime reports in Oₜ.** When a turn produced a patch but no tool
+  call, the runtime asks again. The old implementation put the model's own last
+  action there as an order; §2 forbids it, and the model obeyed the stored order
+  rather than choosing — 54 `read` calls for thirty files where a control used
+  one grep. Oₜ now carries a factual report ("step N ended; your state patch was
+  applied; nothing was executed") and the model picks its own next action, which
+  is the division the paper draws: `execute(aₜ, Σ_{t+1})` is the runtime's,
+  choosing aₜ is the model's. `SKILLSTATE_CONTINUATION=1` restores the order.
+- **Where corrective feedback lands.** §6.3 says it is "appended to the same
+  bounded prompt", and the core runtime does exactly that. The opencode adapter
+  prepends it to Oₜ instead, so A.4 stays byte-identical and the correction is
+  still visible. Same prompt, different slot. Note this path rarely fires in
+  practice: on a four-file task a model handles, not one of 46 prompts carried a
+  correction.
+
 ## Installation
 
 ```bash
