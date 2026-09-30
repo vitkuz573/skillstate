@@ -608,3 +608,53 @@ describe('a schema that declares nothing is still a schema', () => {
     expect(outputOf<UpdateValue>(result).state).toEqual({});
   });
 });
+
+const SCHEMA_FOR_TEST: StateSchema = {
+  total: { type: 'number', default: 0, description: 'running sum' },
+  done: { type: 'array', default: [], description: 'filenames read' },
+};
+
+describe('the write path a model actually found', () => {
+  // The tool was reached from inside the host's `execute` sandbox — as
+  // `await tools.skillstate_update({patch: ...})` — thirty-one times in one
+  // notes-mode trial, so there is not one direct tool call anywhere in that
+  // transcript. Two searches for `skillstate_update` in the event log came back
+  // empty before the sandbox was looked at.
+  //
+  // Which is worth a test, because the tool's contract has to hold however it is
+  // called. §6.2 is validation-side and deterministic: the same patch is refused
+  // the same way, and the same patch is accepted the same way, with no reference
+  // to how it arrived.
+  it('validates identically however the patch arrives', async () => {
+    // Once through the tool, once through the store the tool delegates to. Both
+    // must refuse, and for the same reason — the guarantee is the validator's,
+    // not the transport's.
+    const { editor, store } = harness(SCHEMA_FOR_TEST);
+    await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { total: 51, done: ['a'] } }, fakeToolContext({ sessionID: 'ses_root' }));
+
+    const viaTool = await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { total: 51, last: 'x' } }, fakeToolContext({ sessionID: 'ses_root' }));
+    expect(errorOf<UpdateValue>(viaTool)).toMatch(/unknown key/i);
+
+    // Same patch, same verdict, and the state on disk is untouched either way.
+    expect(store.read('')).toEqual({ total: 51, done: ['a'] });
+  });
+
+  it('accepts the same patch twice, so a retry is not a corruption', async () => {
+    // A model that repeats a patch — which it does, through a sandbox, where a
+    // failed call is invisible to it — must not double-apply. §3.1 rule 1 is
+    // overwrite, not add, and that is what makes a retry safe.
+    const { editor, store } = harness(SCHEMA_FOR_TEST);
+    const call = () =>
+      editor.tools
+        .get('skillstate_update')!
+        .execute({ patch: { total: 51, done: ['a'] } }, fakeToolContext({ sessionID: 'ses_root' }));
+    await call();
+    await call();
+    await call();
+    expect(store.read('')).toEqual({ total: 51, done: ['a'] });
+  });
+});
