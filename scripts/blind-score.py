@@ -48,6 +48,18 @@ def _assistant_texts(path: str) -> list[str]:
     return texts
 
 
+def _patch_in_text(text: str) -> bool:
+    """Whether a fenced json block in this text carries a `state_patch`."""
+    for fence in re.finditer(r"```json\s*([\s\S]*?)```", text):
+        try:
+            parsed = json.loads(fence.group(1))
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and "state_patch" in parsed:
+            return True
+    return False
+
+
 def _parts(out: str) -> list[dict[str, Any]]:
     """Every part of the transcript, for questions about tool names."""
     parts: list[dict[str, Any]] = []
@@ -199,7 +211,12 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     # to load it at all, while the project's own package loaded 4 of 4. A
     # measurement that cannot distinguish "the model did not use the state" from
     # "the state was never there" is not measuring the model.
-    paper_engaged = any("```json" in t for t in texts)
+    # A fence is not engagement. A model that READS the state file and quotes it
+    # in a json block has a fence and has written nothing, and a check that
+    # counted fences called that run live — a false positive on the one signal
+    # that is supposed to be the ground truth. It has to be a fence carrying a
+    # patch, which is the same parse replay-at.mjs uses.
+    paper_engaged = any(_patch_in_text(t) for t in texts)
     parts = _parts(out)
     notes_engaged = any(
         str((part.get("tool") or "")).startswith("skillstate_") for part in parts

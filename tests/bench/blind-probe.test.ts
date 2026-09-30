@@ -296,3 +296,55 @@ group('a run records the build it used', () => {
     expect(score(dir).build).toBeNull();
   });
 });
+
+group('engagement means a PATCH, not a fence', () => {
+  // A fenced json block is not engagement. A model that READS the state file and
+  // quotes it in a json block has a fence and has written nothing, and the first
+  // version of the liveness check counted fences — a false positive on the one
+  // signal that is supposed to be the ground truth for every other verdict in
+  // the run. It called a run live that had written nothing at all.
+  //
+  // The same parse replay-at.mjs uses: find the fence, parse it, look for the
+  // key. A fence the model got wrong is not a patch.
+  const score = (dir: string): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+
+  const runDir = (texts: string[]): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fence-'));
+    fs.writeFileSync(
+      path.join(dir, 'out.json'),
+      texts.map((t) => JSON.stringify({ part: { type: 'text', text: t } })).join('\n'),
+    );
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: { total: 0, done: [] } }));
+    return dir;
+  };
+
+  it('is false for a fence that quotes the state back', () => {
+    const dir = runDir(['The saved state is:\n\n```json\n{"total":0,"done":[]}\n```\nI will restart from src/cfg1.ts.']);
+    const engagement = score(dir).engagement as Record<string, boolean>;
+    expect(engagement.patch_in_text).toBe(false);
+  });
+
+  it('is false for a fence the model got wrong', () => {
+    const dir = runDir(['```json\n{not valid json\n```']);
+    expect((score(dir).engagement as Record<string, boolean>).patch_in_text).toBe(false);
+  });
+
+  it('is false for a json block with no fence at all', () => {
+    const dir = runDir(['{"state_patch": {"total": 5}}']);
+    expect((score(dir).engagement as Record<string, boolean>).patch_in_text).toBe(false);
+  });
+
+  it('is true for a fence carrying a patch, and the patch is inside the fence', () => {
+    // The trailing `}` case matters: a regex that searched for the word alone
+    // would call it engagement even when the model only mentioned it in prose.
+    const dir = runDir(['ok\n\n```json\n{"state_patch":{"total":1523,"done":["a"]},"action":"read"}\n```']);
+    expect((score(dir).engagement as Record<string, boolean>).patch_in_text).toBe(true);
+  });
+});
