@@ -29,9 +29,21 @@ function transcript(tools: Array<{ tool: string; input: unknown; output?: string
     .join('\n');
 }
 
-/** The data row, split: [arm, reads, otherTools, sumOutsourcing]. */
+/**
+ * The data row, split into its fields.
+ *
+ * The header is skipped by name and the detail lines by indentation, because
+ * both can contain digits and both were once matched by the first version of
+ * this helper — which then read a `sum   shell: {...}` line as the counts.
+ * Field order matches the report: arm, reads, distinct, re-reads, patches, lag,
+ * erasure, sum, built, then any other tools.
+ */
+const HEADERS = ['reads', 'distinct', 're-reads', 'patches', 'lag', 'erasure', 'sum', 'built'];
+
 function rowOf(out: string): string[] {
-  const row = out.split('\n').find((l) => /\d+\s+/.test(l) && !l.includes('sum-outsourcing'))!;
+  const lines = out.split('\n');
+  const header = lines.findIndex((l) => l.includes('re-reads'));
+  const row = lines.slice(header + 1).find((l) => l.trim().length > 0 && !/^\s/.test(l))!;
   return row.trim().split(/\s{2,}/);
 }
 
@@ -56,7 +68,9 @@ describe('census counts arithmetic the model outsourced', () => {
         { tool: 'execute', input: { code: 'return {total: 1466 + 57};' } },
       ]),
     );
-    expect(rowOf(out)[3]).toBe('1');
+    // field 7 is the sum count: arm, reads, distinct, re-reads, patches, lag,
+    // erasure, sum
+    expect(rowOf(out)[7]).toBe('1');
     expect(out).toMatch(/^\s+sum\s+execute: /m);
   });
 
@@ -73,7 +87,7 @@ describe('census counts arithmetic the model outsourced', () => {
     // A failed attempt still counts. The model reaching for a calculator is the
     // signal; whether the calculator exists is a different fact, and dropping
     // failures would make the count depend on the container image.
-    expect(rowOf(out)[3]).toBe('1');
+    expect(rowOf(out)[7]).toBe('1');
   });
 
   it('counts awk and python the same as bc', () => {
@@ -86,7 +100,7 @@ describe('census counts arithmetic the model outsourced', () => {
         { tool: 'shell', input: { command: "grep -oP 'REAL_\\K\\d+' src/*.ts | paste -sd+ | bc" } },
       ]),
     );
-    expect(rowOf(out)[3]).toBe('3');
+    expect(rowOf(out)[7]).toBe('3');
   });
 
   it('does not fire on reading, listing, or a plain file name', () => {
@@ -102,7 +116,7 @@ describe('census counts arithmetic the model outsourced', () => {
         { tool: 'read', input: { path: 'src/plus.ts' } },
       ]),
     );
-    expect(rowOf(out)[3]).toBe('0');
+    expect(rowOf(out)[7]).toBe('0');
   });
 
   it('separates reads from the other tools, because the ratio is the finding', () => {
@@ -116,7 +130,10 @@ describe('census counts arithmetic the model outsourced', () => {
         { tool: 'shell', input: { command: 'ls' } },
       ]),
     );
-    expect(rowOf(out).slice(1, 3)).toEqual(['2', 'grep×1 shell×1']);
+    // reads is field 1; the non-read tools are appended after the counters, so
+    // the ratio that matters is the one the table puts side by side.
+    expect(rowOf(out)[1]).toBe('2');
+    expect(rowOf(out).at(-1)).toBe('grep×1 shell×1');
   });
 });
 
@@ -138,7 +155,7 @@ describe('the two counters stay separate', () => {
         },
       ]),
     );
-    const [, , , sum, built] = rowOf(out);
+    const [, , , , , , , sum, built] = rowOf(out);
     expect(sum).toBe('0');
     expect(built).toBe('1');
   });
@@ -157,7 +174,7 @@ describe('the two counters stay separate', () => {
         },
       ]),
     );
-    const [, , , sum, built] = rowOf(out);
+    const [, , , , , , , sum, built] = rowOf(out);
     expect(sum).toBe('1');
     expect(built).toBe('1');
   });
@@ -199,7 +216,7 @@ describe('the two implementations agree', () => {
     );
     try {
       const report = execFileSync(process.execPath, [SCRIPT, file], { encoding: 'utf8' });
-      const [, , , sum, built] = rowOf(report);
+      const [, , , , , , , sum, built] = rowOf(report);
 
       const scored = execFileSync(
         'python3',
@@ -218,5 +235,76 @@ describe('the two implementations agree', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the run-shape counters', () => {
+  // The erasure counter had one definition and it was wrong: it fired on patches
+  // that merely omitted fields. 9 of 45 patches in a run are `{}` or partial,
+  // and counting those reported a fifth of the steps as erasures when nothing was
+  // deleted at all. The real instance is narrower and stranger.
+  it('counts a null for any declared field, not only for all of them', () => {
+    // The real patch, from the values-schema run:
+    //   {"total": 1523, "done": null, "values": null}
+    // with the action field reading "done has 30 filenames, values holds
+    // REAL_1..REAL_30, total = 1523". 3.1 rule 2 removes both keys, so the
+    // model's own closing sentence is the opposite of what it just did.
+    const body =
+      JSON.stringify({
+        part: {
+          type: 'text',
+          text:
+            'All 30 files read.\n\n```json\n' +
+            JSON.stringify({
+              state_patch: { total: 1523, done: null, values: null },
+              action: 'done has 30 filenames',
+            }) +
+            '\n```',
+        },
+      }) + '\n';
+    const [, , , , , , erasures] = rowOf(census(body));
+    expect(erasures).toBe('1');
+  });
+
+  it('does not count a patch that merely omits fields', () => {
+    // Sparse is the definition of a patch: omitted keys are untouched. Counting
+    // omission as deletion would say a fifth of every run wipes the state.
+    const body =
+      JSON.stringify({
+        part: {
+          type: 'text',
+          text: '```json\n' + JSON.stringify({ state_patch: { total: 5 }, action: 'read' }) + '\n```',
+        },
+      }) + '\n';
+    const [, , , , , , erasures] = rowOf(census(body));
+    expect(erasures).toBe('0');
+  });
+
+  it('counts an empty patch as a patch, and not as an erasure', () => {
+    const body =
+      JSON.stringify({
+        part: { type: 'text', text: '```json\n' + JSON.stringify({ state_patch: {}, action: 'echo' }) + '\n```' },
+      }) + '\n';
+    const [, , , , patches, , erasures] = rowOf(census(body));
+    expect(patches).toBe('1');
+    expect(erasures).toBe('0');
+  });
+
+  it('measures lag against the files actually read, in order', () => {
+    // The dominant effect in every bounded run, and invisible in a scoreboard:
+    // the state names fewer files than have been read, so the model has to go
+    // back for what it missed. 3.1 makes a patch sparse, so "the patch mentioned
+    // done" is not the test — "the patch named every file read so far" is.
+    const parts = [
+      JSON.stringify({ part: { type: 'tool', tool: 'read', state: { input: { path: 'src/cfg1.ts' }, output: '' } } }),
+      JSON.stringify({ part: { type: 'tool', tool: 'read', state: { input: { path: 'src/cfg2.ts' }, output: '' } } }),
+      JSON.stringify({
+        part: { type: 'text', text: '```json\n' + JSON.stringify({ state_patch: { done: ['src/cfg1.ts'] }, action: 'read' }) + '\n```' },
+      }),
+    ].join('\n');
+    const row = rowOf(census(parts));
+    expect(row[3]).toBe('0'); // 0 re-reads so far
+    expect(row[4]).toBe('1'); // 1 patch
+    expect(row[5]).toBe('1'); // and it lagged: cfg2 was read and not named
   });
 });
