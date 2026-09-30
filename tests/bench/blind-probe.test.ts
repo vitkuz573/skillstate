@@ -808,3 +808,112 @@ group('eq. 8 is re-derivable from the runs it is claimed for', () => {
     }
   });
 });
+
+
+group('the crossover rows name the runs they came from', () => {
+  // The ninety-file cost claim is a range, not a number, and the range is a
+  // function of which control run you compare against: 46.9x and an unbounded
+  // condition against the control that kept 90 of 90 filenames, 4.3x and a bound
+  // of 37,917 against the one that kept 10. Both were true of the runs they name.
+  //
+  // The previous table quoted `60 against 31` at both lengths and re-derived from
+  // nothing — the same superseded fixture generation as the §14 Σ table. So the
+  // guard here is the same one: a row in a table has to name its run, or it is a
+  // claim with no evidence behind it.
+  // Tables, not rows. A run is named once per table, in a `run` row or in a
+  // caption; requiring it on every row would be requiring the same fact five
+  // times, and requiring it per row missed a table that names the run in its
+  // header row. So the unit is the contiguous block of `|` lines.
+  const tables = (doc: string): string[][] => {
+    const blocks: string[][] = [];
+    let current: string[] = [];
+    for (const line of doc.split('\n')) {
+      if (line.trim().startsWith('|')) {
+        current.push(line);
+      } else if (current.length > 0) {
+        blocks.push(current);
+        current = [];
+      }
+    }
+    if (current.length > 0) blocks.push(current);
+    return blocks;
+  };
+  // The tables this guard is about: a table with a row LABELLED as a request
+  // count, or a header naming a ceiling. Merely mentioning "17 calls" in a
+  // settings table's prose cell is not a request table — an earlier version
+  // matched on the word and demanded a run name from the env-var reference.
+  const requestTables = (doc: string): string[][] =>
+    tables(doc).filter((block) =>
+      block.some(
+        (line) =>
+          /^\|\s*\**\s*(tool calls|paper calls|control calls|calls)\s*\**\s*\|/.test(line) ||
+          /H ceiling/.test(line),
+      ),
+    );
+  // A table has to say WHERE it came from. A run id is the usual answer, but a
+  // table drawn from a real-usage session names its source in words instead, and
+  // that is equally a statement of provenance — the requirement is provenance,
+  // not a particular spelling of it. (`n=3` is a sample size, not a run, and is
+  // deliberately not in this pattern.)
+  const runPattern = /\b[pn]-\d|real-usage|ab-blind\.sh|derived/;
+  const findings = fs.readFileSync(path.join(REPO, 'FINDINGS.md'), 'utf-8');
+  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf-8');
+
+  it('names a run in every table that quotes a request count', () => {
+    for (const [name, doc] of [
+      ['FINDINGS.md', findings],
+      ['README.md', readme],
+    ] as const) {
+      const relevant = requestTables(doc);
+      expect(relevant.length, `${name} has no request tables to check`).toBeGreaterThan(0);
+      for (const block of relevant) {
+        const text_ = block.join('\n');
+        expect(
+          runPattern.test(text_),
+          `${name}: a table quoting requests names no run — ${block[0]}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('carries the unfavourable instance as well as the favourable one', () => {
+    // A table that quotes only 46.9x is the shape of the mistake this project has
+    // been making. Both documents have to carry 4.3x and its bound, or the reader
+    // is shown a range as though it were a point.
+    for (const [name, doc] of [
+      ['FINDINGS.md', findings],
+      ['README.md', readme],
+    ] as const) {
+      expect(doc, `${name} is missing the weak instance`).toContain('4.3x');
+      expect(doc, `${name} is missing the weak bound`).toContain('37,917');
+      expect(doc, `${name} is missing the strong instance`).toContain('46.9x');
+    }
+  });
+
+  it('quotes no call count that no run made', () => {
+    // `60` and `31` were the superseded pair, and they re-derive from nothing.
+    // 59 against 31 at thirty files, 128 against 192 and 128 against 96 at ninety,
+    // all re-derive today. A scaling table elsewhere has a `60` in it and that is
+    // a file count, so only rows about requests are checked.
+    const realCounts = new Set(['31', '45', '59', '61', '64', '84', '96', '128', '134', '192']);
+    for (const [name, doc] of [
+      ['FINDINGS.md', findings],
+      ['README.md', readme],
+    ] as const) {
+      for (const block of requestTables(doc)) {
+        // Only the cells on a row that is about requests. A table about scaling
+        // has a `60` in it and that is a file count.
+        for (const line of block) {
+          if (!/tool calls|\| paper calls/.test(line)) continue;
+          const numbers = line
+            .split('|')
+            .map((cell) => cell.trim().replace('\u2013', '-').split(/[\s-]/)[0]!.replace('*', ''))
+            .filter((cell) => /^\d+$/.test(cell));
+          for (const n of numbers) {
+            expect(realCounts.has(n), `${name}: ${n} is not a call count any run made — ${line}`).toBe(true);
+          }
+        }
+      }
+    }
+  });
+});

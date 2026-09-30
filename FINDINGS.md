@@ -547,6 +547,7 @@ actually longer and not truncated by the host. Truth 4559.
 
 | | paper — bounded | notes — transcript |
 | --- | --- | --- |
+| run | `p-1-ceiling100` | `n-1-first` |
 | reads | 96 | 95 |
 | tool calls | **128** | 192 |
 | state | 78/90, total 4314 | **90/90, total 4559** |
@@ -667,6 +668,7 @@ so the hypothesis got its test:
 
 | | first run | retest, ceiling 200 |
 | --- | --- | --- |
+| record | `p-1-ceiling100` | `p-1-ceiling200` |
 | files reached | 78/90 | **84/90** |
 | state total | 4314 | 4342 |
 | reads | 96 | 91 |
@@ -826,18 +828,32 @@ paper's §7 predicts exactly that, and the old "56% growth" understated it.
 The condition, stated as `scripts/crossover.mjs` states it — the host's per-call
 overhead below which the bounded context wins:
 
-| fixture | paper calls | control calls | H ceiling |
-| --- | --- | --- | --- |
-| 30 files | 59 | 31 | ~60,000 chars/call |
-| 90 files | 60 | 31 | ~56,000 chars/call |
+Every row from `node scripts/crossover.mjs <paper>/ <notes>/`, and **every one
+names the run**, because the ninety-file answer swings by an order of magnitude on
+which control you compare against. The previous version of this table — `60`
+against `31` at both lengths — is from the same superseded fixture generation as
+the §14 Σ table, and re-derives from nothing.
 
-**The ceiling barely moved, and the reason is the call count: 60 against 31.** The
-state is cheaper per step, the transcript is three times longer, and the arm is
-still making twice as many requests — so it pays the host's overhead twice as
-often. The saving on *content* improves with length; the saving on *wall tokens*
-is held hostage by the request count, and nothing in §5.1 addresses request count
-because §5.1 assumes the runtime owns the loop, which is the thing this host
-cannot give it.
+| fixture | paper | control | content ratio | H ceiling |
+| --- | --- | --- | --- | --- |
+| 30 files, `p-1` vs `n-1` | 59 calls | 31 calls | 15.7x | **59,666** chars/call |
+| 90 files, `p-1-ceiling100` vs `n-1-first` | 128 calls | 192 calls | 46.9x | **−266,648** — condition gone |
+| 90 files, `p-1-ceiling100` vs `n-1-second` | 128 calls | 96 calls | 4.3x | **37,917** chars/call |
+
+**Same paper run, two control runs, and the sign of the conclusion flips.** Against
+the control that kept 90 of 90 filenames the bounded arm makes fewer requests and
+wins twice — less content and fewer round-trips — and the condition stops
+binding. Against the one that kept 10 of 90 it makes 32 more requests, the content
+ratio falls to 4.3x, and the condition binds at 37,917.
+
+**The ninety-file cost claim is therefore a range with a control's behaviour at one
+end of it, not a number.** The 46.9x quoted earlier in this section is the
+favourable instance and the weak one, and both are true of the runs they name.
+What §7 says on its own — 65.50x on Σ|Aₜ|, exact, from the run's own patches —
+does not depend on the control at all, which is why it is the claim that survives.
+
+Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
+the loop, which is the thing this host cannot give it.
 
 **No percentage is claimed anywhere**, deliberately. A ratio built from these
 numbers would be a ratio of two things the model never paid, and three headline

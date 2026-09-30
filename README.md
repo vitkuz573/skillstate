@@ -287,10 +287,28 @@ record and the reason the records are committed and checked now.
 On *content*, the saving improves with length. On wall tokens it depends on the
 request count, because the host re-sends its own context once per call:
 
-| fixture | paper calls | control calls | H ceiling |
-| --- | --- | --- | --- |
-| 30 files | 59 | 31 | ~60,000 chars/call |
-| 90 files | 60 | 31 | ~56,000 chars/call |
+Every row from `node scripts/crossover.mjs <paper>/ <notes>/`, and **every one
+names the run it came from**, because the ninety-file answer swings by an order of
+magnitude on which control you compare against:
+
+| fixture | paper | control | content ratio | H ceiling |
+| --- | --- | --- | --- | --- |
+| 30 files, `p-1` vs `n-1` | 59 calls | 31 calls | 15.7x | **59,666** chars/call |
+| 90 files, `p-1-ceiling100` vs `n-1-first` | 128 calls | 192 calls | 46.9x | **−266,648** — condition gone |
+| 90 files, `p-1-ceiling100` vs `n-1-second` | 128 calls | 96 calls | 4.3x | **37,917** chars/call |
+
+**Same paper run, two control runs, and the sign of the conclusion flips.** Against
+the control that kept 90 of 90 filenames the bounded arm makes fewer requests, so
+it wins twice — less content and fewer round-trips — and the condition stops
+binding. Against the control that kept 10 of 90 it makes 32 more requests than the
+control did, the content ratio falls to 4.3x, and the condition binds again at
+37,917.
+
+**So the ninety-file cost claim is not a number, it is a range with a control's
+behaviour at one end of it.** The 46.9x in the table above the 90-file section is
+the favourable instance and the weak one, and both are true of the runs they name.
+What §7 alone says — 65.50x on Σ|Aₜ|, exact, from the run's own patches — does
+not depend on the control at all.
 
 Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
 the loop, which is exactly what this host cannot give it.
@@ -336,10 +354,12 @@ property the control does not have and the mechanism always does.
 
 | | paper — bounded | notes — transcript |
 | --- | --- | --- |
+| run | `p-1-ceiling100` | `n-1-first` / `n-1-second` |
 | tool calls | **128** | 192 / **96** |
 
 | | paper — bounded | notes — transcript |
 | --- | --- | --- |
+| run | `p-1-ceiling100` | `n-1-first` |
 | tool calls | **128** | 192 |
 | Σ\|Aₜ\| | 371,747 chars | — |
 | control's prefix-sum context | — | 17,437,234 chars |
@@ -1389,8 +1409,17 @@ lines, 1,200 lines of observation. The lever is observation size rather than fil
 count, because tiny files make a tiny transcript and would rig the comparison in
 paper's favour by making the control's history too small to hurt.
 
+**Provenance, and it is not what the rest of this page has.** This one is a
+real-usage session against a seeded workspace, not an `ab-blind.sh` run, and it is
+**not among the records in [`measurements/`](measurements/README.md)** — so its
+call counts are the one number in this section that no committed record backs. It
+is kept because the finding it carries is the sign flip above, and because deleting
+a number for being inconvenient is the habit this project has spent a week
+dismantling.
+
 | 30 files | paper, §5.1 retry | notes (control) |
 | --- | --- | --- |
+| source | real-usage session, seeded workspace | same, n=3 |
 | prompt tokens | **1,607,539** | 2,015,473 (median, n=3) |
 | uncached input | 149,801 | 241,061 – 1,502,583 |
 | tool calls | 84 | 45 – 64 |
