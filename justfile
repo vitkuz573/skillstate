@@ -81,6 +81,22 @@ ab *files:
     npm run build
     node ./packages/bench/dist/ab-cli.js {{files}}
 
+# A blind A/B, for when a live model comparison is what is wanted.
+#
+# Differs from `ab` in the way that matters: the expected total never reaches
+# the model. Every probe before this one named it in the task text, the model
+# echoed it, and the run was scored CORRECT — so the verdict was measuring
+# whether a model can copy a number out of a prompt. The scorer here holds the
+# truth and reads correctness from the STATE, and reports the answer separately
+# because the two disagree.
+#
+# `just ab-blind`                      30 files, 3 trials per arm
+# `just ab-blind space-bunny-free 2 8` model, trials, files
+ab-blind model="opencode-go/space-bunny-free" trials="3" files="30":
+    @just _banner "a/b (blind)"
+    npm run build
+    ./scripts/ab-blind.sh {{model}} {{trials}} {{files}}
+
 # The historical corpus survey: what transcripts cost, priced honestly.
 # 1810 real runs, no model required.
 survey:
