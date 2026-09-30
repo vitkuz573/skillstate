@@ -54,6 +54,18 @@ fixture: [`tests/bench/expected.json`](./tests/bench/expected.json).
 
 > Fidelity notes (exact): "~1.8k chars Table 1 not tokens"; "16.2x Warehouse Gemini-3-Flash T=100 vs Stateful 1062387 vs 65408 §5.2 paper-reported not re-measured"; "~50x vs Memory at T=200 6175509 vs 122384 Table 1 — worst baseline at max T, not a paper claim; CTF/τ-Bench -60%/-40%"; "§5.7/§7 as simplified implementation, A.4 as byte-verbatim template, @non-paper/additive adapters with no host history trimming yield no saving."
 
+### What live runs showed that the conformance suite cannot test
+
+The suite above pins the implementation to `state.md`. It cannot say what
+happens when a model is handed that implementation, and the answers are not what
+you would guess. Six findings, each with the observation, why the paper's own
+clauses permit it, and what was done about it — state erasure that is
+well-typed by §6.2, a two-view schema that desynchronises 29-against-9, an
+arithmetic drift nothing in §1–§10 can detect, and the model narrating an order
+it was given back. Plus where the two agree.
+
+[`FINDINGS.md`](./FINDINGS.md)
+
 ## How it works
 
 ```mermaid
