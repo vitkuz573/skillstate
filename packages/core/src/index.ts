@@ -5,6 +5,8 @@
 // module (heuristics/estimates, not from the paper).
 export * from './types.js';
 export * from './spec-resolve.js';
+export * from './spec-scaffold.js';
+export * from './history.js';
 export * from './state-manager.js';
 export * from './prompt-transformer.js';
 export * from './token-tracker.js';

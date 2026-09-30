@@ -88,15 +88,20 @@ export { dumpPromptShape, dumpDrift } from './plugin.js';
 export { dumpStepTrace } from './plugin.js';
 /** `SKILLSTATE_MAX_STEPS` — the runtime-driven step ceiling, or the default. */
 export { maxStepsFromEnv } from './plugin.js';
+/** `SKILLSTATE_MAX_TOOLLESS_STEPS` — the toolless-step ceiling. `0` disables it. */
+export { maxToollessStepsFromEnv } from './plugin.js';
 /** The runtime that owns the paper-mode step loop. */
 export {
   RuntimeDriver,
   DEFAULT_MAX_STEPS,
+  DEFAULT_MAX_TOOLLESS,
   DEFAULT_VALIDATION_RETRIES,
   INVALID_PATCH,
 } from './runtime.js';
 /** §5.1's one-observation-per-step boundary, enforced by withholding tools. */
 export { StepBoundary, isTerminalAction } from './step-boundary.js';
+/** Whether the host ran a tool during a step — the signal the second ceiling reads. */
+export { ToolActivity, isToolPartUpdated } from './tool-activity.js';
 export type { RuntimeDriverOptions, RuntimeStep } from './runtime.js';
 /** Mode resolution — `SKILLSTATE_MODE` over `skillstate.json` over default. */
 export {
@@ -122,3 +127,9 @@ export {
   resolveSpec,
 } from './spec-loader.js';
 export type { ResolveSpecOptions, SpecResolution, SpecSource } from './spec-loader.js';
+
+// The host's own session store, read for evidence about what the model actually
+// wrote. Exported as a `HistorySource` because it is a capability of THIS host:
+// the schema it knows is opencode's, so the knowledge lives here rather than in
+// core, and another host implements the same port in its own package.
+export { OPENCODE_HISTORY, setOpencodeStorePath } from './history.js';

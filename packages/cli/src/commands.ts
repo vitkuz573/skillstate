@@ -10,7 +10,7 @@
 /// <reference types="node" />
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadConfig, mergeConfig } from '@skillstate/core';
+import { loadConfig, mergeConfig, parseSpec } from '@skillstate/core';
 import type { SkillStateConfig } from '@skillstate/core';
 import { SkillStateRuntime } from '@skillstate/core';
 import { TokenTracker } from '@skillstate/core';
@@ -32,9 +32,12 @@ import {
   uninstall,
 } from './install.js';
 import type { InitFlags, InstallFlags } from './install.js';
+import { cmdSpec, parseSpecArgs, SPEC_USAGE, wantsSpecHelp } from './spec-command.js';
 
-export const CLI_USAGE = `Usage: skillstate init [flags] | install [flags] | uninstall [flags] | run [--config <path>] [--resume] | report [--format json|md]
-  flags: ${CLI_USAGE_INSTALL.slice('Usage: skillstate '.length)}`;
+export const CLI_USAGE = `Usage: skillstate init [flags] | install [flags] | uninstall [flags] | run [--config <path>] [--resume] | report [--format json|md] | spec observe|scaffold|check [flags]
+  flags: ${CLI_USAGE_INSTALL.slice('Usage: skillstate '.length)}
+
+${SPEC_USAGE}`;
 
 /** Parsed `run` flags. */
 export interface RunFlags {
@@ -162,23 +165,21 @@ export function loadCliConfig(cwd: string, configPath?: string): SkillStateConfi
   return mergeConfig(parsed);
 }
 
-/** Load the procedural spec: JSON file at `specPath`, else the builtin neutral spec. */
+/**
+ * Load the procedural spec: JSON file at `specPath`, else the builtin neutral spec.
+ *
+ * Validation is {@link parseSpec}, the same function the plugin and the MCP
+ * server use. It used to be a fourth hand-rolled copy of the same four field
+ * checks, which is how a project ends up accepting a spec one host considers
+ * valid and another does not.
+ */
 export function loadCliSpec(cwd: string, specPath: string): ProceduralSpec {
   if (specPath === '@intercode-ctf') {
     return INTERCODE_CTF_SPEC;
   }
   try {
-    const parsed = readJsonFile(resolveInCwd(cwd, specPath)) as unknown;
-    if (
-      isRecord(parsed) &&
-      typeof parsed['id'] === 'string' &&
-      typeof parsed['name'] === 'string' &&
-      typeof parsed['instructions'] === 'string' &&
-      isRecord(parsed['schema']) &&
-      typeof parsed['version'] === 'string'
-    ) {
-      return parsed as unknown as ProceduralSpec;
-    }
+    const validated = parseSpec(readJsonFile(resolveInCwd(cwd, specPath)) as unknown);
+    if (typeof validated !== 'string') return validated;
   } catch {
     // Fall through to the builtin below.
   }
@@ -358,6 +359,13 @@ export async function main(argv: string[], cwd?: string): Promise<number> {
     }
     if (command === 'report') {
       return await cmdReport(dir, parseReportArgs(rest));
+    }
+    if (command === 'spec') {
+      if (wantsSpecHelp(rest)) {
+        console.log(SPEC_USAGE);
+        return 0;
+      }
+      return await cmdSpec(dir, parseSpecArgs(rest));
     }
     console.error(CLI_USAGE);
     return 2;
