@@ -51,14 +51,52 @@ const TERMINAL_ACTIONS = new Set(['done', 'complete', 'completed', 'finished', '
 export const DEFAULT_MAX_STEPS = 100;
 
 /**
+ * Consecutive toolless steps allowed before the loop stops.
+ *
+ * ── Why a second ceiling ───────────────────────────────────────────────────
+ *
+ * `maxSteps` counts STEPS. It says nothing about whether those steps did
+ * anything, so a model that answers with a state patch and never calls a tool
+ * spends a step per turn forever. Measured live: a paper-mode session after a
+ * server restart produced nineteen `{"state_patch": …, "action": "read
+ * src/mod2.ts"}` turns in seven minutes, each one a step, each one followed by
+ * the runtime's empty wake-up — and the ceiling that would have stopped it sits
+ * a hundred turns away, in memory, and the restart had just zeroed it.
+ *
+ * The next turn is not a retry with better information. The context hook
+ * re-renders (P, Σₜ, Oₜ), and Σₜ now holds the patch the model just wrote, so
+ * what it is handed back is its own output. A model shown its own output asks
+ * the same question and gives the same answer; the loop is not unlucky, it is
+ * the only outcome available.
+ *
+ * ── Why three ─────────────────────────────────────────────────────────────
+ *
+ * A working paper-mode run calls a tool in every non-terminal step — that is
+ * what a step IS, since `HOST_ACTION_NOTE` tells the model the step ends on a
+ * real tool call. So consecutive toolless steps are not a slow run, they are a
+ * run that has stopped. Three rather than one: a model may legitimately think
+ * before its first call, and stopping it for that would end working runs to
+ * shorten a broken one. Override with `SKILLSTATE_MAX_TOOLLESS_STEPS`; `0`
+ * restores the old behaviour exactly.
+ */
+export const DEFAULT_MAX_TOOLLESS = 3;
+
+/**
  * Why {@link RuntimeDriver.advance} declined to spend a step.
  *
  * `'terminal'` — the model emitted a terminal action: a real ending.
  * `'max_steps'` — §10.1's ceiling arrived. NOT completion.
  * `'no_action'` — the turn carried no action to advance on.
  * `'host_refused'` — the host would not start a turn.
+ * `'no_progress'` — the model stopped calling tools. Also NOT completion, and
+ *   the one that used to arrive as `max_steps` a hundred turns later, buried.
  */
-export type StopReason = 'terminal' | 'max_steps' | 'no_action' | 'host_refused';
+export type StopReason =
+  | 'terminal'
+  | 'max_steps'
+  | 'no_action'
+  | 'host_refused'
+  | 'no_progress';
 
 /** What the loop driver needs from its host, injected so it is testable. */
 export interface RuntimeDriverOptions {
@@ -71,6 +109,12 @@ export interface RuntimeDriverOptions {
   readonly prompt: (sessionID: string, text: string) => Promise<boolean>;
   /** Hard ceiling on runtime-driven steps per session. */
   readonly maxSteps?: number;
+  /**
+   * Consecutive steps a session may end without calling a single tool.
+   *
+   * `0` disables the guard. The default is in {@link DEFAULT_MAX_TOOLLESS}.
+   */
+  readonly maxToollessSteps?: number;
   /** §5.1's `k`. Attempts per step are `k + 1`. */
   readonly retries?: number;
 }
@@ -95,8 +139,11 @@ export const INVALID_PATCH = '__invalid_patch__';
 export class RuntimeDriver {
   readonly #prompt: (sessionID: string, text: string) => Promise<boolean>;
   readonly #maxSteps: number;
+  readonly #maxToolless: number;
   readonly #retries: number;
   readonly #steps = new Map<string, number>();
+  /** Consecutive toolless steps per session. See {@link DEFAULT_MAX_TOOLLESS}. */
+  readonly #toolless = new Map<string, number>();
   /** The action each session is mid-way through, read by the context hook. */
   readonly #pending = new Map<string, string>();
   /**
@@ -145,6 +192,7 @@ export class RuntimeDriver {
   constructor(options: RuntimeDriverOptions) {
     this.#prompt = options.prompt;
     this.#maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.#maxToolless = options.maxToollessSteps ?? DEFAULT_MAX_TOOLLESS;
     this.#retries = options.retries ?? DEFAULT_VALIDATION_RETRIES;
   }
 
@@ -211,11 +259,12 @@ export class RuntimeDriver {
   /**
    * Why {@link RuntimeDriver.advance} last declined to spend a step.
    *
-   * Four ways `advance` returns `null` and the caller cannot tell them from the
+   * Five ways `advance` returns `null` and the caller cannot tell them from the
    * return value: the model emitted a terminal action (a real ending), the host
-   * would not start a turn, the turn had no action at all, or the ceiling
-   * arrived. The last is the one that lies — a loop stopped at `maxSteps` is
-   * indistinguishable from a loop that ran its course.
+   * would not start a turn, the turn had no action at all, the ceiling arrived,
+   * or the model stopped calling tools. The last two lie in the same way — a
+   * loop stopped at `maxSteps` or at `no_progress` is indistinguishable from a
+   * loop that ran its course.
    *
    * A 90-file run was read as "the model lost track of its running sum at file
    * 78" when the ceiling had arrived at step 100, mid-file-79, with the work
@@ -239,17 +288,64 @@ export class RuntimeDriver {
   }
 
   /**
+   * Record whether the step that just ended touched the world.
+   *
+   * Separate from {@link record} on purpose: that one is §5.1's attempt
+   * accounting, and this is a different question with a different answer.
+   * Merging them would have meant either a defaulted boolean that lies when
+   * forgotten or a step's worth of retry state hanging off a progress flag.
+   *
+   * `acted` comes from the host's own `message.part.updated` tool parts, not
+   * from the patch: a model can write a perfectly valid `state_patch` and do
+   * nothing at all, which is the case this exists to catch.
+   */
+  /**
+   * Record whether the step that just ended touched the world.
+   *
+   * `acted` comes from the host's own `message.part.updated` tool parts, not
+   * from the patch: a model can write a perfectly valid `state_patch` and do
+   * nothing at all, which is the case this exists to catch.
+   */
+  noteStep(sessionID: string, acted: boolean): void {
+    if (acted) {
+      this.#toolless.delete(sessionID);
+      return;
+    }
+    this.#toolless.set(sessionID, (this.#toolless.get(sessionID) ?? 0) + 1);
+  }
+
+  /**
    * Advance the loop for one applied patch.
    *
+   * `acted` is whether the step that just ended touched the world. It is a
+   * PARAMETER and not a separate call because the plugin advances from a
+   * `setTimeout(0)` and the server's event stream can deliver a burst of
+   * `step.ended` events before any of those deferred callbacks runs. A counter
+   * incremented by the event handler and read here therefore desynchronises: by
+   * the first advance it was already the size of the burst, and the loop
+   * stopped without having asked once. Measured — one run in fifteen, and only
+   * under load, which is the worst possible way for a loop to misbehave.
+   *
+   * Passing the fact with the step it belongs to makes the pairing exact whether
+   * the events arrive one at a time or all at once. Required rather than
+   * defaulted, because a default of `true` would mean a caller who forgot it
+   * silently disabled the guard.
+   *
    * Returns the step it took, or `null` when it deliberately did not — a
-   * terminal action, an already-ended turn, or the ceiling. The ceiling is the
-   * important one: a runtime that asks forever against a model that keeps
-   * answering "continue" is a runaway, and the cost of that is paid at the
-   * provider.
+   * terminal action, an already-ended turn, the ceiling, or a model that has
+   * stopped acting. The last two matter: a runtime that asks forever against a
+   * model that keeps answering "continue" is a runaway, and the cost of that is
+   * paid at the provider.
    */
-  async advance(sessionID: string, action: string | undefined): Promise<RuntimeStep | null> {
+  async advance(
+    sessionID: string,
+    action: string | undefined,
+    acted: boolean,
+  ): Promise<RuntimeStep | null> {
     if (action === undefined) return this.#stop('no_action', sessionID);
     if (RuntimeDriver.isTerminal(action)) return this.#stop('terminal', sessionID);
+    // Counted here, so the count describes a step that actually closed.
+    this.noteStep(sessionID, acted);
 
     // A retry re-asks within the CURRENT step and must not spend another one.
     // §5.1 counts attempts inside a step, not steps: the whole point of the
@@ -261,6 +357,26 @@ export class RuntimeDriver {
     const isRetry = decision === 'retry';
     const step = isRetry ? (this.#steps.get(sessionID) ?? 0) : (this.#steps.get(sessionID) ?? 0) + 1;
     if (step > this.#maxSteps) return this.#stop('max_steps', sessionID, step - 1);
+
+    // Checked AFTER `max_steps` so the two never fight over which one to
+    // report, and after the terminal check so a real ending is still a real
+    // ending — a model that finishes by thinking rather than by calling a tool
+    // has ended, not stalled.
+    //
+    // A retry does not re-arm the counter: the model was asked the same question
+    // again with a correction attached, and that is still one step.
+    //
+    // `> 0` first, and not as an afterthought: a ceiling of zero means NO
+    // ceiling, so a run that never calls a tool can be measured rather than
+    // stopped. Comparing the count to zero without it would end every such run
+    // on its first step — the exact opposite of what the option documents.
+    if (
+      this.#maxToolless > 0 &&
+      !isRetry &&
+      (this.#toolless.get(sessionID) ?? 0) >= this.#maxToolless
+    ) {
+      return this.#stop('no_progress', sessionID);
+    }
 
     // The action is remembered BEFORE the host is asked, because the context
     // hook that follows reads it, and a host that starts the turn quickly must

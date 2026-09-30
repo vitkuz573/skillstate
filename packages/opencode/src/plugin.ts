@@ -97,6 +97,7 @@ import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
 import { DEFAULT_MAX_STEPS, INVALID_PATCH, RuntimeDriver } from './runtime.js';
 import { StepBoundary } from './step-boundary.js';
+import { ToolActivity } from './tool-activity.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
 import { registerTools } from './tools.js';
@@ -459,6 +460,22 @@ export function maxStepsFromEnv(): number | undefined {
 }
 
 /**
+ * The toolless-step ceiling, overridable per run.
+ *
+ * `0` is a real value here and not a rejection: it turns
+ * {@link DEFAULT_MAX_TOOLLESS} off and restores the old behaviour exactly, which
+ * is what a run that wants to measure the spin rather than stop in it needs.
+ * Everything else must be a positive integer, so a typo cannot quietly become
+ * "unlimited" — `maxStepsFromEnv`'s rule, and the same reason.
+ */
+export function maxToollessStepsFromEnv(): number | undefined {
+  const raw = process.env['SKILLSTATE_MAX_TOOLLESS_STEPS'];
+  if (raw === undefined || raw.length === 0) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+/**
  * The plugin definition.
  *
  * `setup` wires the session registry, the project state store, the native
@@ -555,6 +572,11 @@ export const SkillStatePlugin = Plugin.define({
     // there would tax a mode that has no problem to solve.
     const boundary = new StepBoundary();
     const stepBoundaryEnabled = process.env['SKILLSTATE_STEP_BOUNDARY'] === '1';
+    // Whether the host ran a tool since the last step boundary, per session.
+    // Only the runtime reads it, and only in paper mode, so it is constructed
+    // unconditionally and stays empty otherwise — one map with no entries is
+    // cheaper than a second construction site to keep in step.
+    const tools = new ToolActivity();
     // The step loop. Present in paper mode only, where the context is
     // replaced and the model therefore cannot fall back on the transcript to
     // keep going; see runtime.ts for why this belongs in code.
@@ -605,6 +627,11 @@ export const SkillStatePlugin = Plugin.define({
             // steps, which puts 30 files at about 88 steps against a ceiling of
             // 64. That is the whole of the 25/30.
             maxSteps: maxStepsFromEnv(),
+            // The second ceiling, and the one that was missing: `maxSteps` counts
+            // steps without asking whether a step did anything, so a model that
+            // patches and never calls a tool spends one per turn until the
+            // hundredth. See DEFAULT_MAX_TOOLLESS for the live measurement.
+            maxToollessSteps: maxToollessStepsFromEnv(),
           })
         : undefined;
     const maxSteps = runtime === undefined ? undefined : (maxStepsFromEnv() ?? DEFAULT_MAX_STEPS);
@@ -667,6 +694,11 @@ export const SkillStatePlugin = Plugin.define({
               (event as { type?: unknown }).type as string,
             );
             sessions.ingestEvent(event);
+            // Folded in on the way past, not in the step handler: the tool part
+            // arrives DURING the step, and the handler runs at the end of it. A
+            // tracker consulted only there would be asked about a window it had
+            // never seen.
+            tools.note(event);
             // A sink failure is a value, never a throw — an unhandled
             // rejection here would end the loop and silently stop both the
             // registry and the sink for the rest of the process's life.
@@ -716,6 +748,13 @@ export const SkillStatePlugin = Plugin.define({
             if (mode === 'paper' && isStepEnded(event)) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
+              // Consuming, and read HERE rather than inside `advance`: this
+              // answers "did the step before this one touch the world", and the
+              // answer is about the host's tool parts, not about the patch. A
+              // model that wrote a valid patch and called nothing is exactly the
+              // case. Captured into the closure below, because the advance is
+              // deferred and a shared counter would already have moved on.
+              const acted = tools.tookTool(sessionID);
               // §5.1 lines 2–8: one step is `k + 1` attempts at the SAME Aₜ.
               // A turn that produced no patch is an attempt, not a step, so the
               // corrective feedback arrives on the prompt it belongs to instead
@@ -736,16 +775,16 @@ export const SkillStatePlugin = Plugin.define({
                 // and the request is dropped.
                 setTimeout(() => {
                   void runtime
-                    ?.advance(sessionID, last ?? CONTINUE_ACTION)
+                    ?.advance(sessionID, last ?? CONTINUE_ACTION, acted)
                     .then((step) => {
-                      // A `null` here is the loop ending, and four different
-                      // things end it. `max_steps` is the one that lies — a loop
-                      // stopped at the ceiling looks exactly like a loop that ran
-                      // its course, and that is how a 90-file run got read as a
-                      // model that lost track of its sum at file 78 when the
-                      // ceiling had arrived mid-file-79. Written next to the
-                      // build stamp so a scorer never has to guess it from a
-                      // transcript.
+                      // A `null` here is the loop ending, and five different
+                      // things end it. `max_steps` and `no_progress` are the two
+                      // that lie — a loop stopped at the ceiling looks exactly
+                      // like a loop that ran its course, and that is how a 90-file
+                      // run got read as a model that lost track of its sum at file
+                      // 78 when the ceiling had arrived mid-file-79. Written next
+                      // to the build stamp so a scorer never has to guess it from
+                      // a transcript.
                       const stop = runtime?.lastStop;
                       // Both arguments are non-optional, and that is deliberate:
                       // this is only reached when `advance` returned null, which

@@ -34,7 +34,7 @@ describe('§5.1 bounded validation retry — k + 1 attempts per step', () => {
     // thirty-file task that ran out of budget at 25/30.
     const driver = new RuntimeDriver({ prompt: ok });
     driver.record('ses_1', false);
-    const retry = await driver.advance('ses_1', 'continue');
+    const retry = await driver.advance('ses_1', 'continue', true);
     expect(retry).toEqual({ sessionID: 'ses_1', action: 'continue', step: 0, retry: true });
   });
 
@@ -43,7 +43,7 @@ describe('§5.1 bounded validation retry — k + 1 attempts per step', () => {
     driver.record('ses_1', false);
     driver.record('ses_1', false);
     driver.record('ses_1', false);
-    const next = await driver.advance('ses_1', 'continue');
+    const next = await driver.advance('ses_1', 'continue', true);
     expect(next).toEqual({ sessionID: 'ses_1', action: 'continue', step: 1, retry: false });
   });
 
@@ -97,7 +97,7 @@ describe('RuntimeDriver', () => {
         return ok();
       },
     });
-    const step = await driver.advance('ses_1', 'read src/cfg2.ts');
+    const step = await driver.advance('ses_1', 'read src/cfg2.ts', true);
     expect(step).toEqual({ sessionID: 'ses_1', action: 'read src/cfg2.ts', step: 1, retry: false });
     expect(asked).toEqual(['read src/cfg2.ts']);
   });
@@ -107,7 +107,7 @@ describe('RuntimeDriver', () => {
     // ends a run early. Both directions are worth pinning.
     for (const action of ['done', 'DONE', ' complete ', 'completed', 'finished', 'stop', 'end', '']) {
       const driver = new RuntimeDriver({ prompt: ok });
-      expect(await driver.advance('ses_1', action)).toBeNull();
+      expect(await driver.advance('ses_1', action, true)).toBeNull();
     }
   });
 
@@ -115,22 +115,22 @@ describe('RuntimeDriver', () => {
     // A patch with no action is not a request to continue. Advancing on the
     // strength of a patch alone would loop on a model that is merely thinking.
     const driver = new RuntimeDriver({ prompt: ok });
-    expect(await driver.advance('ses_1', undefined)).toBeNull();
+    expect(await driver.advance('ses_1', undefined, true)).toBeNull();
   });
 
   it('does not advance when the host refuses', async () => {
     // A refusal usually means the session has ended. It must not be counted
     // as a step, or a run that is over would look like it is progressing.
     const driver = new RuntimeDriver({ prompt: refused });
-    expect(await driver.advance('ses_1', 'continue')).toBeNull();
+    expect(await driver.advance('ses_1', 'continue', true)).toBeNull();
     expect(driver.stepsFor('ses_1')).toBe(0);
   });
 
   it('counts steps per session, not globally', async () => {
     // One session ending must not stop another from progressing.
     const driver = new RuntimeDriver({ prompt: ok });
-    await driver.advance('ses_a', 'read cfg1');
-    await driver.advance('ses_b', 'read cfg1');
+    await driver.advance('ses_a', 'read cfg1', true);
+    await driver.advance('ses_b', 'read cfg1', true);
     expect(driver.stepsFor('ses_a')).toBe(1);
     expect(driver.stepsFor('ses_b')).toBe(1);
   });
@@ -139,10 +139,10 @@ describe('RuntimeDriver', () => {
     // A model that answers "continue" to a prompt that keeps asking will
     // never stop on its own, and that bill arrives at the provider.
     const driver = new RuntimeDriver({ prompt: ok, maxSteps: 3 });
-    expect((await driver.advance('ses_1', 'go'))!.step).toBe(1);
-    expect((await driver.advance('ses_1', 'go'))!.step).toBe(2);
-    expect((await driver.advance('ses_1', 'go'))!.step).toBe(3);
-    expect(await driver.advance('ses_1', 'go')).toBeNull();
+    expect((await driver.advance('ses_1', 'go', true))!.step).toBe(1);
+    expect((await driver.advance('ses_1', 'go', true))!.step).toBe(2);
+    expect((await driver.advance('ses_1', 'go', true))!.step).toBe(3);
+    expect(await driver.advance('ses_1', 'go', true)).toBeNull();
     expect(driver.stepsFor('ses_1')).toBe(3);
   });
 
@@ -154,8 +154,8 @@ describe('RuntimeDriver', () => {
   it('records what it did, in order', async () => {
     // The diagnostic value of owning the loop is being able to see it.
     const driver = new RuntimeDriver({ prompt: ok });
-    await driver.advance('ses_1', 'first');
-    await driver.advance('ses_1', 'second');
+    await driver.advance('ses_1', 'first', true);
+    await driver.advance('ses_1', 'second', true);
     expect(driver.advanced.map((s) => s.action)).toEqual(['first', 'second']);
   });
 
@@ -183,14 +183,14 @@ describe('RuntimeDriver', () => {
         return ok();
       },
     });
-    await driver.advance('ses_1', 'read src/cfg2.ts');
+    await driver.advance('ses_1', 'read src/cfg2.ts', true);
   });
 
   it('hands the continuation out exactly once', async () => {
     // Twice would show the model the same request twice in one turn; never
     // would leave the step unexplained. The feedback queue has the same rule.
     const driver = new RuntimeDriver({ prompt: ok });
-    await driver.advance('ses_1', 'read src/cfg2.ts');
+    await driver.advance('ses_1', 'read src/cfg2.ts', true);
     expect(driver.takeContinuation('ses_1')).toBe('read src/cfg2.ts');
     expect(driver.takeContinuation('ses_1')).toBeUndefined();
   });
@@ -198,14 +198,14 @@ describe('RuntimeDriver', () => {
   it('clears the pending action when the host refuses', async () => {
     // Otherwise a refused request leaks into some later, unrelated turn.
     const driver = new RuntimeDriver({ prompt: refused });
-    await driver.advance('ses_1', 'read src/cfg2.ts');
+    await driver.advance('ses_1', 'read src/cfg2.ts', true);
     expect(driver.takeContinuation('ses_1')).toBeUndefined();
   });
 
   it('keeps continuations separate per session', async () => {
     const driver = new RuntimeDriver({ prompt: ok });
-    await driver.advance('ses_a', 'read a');
-    await driver.advance('ses_b', 'read b');
+    await driver.advance('ses_a', 'read a', true);
+    await driver.advance('ses_b', 'read b', true);
     expect(driver.takeContinuation('ses_b')).toBe('read b');
     expect(driver.takeContinuation('ses_a')).toBe('read a');
   });
@@ -214,7 +214,7 @@ describe('RuntimeDriver', () => {
     // Teardown and tests need a way to clear, and a Map without one leaks
     // state between sessions forever.
     const driver = new RuntimeDriver({ prompt: ok });
-    await driver.advance('ses_1', 'read src/cfg2.ts');
+    await driver.advance('ses_1', 'read src/cfg2.ts', true);
     driver.forget('ses_1');
     expect(driver.takeContinuation('ses_1')).toBeUndefined();
   });
@@ -239,7 +239,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
   it('says nothing ran when the host ran nothing', async () => {
     const d = driver();
     void d.record('s', true);
-    await d.advance('s', 'read src/cfg1.ts');
+    await d.advance('s', 'read src/cfg1.ts', true);
     expect(d.stepReport('s')).toMatch(/nothing was executed/);
   });
 
@@ -252,7 +252,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     const d = driver();
     void d.record('s', true);
     d.noteExecutions('s', [tools('m1', 2)]);
-    await d.advance('s', 'read src/cfg1.ts');
+    await d.advance('s', 'read src/cfg1.ts', true);
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 2 actions ran.');
   });
 
@@ -260,7 +260,7 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     const d = driver();
     void d.record('s', true);
     d.noteExecutions('s', [tools('m1', 1)]);
-    await d.advance('s', 'x');
+    await d.advance('s', 'x', true);
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 1 action ran.');
   });
 
@@ -270,11 +270,11 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     const d = driver();
     void d.record('s', true);
     d.noteExecutions('s', [tools('m1', 1)]);
-    await d.advance('s', 'a');
+    await d.advance('s', 'a', true);
     expect(d.stepReport('s')).toMatch(/1 action ran/);
 
     void d.record('s', true);
-    await d.advance('s', 'b');
+    await d.advance('s', 'b', true);
     expect(d.stepReport('s')).toMatch(/nothing was executed/);
   });
 
@@ -282,9 +282,9 @@ describe('§5.1 the environment reports what it did, and it is true', () => {
     const d = driver();
     void d.record('a', true);
     d.noteExecutions('a', [tools('m1', 1)]);
-    await d.advance('a', 'x');
+    await d.advance('a', 'x', true);
     void d.record('b', true);
-    await d.advance('b', 'y');
+    await d.advance('b', 'y', true);
     expect(d.stepReport('a')).toMatch(/1 action ran/);
     expect(d.stepReport('b')).toMatch(/nothing was executed/);
   });
@@ -317,7 +317,7 @@ describe('the count is of NEW results, because the context hook runs on every re
     d.noteExecutions('s', [tools('m1', 1)]);
     d.noteExecutions('s', [tools('m1', 1)]);
     void d.record('s', true);
-    await d.advance('s', 'read');
+    await d.advance('s', 'read', true);
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 1 action ran.');
   });
 
@@ -327,7 +327,7 @@ describe('the count is of NEW results, because the context hook runs on every re
     expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(1);
     expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(0);
     void d.record('s', true);
-    await d.advance('s', 'read');
+    await d.advance('s', 'read', true);
     expect(d.stepReport('s')).toBe('step 1 ended; your state patch was applied; 2 actions ran.');
   });
 
@@ -408,19 +408,19 @@ describe('why advance declined', () => {
 
   it('says terminal when the model ended the run', async () => {
     const driver = new RuntimeDriver({ prompt: ok });
-    expect(await driver.advance('ses_1', 'done')).toBeNull();
+    expect(await driver.advance('ses_1', 'done', true)).toBeNull();
     expect(driver.lastStop).toEqual({ reason: 'terminal', sessionID: 'ses_1', steps: 0 });
   });
 
   it('says no_action when the turn carried nothing to advance on', async () => {
     const driver = new RuntimeDriver({ prompt: ok });
-    expect(await driver.advance('ses_1', undefined)).toBeNull();
+    expect(await driver.advance('ses_1', undefined, true)).toBeNull();
     expect(driver.lastStop?.reason).toBe('no_action');
   });
 
   it('says host_refused when the host would not start a turn', async () => {
     const driver = new RuntimeDriver({ prompt: async () => false });
-    expect(await driver.advance('ses_1', 'read the next file')).toBeNull();
+    expect(await driver.advance('ses_1', 'read the next file', true)).toBeNull();
     expect(driver.lastStop).toEqual({ reason: 'host_refused', sessionID: 'ses_1', steps: 0 });
   });
 
@@ -430,9 +430,9 @@ describe('why advance declined', () => {
     // too high, and a run that stopped at exactly the budget is the case where
     // that off-by-one is the whole question.
     const driver = new RuntimeDriver({ prompt: ok, maxSteps: 2 });
-    expect(await driver.advance('ses_1', 'a')).not.toBeNull();
-    expect(await driver.advance('ses_1', 'b')).not.toBeNull();
-    expect(await driver.advance('ses_1', 'c')).toBeNull();
+    expect(await driver.advance('ses_1', 'a', true)).not.toBeNull();
+    expect(await driver.advance('ses_1', 'b', true)).not.toBeNull();
+    expect(await driver.advance('ses_1', 'c', true)).toBeNull();
     expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 2 });
   });
 
@@ -447,7 +447,7 @@ describe('why advance declined', () => {
     const driver = new RuntimeDriver({ prompt: ok, maxSteps: 1, retries: 8 });
     for (let attempt = 1; attempt <= 8; attempt += 1) {
       expect(driver.record('ses_1', false)).toEqual({ action: 'retry', attempt, step: 0, result: null });
-      const step = await driver.advance('ses_1', 'read the next file');
+      const step = await driver.advance('ses_1', 'read the next file', true);
       expect(step).not.toBeNull();
       expect(step?.retry).toBe(true);
       // The step has no number until its patch lands. Eight attempts have been
@@ -459,25 +459,25 @@ describe('why advance declined', () => {
 
     // The patch lands, and THAT is step 1 -- which a ceiling of 1 still allows.
     expect(driver.record('ses_1', true)).toEqual({ action: 'advance', attempt: 0, step: 1, result: null });
-    const committed = await driver.advance('ses_1', 'read the next file');
+    const committed = await driver.advance('ses_1', 'read the next file', true);
     expect(committed?.step).toBe(1);
     expect(committed?.retry).toBe(false);
     expect(driver.lastStop).toBeUndefined();
 
     // And the next step is the one the ceiling refuses.
-    expect(await driver.advance('ses_1', 'read the next file')).toBeNull();
+    expect(await driver.advance('ses_1', 'read the next file', true)).toBeNull();
     expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 1 });
   });
 
   it('reports the most recent stop, and per session', async () => {
     const driver = new RuntimeDriver({ prompt: ok, maxSteps: 1 });
-    await driver.advance('ses_1', 'a');
-    expect(await driver.advance('ses_1', 'b')).toBeNull();
+    await driver.advance('ses_1', 'a', true);
+    expect(await driver.advance('ses_1', 'b', true)).toBeNull();
     expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 1 });
 
     // A second session's ending is the one that is current, and the first
     // session's own record is still there to ask about.
-    await driver.advance('ses_2', 'done');
+    await driver.advance('ses_2', 'done', true);
     expect(driver.lastStop).toEqual({ reason: 'terminal', sessionID: 'ses_2', steps: 0 });
   });
 

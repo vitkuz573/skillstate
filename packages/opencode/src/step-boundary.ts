@@ -61,11 +61,20 @@ export class StepBoundary {
   /**
    * Record that an action ran, so the next request must report.
    *
-   * Called when the host executed a tool on this session's behalf. There is
-   * no event that says "a tool finished" in a form the plugin can trust for
-   * this, so the boundary is advanced from the patch instead — see
+   * Called when the host executed a tool on this session's behalf. The
+   * boundary is advanced from the patch instead of from a tool event — see
    * {@link reportRequired}. Kept as a separate method so the trigger can
    * change without the cycle changing.
+   *
+   * An earlier version of this comment said no trustworthy tool event existed,
+   * and pointed at the durable event stream as the reason it had to guess from
+   * the patch. `message.part.updated` carries `{ type: "tool", callID, tool,
+   * state: { status } }` and is durable, so that was not quite true: see
+   * `ToolActivity`, which reads it. The patch-derived trigger stays, because
+   * which of the two SHOULD move the phase is a question about the paper's
+   * alternation rather than about what the host publishes — a boundary keyed on
+   * tool calls would flip on every call inside one step, and §5.1 alternates
+   * per STEP.
    */
   actionTaken(sessionID: string): void {
     this.#phase.set(sessionID, 'report');
