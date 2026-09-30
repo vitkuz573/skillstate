@@ -4,6 +4,7 @@
 // token-tracker, runtime. `instrumentation` is an OPTIONAL @non-paper helper
 // module (heuristics/estimates, not from the paper).
 export * from './types.js';
+export * from './spec-resolve.js';
 export * from './state-manager.js';
 export * from './prompt-transformer.js';
 export * from './token-tracker.js';

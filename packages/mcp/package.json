@@ -1,7 +1,7 @@
 {
   "name": "@skillstate/mcp",
   "version": "3.0.1",
-  "description": "Zero-dependency MCP server + adapter for the skillstate runtime.",
+  "description": "MCP server + adapter for the skillstate runtime: schema-typed execution state for long-horizon agents (SKILL.state, arXiv:2608.26263).",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,6 +25,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@skillstate/core": "^3.0.0"
   }
 }

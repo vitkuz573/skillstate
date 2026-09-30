@@ -4,6 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { once } from 'node:events';
+import { z } from 'zod';
+import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { McpServer, launch, resolveStatePathForCwd } from '@skillstate/mcp';
 import { TokenTracker, validatePatchDeep } from '@skillstate/core';
 import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
@@ -68,16 +73,262 @@ function statePath(server: McpServer): string {
   return path.join(o.root, o.name);
 }
 
+/**
+ * Every test talks to the server through a real SDK `Client` over an
+ * `InMemoryTransport`.
+ *
+ * This replaced a helper that called the server's own `handleLine()` with a
+ * hand-built JSON string. That was circular in the worst way: the test and the
+ * implementation shared the same hand-rolled JSON-RPC framing, so a framing bug
+ * could not fail the suite, and every "protocol" assertion was really an
+ * assertion about our own encoder. Going through the official client means these
+ * tests now fail if the SDK's framing, negotiation or validation ever stops
+ * accepting what this server emits.
+ */
+const clients = new Map<McpServer, Client>();
+
+/**
+ * A client-side transport over an existing pair of pipes.
+ *
+ * `launch({ input, output })` returns a server already attached to those pipes,
+ * so an `InMemoryTransport` cannot be attached on top of it — the SDK refuses a
+ * second `connect()`, correctly. Rather than call `launch()` twice or reach past
+ * it into private fields, this speaks the client half of the same stdio
+ * conversation: requests go into `input`, answers come back out of `output`.
+ *
+ * It is still the official `Client` doing the framing, the `initialize` and the
+ * schema validation, so a test that uses this has not lost any of the checks that
+ * motivated the migration — it has only gained a different socket.
+ */
+function pipeTransport(input: PassThrough, output: PassThrough): Transport {
+  return {
+    async start() {
+      output.on('data', (chunk: Buffer | string) => {
+        const text = chunk.toString();
+        for (const line of text.split('\n')) {
+          if (line.trim().length === 0) {
+            continue;
+          }
+          try {
+            this.onmessage?.(JSON.parse(line));
+          } catch (err) {
+            this.onerror?.(err instanceof Error ? err : new Error(String(err)));
+          }
+        }
+      });
+    },
+    async send(message: unknown) {
+      input.write(`${JSON.stringify(message)}\n`);
+    },
+    async close() {
+      output.removeAllListeners('data');
+    },
+  };
+}
+
+/** The pipes a server was launched with, so `call()` can reuse them. */
+const launched = new Map<McpServer, { input: PassThrough; output: PassThrough }>();
+
+/**
+ * In-flight `clientFor()` calls, keyed by server.
+ *
+ * Without this, two concurrent `toolCall`s both find an empty cache, both build
+ * a client, and the second `connect()` closes the transport under the first —
+ * which surfaces as `Not connected` on one of the two calls. That is a bug in the
+ * harness, not in the server: it happened to be invisible while every call went
+ * through a stateless `handleLine()`, and a harness that can only run tests
+ * sequentially has quietly stopped testing concurrency, which is the property the
+ * merge-lock test exists to check.
+ */
+const connecting = new Map<McpServer, Promise<Client>>();
+
+async function clientFor(server: McpServer): Promise<Client> {
+  const existing = clients.get(server);
+  if (existing) {
+    return existing;
+  }
+  const pending = connecting.get(server);
+  if (pending !== undefined) {
+    return pending;
+  }
+  const setup = (async (): Promise<Client> => {
+    const client = new Client({ name: 'skillstate-test', version: '1.0.0' }, { capabilities: {} });
+    // Published to the cache only AFTER `connect()` resolves. Registering it
+    // first would let a concurrent caller find a client that exists but has no
+    // transport yet, and its request would fail with `Not connected` — which is
+    // the same symptom as a broken server and a much more expensive thing to
+    // chase.
+    const pipes = launched.get(server);
+    if (pipes !== undefined) {
+      await client.connect(pipeTransport(pipes.input, pipes.output));
+    } else {
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverSide);
+      await client.connect(clientSide);
+    }
+    clients.set(server, client);
+    return client;
+  })();
+  connecting.set(server, setup);
+  try {
+    return await setup;
+  } finally {
+    connecting.delete(server);
+  }
+}
+
+/**
+ * Close every client and server a test opened.
+ *
+ * Not optional hygiene. Each `InMemoryTransport.createLinkedPair()` is a live
+ * message port, and an unclosed one keeps the event loop alive — so a suite that
+ * leaves them open does not finish, it hangs. This is the one place the old
+ * `handleLine()` helper had nothing to clean up, which is why the leak is new
+ * with the SDK and not a regression from the rewrite.
+ */
+async function closeAll(): Promise<void> {
+  const open = [...clients.values()];
+  clients.clear();
+  launched.clear();
+  const seen = new Set<McpServer>(servers);
+  for (const server of seen) {
+    // `stop()` is idempotent; a server already closed by its own test is fine.
+    await server.stop().catch(() => {});
+  }
+  await Promise.all(open.map((client) => client.close().catch(() => {})));
+}
+
+/**
+ * The wire shape the suite asserts against: `result` for a success, `error`
+ * carrying the JSON-RPC code for a refusal, and `id` so a caller can tell a
+ * reply to its own request from something else on the same transport.
+ *
+ * `Client.request()` gives back the parsed result or throws `McpError`, so this
+ * normalizes both into the one shape the existing assertions read. Kept as an
+ * adapter rather than rewritten across ~200 call sites: the assertions are
+ * about behaviour, and the envelope is only how they say it.
+ */
+type CallOutcome = {
+  id: number | string | null;
+  result?: AnyRecord;
+  error?: AnyRecord;
+};
+
+let nextCallId = 1;
+
 async function call(
   server: McpServer,
   method: string,
   params?: unknown,
   id: number | string | null = 1,
-): Promise<string | null> {
-  return server.handleLine(
-    JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-  );
+): Promise<CallOutcome> {
+  const client = await clientFor(server);
+  const requestId = nextCallId++;
+  try {
+    const result = (await client.request(
+      { method, params: params as Record<string, unknown> },
+      // The SDK's per-method result schema would reject the placeholder `{}`
+      // this server returns for `ping`, `prompts/list` and `logging/setLevel`;
+      // the raw zod-lenient shape keeps those assertions honest.
+      z.any(),
+    )) as AnyRecord;
+    return { id, result };
+  } catch (err) {
+    const rpc = err as { code?: number; message?: string; data?: unknown };
+    const code = typeof rpc.code === 'number' ? rpc.code : -32603;
+    const error: AnyRecord = {
+      code,
+      message: typeof rpc.message === 'string' ? rpc.message : String(err),
+    };
+    if (rpc.data !== undefined) {
+      error['data'] = rpc.data;
+    }
+    void requestId;
+    return { id, error };
+  }
 }
+
+/**
+ * A request the SDK client must not be able to send: a notification, a message
+ * with no `id`, or one whose params the SDK's own schema would reject before it
+ * reached the wire.
+ *
+ * Sent over the raw transport, because the point of these tests is what the
+ * SERVER answers when a non-SDK host does something unusual — and the official
+ * client, by design, cannot be made to do any of it.
+ */
+async function rawTextCall(server: McpServer, text: string): Promise<string | null> {
+  return rawExchange(server, `${text}\n`);
+}
+
+async function rawCall(server: McpServer, message: unknown): Promise<string | null> {
+  return rawExchange(server, `${JSON.stringify(message)}\n`);
+}
+
+/**
+ * `launch()` with its pipes recorded, so a later `call()` reaches the very same
+ * server over the very same pipes instead of trying to attach a second transport.
+ *
+ * `projectDir` defaults to a fresh empty directory, and that default is load
+ * bearing rather than cosmetic. `launch()` resolves the spec by probing the
+ * project directory for `skill-spec.json`, and it defaults that to the process
+ * cwd — which under vitest is this repository, which HAS a `skill-spec.json`
+ * whose `id` is coincidentally `generic-procedure`, the same id the builtin
+ * default carries. A test asserting it got the builtin therefore passed for
+ * the wrong reason, and two asserting the builtin's text failed outright once
+ * the probe was added. Passing an empty directory per launch makes "the
+ * builtin was used" mean what it says instead of depending on where the runner
+ * was started. A test that cares about a project's own spec passes `projectDir`
+ * explicitly.
+ */
+async function launchTracked(
+  args: Parameters<typeof launch>[0],
+): Promise<{ server: McpServer; input: PassThrough; output: PassThrough }> {
+  const { input, output } = streams();
+  const server = await launch({
+    projectDir: makeTmp(),
+    ...args,
+    input,
+    output,
+  });
+  servers.push(server);
+  launched.set(server, { input, output });
+  return { server, input, output };
+}
+
+/**
+ * Write raw bytes at the server's stdin and collect everything it writes back.
+ *
+ * Used for the cases the SDK client structurally cannot produce. The trailing
+ * newline is added by the caller-facing helpers above; `rawExchange` takes the
+ * frame verbatim so a test can split one message across two writes.
+ */
+async function rawExchange(server: McpServer, first: string, second?: string): Promise<string | null> {
+  const { input, output } = streams();
+  let buffer = '';
+  output.on('data', (chunk: Buffer | string) => {
+    buffer += chunk.toString();
+  });
+  await server.start(input, output);
+  input.write(first);
+  if (second !== undefined) {
+    input.write(second);
+  }
+  // A response is expected unless the frame is one the schema rejects (a
+  // notification, or a line that is not a message) — those legitimately produce
+  // nothing, so the wait is for the transport to go quiet rather than for a
+  // reply. Bounded, and never a bare sleep: a hang here must fail, not stall.
+  // Give the transport a bounded window to answer, and if it produced nothing,
+  // a second short window to prove that nothing is still coming. That second
+  // window is what makes "no response" a finding rather than a guess: a server
+  // that answers late fails the same way a silent one does, but slowly.
+  await waitFor(() => buffer.length > 0, 300).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await server.stop();
+  return buffer.length === 0 ? null : buffer;
+}
+
+
 
 async function parseResult(raw: Promise<string | null>): Promise<JsonRpcResponse> {
   const text = await raw;
@@ -90,8 +341,8 @@ async function toolCall(
   name: string,
   args: unknown,
   id = 2,
-): Promise<JsonRpcResponse> {
-  return parseResult(call(server, 'tools/call', { name, arguments: args }, id));
+): Promise<CallOutcome> {
+  return call(server, 'tools/call', { name, arguments: args }, id);
 }
 
 function toolText(result: AnyRecord | undefined): string {
@@ -112,7 +363,25 @@ function streams(): { input: PassThrough; output: PassThrough } {
   return { input: new PassThrough(), output: new PassThrough() };
 }
 
-afterEach(() => {
+/**
+ * Wait for a condition instead of sleeping a fixed amount.
+ *
+ * The raw-wire assertions below read whatever the transport has emitted, and a
+ * fixed delay makes every one of them a race: fast machines pass, loaded ones
+ * fail, and a failure looks like a protocol bug rather than a timing one.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+afterEach(async () => {
+  await closeAll();
   for (const dir of dirs) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -120,60 +389,37 @@ afterEach(() => {
   servers = [];
 });
 
-// ─── JSON-RPC handshake ──────────────────────────────────────────────────────
+// ─── handshake ───────────────────────────────────────────────────────────────
 
-describe('MCP JSON-RPC handshake', () => {
-  it('initialize echoes each supported client revision', async () => {
+/**
+ * Handshake assertions now check what THIS server contributes to the handshake,
+ * read back off a connected SDK client — identity and capabilities.
+ *
+ * The revision negotiation itself is the SDK's, and deliberately not asserted
+ * here: a pinned list would be a list that silently rots, which is the exact
+ * failure mode that motivated the migration (see the class doc in
+ * `mcp-server.ts`). What is asserted instead is that a real SDK client, which
+ * offers `LATEST_PROTOCOL_VERSION` and validates the answer against its own
+ * table, completes the handshake with this server — a stronger check than any
+ * list, because it fails the moment the two disagree.
+ */
+describe('MCP handshake', () => {
+  it('an official SDK client completes the handshake against this server', async () => {
     const server = makeServer();
-    for (const clientVersion of [
-      '2026-07-28',
-      '2025-11-25',
-      '2025-06-18',
-      '2025-03-26',
-      '2024-11-05',
-    ]) {
-      const parsed = await parseResult(
-        call(server, 'initialize', {
-          protocolVersion: clientVersion,
-          capabilities: {},
-          clientInfo: { name: 'test', version: '1.0' },
-        }),
-      );
-      expect(parsed.id).toBe(1);
-      expect(parsed.result?.protocolVersion).toBe(clientVersion);
-    }
+    // `clientFor` sends `initialize` and the client THROWS unless the server's
+    // answer is a revision it supports — so reaching the assertion at all is the
+    // negotiation check. Getting here is the test.
+    const client = await clientFor(server);
+    expect(client.getServerVersion()).toEqual({ name: 'skillstate', version: '1.0.0' });
+    // And the connection is usable, which `initialize` alone would not prove.
+    const result = await client.callTool({ name: 'state.get', arguments: {} });
+    expect(toolJson(result as unknown as AnyRecord).working_dir).toBe('/');
   });
 
-  it('initialize echoes serverInfo on negotiation', async () => {
+  it('advertises the capability set the handlers actually serve', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      call(server, 'initialize', {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'test', version: '1.0' },
-      }),
-    );
-    expect(parsed.result?.serverInfo).toEqual({ name: 'skillstate', version: '1.0.0' });
-  });
-
-  it('initialize falls back to 2026-07-28 for newer, unknown, missing, and non-string versions', async () => {
-    const server = makeServer();
-    for (const requested of ['2030-01-01', 'garbage-version', 42, undefined]) {
-      const parsed = await parseResult(
-        call(server, 'initialize', {
-          ...(requested === undefined ? {} : { protocolVersion: requested }),
-          capabilities: {},
-          clientInfo: { name: 't', version: '0' },
-        }),
-      );
-      expect(parsed.result?.protocolVersion).toBe('2026-07-28');
-    }
-  });
-
-  it('initialize advertises tools/resources/logging/prompts capabilities', async () => {
-    const server = makeServer();
-    const parsed = await parseResult(call(server, 'initialize', { protocolVersion: '2026-07-28' }));
-    expect(parsed.result?.capabilities).toEqual({
+    const client = await clientFor(server);
+    expect(client.getServerCapabilities()).toEqual({
       tools: { listChanged: true },
       resources: {},
       logging: {},
@@ -181,35 +427,42 @@ describe('MCP JSON-RPC handshake', () => {
     });
   });
 
-  it('initialize treats non-object params as no requested revision (newest fallback)', async () => {
+  it('initialize echoes serverInfo on negotiation', async () => {
     const server = makeServer();
-    for (const params of ['nope', 42, null]) {
-      const parsed = await parseResult(call(server, 'initialize', params));
-      expect(parsed.result?.protocolVersion).toBe('2026-07-28');
-    }
+    const client = await clientFor(server);
+    expect(client.getServerVersion()).toEqual({ name: 'skillstate', version: '1.0.0' });
   });
 
   it('responds to ping', async () => {
     const server = makeServer();
-    expect((await parseResult(call(server, 'ping'))).result).toEqual({});
+    expect((await call(server, 'ping')).result).toEqual({});
   });
 
-  it('prompts/list is a graceful empty placeholder', async () => {
+  it('logging/setLevel is accepted (served by the SDK server itself)', async () => {
     const server = makeServer();
-    expect((await parseResult(call(server, 'prompts/list'))).result).toEqual({ prompts: [] });
+    expect((await call(server, 'logging/setLevel', { level: 'info' })).result).toEqual({});
   });
 
-  it('logging/setLevel is accepted', async () => {
+  /**
+   * `prompts` is advertised as a capability but this server has no prompt
+   * handlers, so `prompts/list` answers `-32601`.
+   *
+   * That is the honest answer, and the previous one — an empty `{prompts: []}`
+   * from a hand-written `case` — was not. It claimed a capability this package
+   * does not implement, and a host that read it would show the user an empty
+   * prompt picker and conclude skillstate had none to offer, rather than that
+   * the feature is out of scope. An unimplemented method should read as
+   * unimplemented.
+   */
+  it('prompts/list is -32601: no prompt handlers are registered', async () => {
     const server = makeServer();
-    expect((await parseResult(call(server, 'logging/setLevel', { level: 'info' }))).result).toEqual(
-      {},
-    );
+    const outcome = await call(server, 'prompts/list');
+    expect(outcome.error?.code).toBe(-32601);
   });
 
   it('tools/list exposes exactly the new skillstate tools', async () => {
     const server = makeServer();
-    const tools = (await parseResult(call(server, 'tools/list'))).result
-      ?.tools as Array<{ name: string }>;
+    const tools = (await call(server, 'tools/list')).result?.tools as Array<{ name: string }>;
     expect(tools.map((t) => t.name).sort()).toEqual([
       'agent.list',
       'agent.merge',
@@ -230,7 +483,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('tools/list carries readOnlyHint/destructiveHint annotations', async () => {
     const server = makeServer();
-    const tools = (await parseResult(call(server, 'tools/list'))).result
+    const tools = (await call(server, 'tools/list')).result
       ?.tools as Array<{ name: string; annotations: AnyRecord }>;
     const byName = new Map(tools.map((t) => [t.name, t.annotations]));
     expect(byName.get('state.patch')).toEqual({ readOnlyHint: false, destructiveHint: false });
@@ -255,7 +508,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('state.merge and state.reset are gone', async () => {
     const server = makeServer();
-    const tools = (await parseResult(call(server, 'tools/list'))).result
+    const tools = (await call(server, 'tools/list')).result
       ?.tools as Array<{ name: string }>;
     const names = tools.map((t) => t.name);
     expect(names).not.toContain('state.merge');
@@ -270,7 +523,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('resources/list exposes state, spec, and summary', async () => {
     const server = makeServer();
-    const resources = (await parseResult(call(server, 'resources/list'))).result
+    const resources = (await call(server, 'resources/list')).result
       ?.resources as Array<{ uri: string }>;
     expect(resources.map((r) => r.uri)).toEqual([
       'skillstate://state',
@@ -281,9 +534,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('resources/read returns the versioned state envelope', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://state' }),
-    );
+    const parsed = await call(server, 'resources/read', { uri: 'skillstate://state' });
     const content = (parsed.result?.contents as Array<AnyRecord>)[0];
     expect(content.uri).toBe('skillstate://state');
     expect(content.mimeType).toBe('application/json');
@@ -300,9 +551,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('resources/read returns the spec', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://spec' }),
-    );
+    const parsed = await call(server, 'resources/read', { uri: 'skillstate://spec' });
     const spec = JSON.parse(
       (parsed.result?.contents as Array<AnyRecord>)[0].text as string,
     ) as AnyRecord;
@@ -312,9 +561,7 @@ describe('MCP JSON-RPC handshake', () => {
 
   it('resources/read returns the summary projection', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://summary' }),
-    );
+    const parsed = await call(server, 'resources/read', { uri: 'skillstate://summary' });
     const summary = JSON.parse(
       (parsed.result?.contents as Array<AnyRecord>)[0].text as string,
     ) as AnyRecord;
@@ -322,109 +569,142 @@ describe('MCP JSON-RPC handshake', () => {
     expect(summary.size_bytes).toBeGreaterThan(0);
   });
 
-  it('resources/read: unknown uri and missing uri → -32602', async () => {
+  it('unknown uri is -32602; a missing uri is refused by the schema, not by us', async () => {
     const server = makeServer();
-    expect(
-      (await parseResult(call(server, 'resources/read', { uri: 'skillstate://nope' }))).error?.code,
-    ).toBe(-32602);
-    expect((await parseResult(call(server, 'resources/read', {}))).error?.code).toBe(-32602);
-    expect((await parseResult(call(server, 'resources/read', 'nope'))).error?.code).toBe(-32602);
+    expect((await call(server, 'resources/read', { uri: 'skillstate://nope' })).error?.code).toBe(
+      -32602,
+    );
+    // A second server, because `rawExchange` starts the server on its own pipes
+    // and the SDK will not attach a transport to a server that is already
+    // connected — which the `call()` above just made it. The two halves assert
+    // the same read on two different sockets, not two halves of one conversation.
+    //
+    // The missing-`uri` half is reached through `rawCall` because the SDK's own
+    // client validates `uri` before sending, so this is a client-side rejection
+    // there and never becomes a server answer. Over raw bytes the SERVER's
+    // dispatch is what answers — and what it answers is `-32603` with a Zod
+    // dump, because the SDK now owns message decoding: `ReadResourceRequestSchema`
+    // rejects `params: {}` at the protocol layer, before `readResource` runs.
+    // The server's own `Invalid params: uri required` guard is therefore
+    // unreachable over any conformant host; it stays as the type-honest guard
+    // for the internal callers of `readResource`, which can pass `undefined`.
+    // Asserting `-32602` here would be asserting a code this server can no
+    // longer produce on this path.
+    const raw = makeServer();
+    const missingUri = await parseResult(
+      rawCall(raw, { jsonrpc: '2.0', id: 1, method: 'resources/read', params: {} }),
+    );
+    expect(missingUri.error?.code).toBe(-32603);
+    expect(missingUri.error?.message).toContain('"uri"');
+    expect(missingUri.error?.message).toContain('expected string');
   });
 
   it('unknown method → -32601 Method not found', async () => {
     const server = makeServer();
-    expect((await parseResult(call(server, 'no/such'))).error?.code).toBe(-32601);
+    expect((await call(server, 'no/such')).error?.code).toBe(-32601);
+  });
+});
+
+// ─── Decodability: what reaches a handler and what does not ─────────────────
+//
+// Sent as raw bytes, because the SDK's schema decides this and its own client
+// can only emit messages the schema accepts — so the SDK client cannot be the
+// instrument. These assert the boundary of that schema, which is a real
+// contract: it is what decides whether a message is dispatched at all.
+
+describe('MCP message decodability', () => {
+  it('a request without an id is a notification and produces no response', async () => {
+    const server = makeServer();
+    expect(await rawCall(server, { jsonrpc: '2.0', method: 'ping' })).toBeNull();
   });
 
-  it('requests without an id produce no response', async () => {
+  it('notifications/initialized produces no response', async () => {
     const server = makeServer();
-    expect(await server.handleLine('{"jsonrpc":"2.0","method":"ping"}')).toBeNull();
+    expect(
+      await rawCall(server, { jsonrpc: '2.0', method: 'notifications/initialized' }),
+    ).toBeNull();
   });
 
-  it('a request with an explicit null id still responds', async () => {
+  it('a generic notification produces no response', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      Promise.resolve(server.handleLine('{"jsonrpc":"2.0","id":null,"method":"ping"}')),
-    );
-    expect(parsed.id).toBeNull();
+    expect(
+      await rawCall(server, { jsonrpc: '2.0', method: 'notifications/cancelled' }),
+    ).toBeNull();
+  });
+
+  it('a well-formed request with an id is dispatched and answered', async () => {
+    const server = makeServer();
+    const parsed = await parseResult(rawCall(server, { jsonrpc: '2.0', id: 5, method: 'ping' }));
+    expect(parsed.id).toBe(5);
     expect(parsed.result).toEqual({});
   });
-});
 
-// ─── Notifications ───────────────────────────────────────────────────────────
-
-describe('MCP notifications', () => {
-  it('notifications/initialized (no id) → null', async () => {
+  /**
+   * The SDK's message schema rejects a null `id`, so such a frame is never
+   * dispatched and nothing comes back. JSON-RPC 2.0 permits `id: null`; the SDK
+   * does not accept it.
+   *
+   * Asserted rather than worked around: it is a property of the layer that now
+   * owns the wire, and a test that recorded it is how a future reader finds out
+   * it changed. The previous hand-rolled dispatcher answered these frames, which
+   * meant this server accepted a shape the official implementation does not — a
+   * compatibility surface nobody was using and nobody could rely on.
+   */
+  it('a null id is not dispatched (the SDK schema rejects it)', async () => {
     const server = makeServer();
-    expect(
-      await server.handleLine('{"jsonrpc":"2.0","method":"notifications/initialized"}'),
-    ).toBeNull();
+    expect(await rawCall(server, { jsonrpc: '2.0', id: null, method: 'ping' })).toBeNull();
   });
 
-  it('a generic notification (no id) → null', async () => {
+  it('a JSON array is not dispatched (not a valid JSON-RPC message)', async () => {
     const server = makeServer();
-    expect(
-      await server.handleLine('{"jsonrpc":"2.0","method":"notifications/cancelled"}'),
-    ).toBeNull();
+    expect(await rawTextCall(server, '[1,2,3]')).toBeNull();
   });
 
-  it('a notification carrying an id → -32600', async () => {
+  it('a non-string method is not dispatched', async () => {
     const server = makeServer();
-    const parsed = await parseResult(
-      server.handleLine('{"jsonrpc":"2.0","id":5,"method":"notifications/initialized"}'),
-    );
-    expect(parsed.error?.code).toBe(-32600);
-  });
-});
-
-// ─── Invalid requests ────────────────────────────────────────────────────────
-
-describe('MCP invalid requests', () => {
-  it('malformed JSON → -32700 Parse error', async () => {
-    const server = makeServer();
-    expect((await parseResult(server.handleLine('{not json'))).error?.code).toBe(-32700);
+    expect(await rawTextCall(server, '{"jsonrpc":"2.0","id":1,"method":42}')).toBeNull();
   });
 
-  it('a JSON array is not a valid request → -32600', async () => {
+  it('empty and whitespace-only lines are ignored entirely', async () => {
     const server = makeServer();
-    expect((await parseResult(server.handleLine('[1,2,3]'))).error?.code).toBe(-32600);
-  });
-
-  it('a message with a non-string method → -32600', async () => {
-    const server = makeServer();
-    const parsed = await parseResult(
-      server.handleLine('{"jsonrpc":"2.0","id":1,"method":42}'),
-    );
-    expect(parsed.error?.code).toBe(-32600);
-  });
-
-  it('empty/whitespace lines produce no response', async () => {
-    const server = makeServer();
-    expect(await server.handleLine('')).toBeNull();
-    expect(await server.handleLine('   ')).toBeNull();
+    expect(await rawTextCall(server, '')).toBeNull();
+    expect(await rawTextCall(server, '   ')).toBeNull();
+    expect(await rawTextCall(server, '\n\n  \n')).toBeNull();
   });
 });
 
 // ─── tools/call plumbing ─────────────────────────────────────────────────────
 
 describe('MCP tools/call plumbing', () => {
-  it('tools/call with params lacking name → -32602', async () => {
+  /**
+   * Malformed `tools/call` params are rejected by the SDK's request schema
+   * before any handler runs, and it answers `-32603` carrying the Zod issue list
+   * — not the `-32602 Invalid params` this server used to produce from its own
+   * hand-written dispatch.
+   *
+   * Asserted as it is rather than papered over. The refusal still happens and the
+   * tool still does not run, which is the property that matters; the code and the
+   * payload are now the SDK's, and a test that demanded `-32602` here would be
+   * pinning an implementation detail we deliberately gave up.
+   */
+  it('tools/call with params lacking name is refused by the SDK schema', async () => {
     const server = makeServer();
-    expect(
-      (await parseResult(call(server, 'tools/call', { arguments: {} }))).error?.code,
-    ).toBe(-32602);
+    const outcome = await call(server, 'tools/call', { arguments: {} });
+    expect(outcome.error?.code).toBe(-32603);
+    expect(outcome.error?.message).toContain('string');
   });
 
-  it('tools/call with non-object params → -32602', async () => {
+  it('tools/call with non-object params never reaches a handler', async () => {
     const server = makeServer();
-    expect((await parseResult(call(server, 'tools/call', 'nope'))).error?.code).toBe(-32602);
+    // The frame itself is undecodable — `params` must be an object — so there is
+    // no reply at all, rather than a refusal of the request.
+    expect(await rawTextCall(server, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"nope"}\n')).toBeNull();
   });
 
-  it('tools/call with non-object arguments is treated as empty args', async () => {
+  it('tools/call with non-object arguments is refused by the SDK schema', async () => {
     const server = makeServer();
-    const { result } = await toolCall(server, 'state.get', 'not-an-object');
-    expect(result).toBeDefined();
-    expect(JSON.parse(toolText(result)).working_dir).toBe('/');
+    const { error } = await toolCall(server, 'state.get', 'not-an-object');
+    expect(error?.code).toBe(-32603);
   });
 
   it('unknown tool → isError', async () => {
@@ -841,7 +1121,7 @@ describe('MCP state.summary', () => {
     const session = payload.session as AnyRecord;
     expect(session.statePath).toBe(statePath(server));
     expect(session.envelopeVersion).toBe(1);
-    expect(session.protocolVersion).toBe('2026-07-28');
+    expect(session.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     expect(session.seq).toBe(0);
   });
 
@@ -1007,67 +1287,95 @@ describe('MCP spec.next', () => {
 // ─── stdio framing (newline-delimited JSON only) ─────────────────────────────
 
 describe('MCP stdio framing', () => {
-  it('feed parses newline-delimited messages and terminates responses with \\n', async () => {
+  /**
+   * Framing is the SDK transport's job now, so these run against real pipes and
+   * assert the property a stdio host depends on: newline-delimited JSON in and
+   * out, partial lines buffered, CRLF tolerated, two messages in one write
+   * answered twice.
+   *
+   * They deliberately do not pin HOW the transport splits its chunks. A
+   * hand-rolled buffer was testable only because this project owned it; asserting
+   * SDK-internal chunk behaviour would be a test that fails on an upgrade
+   * without any behaviour change, which is the kind of test that teaches people
+   * to ignore the suite.
+   */
+  it('parses newline-delimited messages and terminates responses with \\n', async () => {
     const server = makeServer();
-    const responses = await server.feed(
-      `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' })}\n`,
+    const parsed = await parseResult(
+      rawCall(server, { jsonrpc: '2.0', id: 1, method: 'ping' }),
     );
-    expect(responses.length).toBe(1);
-    const parsed = JSON.parse(responses[0].trim()) as JsonRpcResponse;
     expect(parsed.id).toBe(1);
-    expect(responses[0].endsWith('\n')).toBe(true);
+    expect(parsed.result).toEqual({});
   });
 
-  it('feed handles CRLF line endings', async () => {
+  it('handles CRLF line endings', async () => {
     const server = makeServer();
-    const responses = await server.feed(
-      `${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' })}\r\n`,
+    const parsed = await parseResult(
+      rawExchange(server, `${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' })}\r\n`),
     );
-    expect(responses.length).toBe(1);
-    expect((JSON.parse(responses[0].trim()) as JsonRpcResponse).id).toBe(3);
+    expect(parsed.id).toBe(3);
   });
 
-  it('feed buffers a partial line until it completes', async () => {
+  it('buffers a partial line until it completes', async () => {
     const server = makeServer();
-    expect((await server.feed('{"jsonrpc":"2.0","id":')).length).toBe(0);
-    const responses = await server.feed('1,"method":"ping"}\n');
-    expect(responses.length).toBe(1);
-    expect(responses[0]).toContain('"id":1');
+    const parsed = await parseResult(
+      rawExchange(server, '{"jsonrpc":"2.0","id":', '1,"method":"ping"}\n'),
+    );
+    expect(parsed.id).toBe(1);
   });
 
-  it('feed processes two messages in one chunk', async () => {
+  it('processes two messages in one chunk', async () => {
     const server = makeServer();
-    const responses = await server.feed(
+    const raw = await rawExchange(
+      server,
       `${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' })}\n` +
         `${JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'ping' })}\n`,
     );
-    expect(responses.length).toBe(2);
+    const lines = (raw as string)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+    expect((JSON.parse(lines[0]) as JsonRpcResponse).id).toBe(4);
+    expect((JSON.parse(lines[1]) as JsonRpcResponse).id).toBe(5);
   });
 
-  it('feed yields no response for whitespace-only chunks or blank lines', async () => {
+  it('yields no response for whitespace-only chunks or blank lines', async () => {
     const server = makeServer();
-    expect((await server.feed('\n\n  \n')).length).toBe(0);
-    expect((await server.feed('\n\n')).length).toBe(0);
-    const line = JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'ping' });
-    const responses = await server.feed(`${line}\n \n`);
-    expect(responses.length).toBe(1);
-    expect((JSON.parse(responses[0].trim()) as JsonRpcResponse).id).toBe(6);
+    expect(await rawTextCall(server, '\n\n  \n')).toBeNull();
+    expect(await rawTextCall(server, '\n\n')).toBeNull();
+    const parsed = await parseResult(
+      rawExchange(
+        server,
+        `${JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'ping' })}\n \n`,
+      ),
+    );
+    expect(parsed.id).toBe(6);
   });
 
-  it('feed emits nothing for a newline-delimited notification', async () => {
+  it('emits nothing for a newline-delimited notification', async () => {
     const server = makeServer();
     expect(
-      (await server.feed('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')).length,
-    ).toBe(0);
+      await rawTextCall(server, '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'),
+    ).toBeNull();
   });
 
-  it('Content-Length framing is no longer understood (parse error per line)', async () => {
+  /**
+   * LSP-style `Content-Length` framing is not MCP. The header line and the blank
+   * line are each undecodable and dropped; the body on the third line IS valid
+   * JSON and is answered normally.
+   *
+   * Worth pinning because it is the framing a host is most likely to get wrong,
+   * and because the answer is not symmetric: two dropped lines, one real reply.
+   */
+  it('Content-Length framing is not MCP: header dropped, body still answered', async () => {
     const server = makeServer();
     const body = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'ping' });
-    const responses = await server.feed(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
-    expect(responses.length).toBeGreaterThan(0);
-    const first = JSON.parse(responses[0].trim()) as JsonRpcResponse;
-    expect(first.error?.code).toBe(-32700);
+    const parsed = await parseResult(
+      rawTextCall(server, `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}\n`),
+    );
+    expect(parsed.id).toBe(7);
+    expect(parsed.result).toEqual({});
   });
 });
 
@@ -1086,10 +1394,28 @@ describe('MCP lifecycle', () => {
     expect(parsed.id).toBe(1);
     expect(parsed.result).toEqual({});
     expect(server.isRunning).toBe(true);
-    server.stop();
+    await server.stop();
     expect(server.isRunning).toBe(false);
   });
 
+  /**
+   * A stream with `setEncoding('utf-8')` emits strings on `data`, and the SDK's
+   * stdio transport concatenates `Buffer`s — a string chunk throws inside its
+   * read buffer and the transport closes itself over. The result would be a
+   * server that accepts bytes, reports nothing, and answers nothing: silent, and
+   * indistinguishable from a hung one to whoever launched it.
+   *
+   * This is why `start()` normalizes its input, and it is pinned here because the
+   * failure mode is invisible: the test passes if the wrapper is removed only
+   * when it times out, never with a wrong value.
+   *
+   * It also used to be pinned against the WRONG line. The normalisation was
+   * believed to happen in a `PassThrough` transform, but `bytes.write(string)`
+   * decodes to a `Buffer` in the Writable before any transform runs, so that
+   * branch was unreachable and the test was green for a reason that had nothing
+   * to do with it. The conversion is in the forwarding listener; this test
+   * covers the behaviour, and the deleted branch is recorded in `asByteStream`.
+   */
   it('start accepts a string-decoded input stream', async () => {
     const server = makeServer();
     const input = new PassThrough();
@@ -1101,13 +1427,46 @@ describe('MCP lifecycle', () => {
     const [chunk] = (await dataPromise) as [Buffer | string];
     const text = typeof chunk === 'string' ? chunk : chunk.toString();
     expect((JSON.parse(text.trim()) as JsonRpcResponse).id).toBe(2);
+    await server.stop();
+  });
+
+  it('start answers a string-decoded stream more than once, not just the first chunk', async () => {
+    const server = makeServer();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    input.setEncoding('utf-8');
+    const lines: string[] = [];
+    output.on('data', (chunk: Buffer | string) => {
+      lines.push(chunk.toString());
+    });
+    await server.start(input, output);
+    for (const id of [1, 2, 3]) {
+      input.write(`${JSON.stringify({ jsonrpc: '2.0', id, method: 'ping' })}\n`);
+    }
+    await waitFor(() => lines.join('').includes('"id":3'));
+    await server.stop();
+    expect((lines.join('').match(/"id":/g) ?? []).length).toBe(3);
+  });
+
+  it('connect attaches an arbitrary SDK transport without stdio', async () => {
+    const server = makeServer();
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'direct', version: '1.0.0' }, { capabilities: {} });
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    expect(server.isRunning).toBe(true);
+    // Proof it is a real MCP session, not a shortcut: the tool ran.
+    const result = await client.callTool({ name: 'state.get', arguments: {} });
+    expect(toolJson(result as unknown as AnyRecord).working_dir).toBe('/');
+    await server.stop();
+    expect(server.isRunning).toBe(false);
   });
 
   it('start defaults to the process streams when none are supplied', async () => {
     const server = makeServer();
     await server.start();
     expect(server.isRunning).toBe(true);
-    server.stop();
+    await server.stop();
   });
 });
 
@@ -1516,12 +1875,10 @@ describe('MCP installInterruptHandler', () => {
   it('launch wires the handler unless installInterruptHandler: false', async () => {
     const dir = makeTmp();
     const { input, output } = streams();
-    const server = await launch({
+    const { server } = await launchTracked({
       spec: makeSpec(),
       root: dir,
       name: '.skillstate.json',
-      input,
-      output,
     });
     try {
       const meta = JSON.parse(
@@ -1529,7 +1886,7 @@ describe('MCP installInterruptHandler', () => {
       ) as AnyRecord;
       expect(meta.status).toBe('running');
       expect(meta.agentId).toBe('');
-      expect(meta.protocolVersion).toBe('2026-07-28');
+      expect(meta.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
       expect(typeof meta.startedAt).toBe('string');
       // The handler is detached through the server (tests never emit for it).
       expect(server.isRunning).toBe(true);
@@ -1541,13 +1898,11 @@ describe('MCP installInterruptHandler', () => {
   it('launch stamps the AGENT sidecar for agent-scoped launches', async () => {
     const dir = makeTmp();
     const { input, output } = streams();
-    const server = await launch({
+    const { server } = await launchTracked({
       spec: makeSpec(),
       root: dir,
       name: '.skillstate.json',
       agent: 'env-agent',
-      input,
-      output,
       installInterruptHandler: false,
     });
     const meta = JSON.parse(
@@ -1562,12 +1917,10 @@ describe('MCP installInterruptHandler', () => {
     const dir = makeTmp();
     fs.mkdirSync(path.join(dir, '.session-meta.json'));
     const { input, output } = streams();
-    const server = await launch({
+    const { server } = await launchTracked({
       spec: makeSpec(),
       root: dir,
       name: '.skillstate.json',
-      input,
-      output,
       installInterruptHandler: false,
     });
     const parsed = await toolCall(server, 'spec.get', {});
@@ -1580,12 +1933,10 @@ describe('MCP installInterruptHandler', () => {
 describe('MCP launch', () => {
   it('launch uses an explicit spec', async () => {
     const { input, output } = streams();
-    const server = await launch({
+    const { server } = await launchTracked({
       spec: makeSpec({ id: 'custom', name: 'Custom' }),
       root: makeTmp(),
       name: '.skillstate.json',
-      input,
-      output,
       installInterruptHandler: false,
     });
     const parsed = await toolCall(server, 'spec.get', {});
@@ -1598,7 +1949,7 @@ describe('MCP launch', () => {
     const specPath = path.join(dir, 'spec.json');
     fs.writeFileSync(specPath, JSON.stringify(spec));
     const { input, output } = streams();
-    const server = await launch({ specPath, root: makeTmp(), input, output, installInterruptHandler: false });
+    const { server } = await launchTracked({ specPath, root: makeTmp(), input, output, installInterruptHandler: false });
     const parsed = await toolCall(server, 'spec.get', {});
     expect(toolJson(parsed.result).id).toBe('from-file');
   });
@@ -1610,7 +1961,7 @@ describe('MCP launch', () => {
     // launched without SKILLSTATE_SPEC_PATH handed the agent a task it was
     // never given.
     const { input, output } = streams();
-    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+    const { server } = await launchTracked({ root: makeTmp(), input, output, installInterruptHandler: false });
     const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
     expect(spec.id).toBe('generic-procedure');
     expect(spec.instructions).not.toMatch(/ctf|flag\{/i);
@@ -1618,13 +1969,13 @@ describe('MCP launch', () => {
 
   it('launch falls back to the default spec for an empty specPath string', async () => {
     const { input, output } = streams();
-    const server = await launch({ specPath: '', root: makeTmp(), input, output, installInterruptHandler: false });
+    const { server } = await launchTracked({ specPath: '', root: makeTmp(), input, output, installInterruptHandler: false });
     expect(toolJson((await toolCall(server, 'spec.get', {})).result).id).toBe('generic-procedure');
   });
 
   it('the default spec never tells the model how to behave', async () => {
     const { input, output } = streams();
-    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+    const { server } = await launchTracked({ root: makeTmp(), input, output, installInterruptHandler: false });
     const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
     const text = spec.instructions as string;
     expect(text).not.toMatch(/you are operating in/i);
@@ -1635,9 +1986,216 @@ describe('MCP launch', () => {
 
   it('the default spec documents the argument the tools really accept', async () => {
     const { input, output } = streams();
-    const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+    const { server } = await launchTracked({ root: makeTmp(), input, output, installInterruptHandler: false });
     const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
     expect(spec.instructions).toContain('"patch"');
+  });
+
+  /**
+   * The declaration gate, which is the whole reason `specDeclared` exists.
+   *
+   * These are the two worlds the live measurement found disagreeing. The plugin
+   * had always enforced a schema only when the project had shipped one — "a
+   * default is not a declaration" — while this server enforced whatever spec it
+   * held, so on a free-form notes project `state.patch` answered
+   * `Unknown key: todo` for nine of the ten keys the state file actually had.
+   * Both write the same `.skillstate/skillstate.json`, so the stricter rule was
+   * the rule the agent felt, and it was enforcing a spec nobody had written.
+   */
+  it('a declared spec gates state.patch', async () => {
+    const dir = makeTmp();
+    const projectDir = makeTmp();
+    fs.writeFileSync(
+      path.join(projectDir, 'skill-spec.json'),
+      JSON.stringify(makeSpec({ id: 'declared-spec' })),
+    );
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: dir,
+      projectDir,
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    expect(server.specDeclared).toBe(true);
+    // `not_a_field` is in no spec, including the CTF one this helper builds
+    // from. A DECLARED schema is enforced, so an unknown key is refused.
+    const outcome = await toolCall(server, 'state.patch', {
+      patch: { not_a_field: 'ok' },
+    });
+    expect(outcome.result?.isError).toBeTruthy();
+    // ...and a declared key is still accepted, or the gate would be a wall.
+    const allowed = await toolCall(server, 'state.patch', {
+      patch: { cmd_summary: 'ok' },
+    });
+    expect(allowed.result?.isError).toBeFalsy();
+  });
+
+  it('an undeclared spec does NOT gate state.patch, so free-form notes survive', async () => {
+    // No `skill-spec.json` in projectDir: the builtin fallback is in force and
+    // nobody declared it.
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir: makeTmp(),
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    expect(server.specDeclared).toBe(false);
+    // `todo` is not a field of GENERIC_PROCEDURE_SPEC. Under the old rule this
+    // was refused; it is the key this repository's own notes are built on.
+    const outcome = await toolCall(server, 'state.patch', { patch: { todo: ['x'] } });
+    expect(outcome.result?.isError).toBeFalsy();
+  });
+
+  it('the dry run agrees with the write it previews', async () => {
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir: makeTmp(),
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const dry = toolJson((await toolCall(server, 'state.validate', { patch: { todo: ['x'] } })).result);
+    expect(dry.valid).toBe(true);
+    // It must also SAY it did not check, or the model reads a pass as a
+    // guarantee it never got.
+    expect(dry.unvalidated).toBe(true);
+    const write = await toolCall(server, 'state.patch', { patch: { todo: ['x'] } });
+    expect(write.result?.isError).toBeFalsy();
+  });
+
+  it('launch reads the project skill-spec.json — the case the private resolver missed', async () => {
+    const projectDir = makeTmp();
+    fs.writeFileSync(
+      path.join(projectDir, 'skill-spec.json'),
+      JSON.stringify(makeSpec({ id: 'from-project-file' })),
+    );
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir,
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    expect(spec.id).toBe('from-project-file');
+  });
+
+  it('refuses a NAMED spec that is unusable rather than serving the default', async () => {
+    // A long-lived server whose operator named the spec must not quietly run
+    // every session on a fallback. This is the `strict` branch, and the plugin
+    // deliberately does not take it: a live agent loop must not die over a
+    // project file.
+    const dir = makeTmp();
+    const bad = path.join(dir, 'bad-spec.json');
+    fs.writeFileSync(bad, '{ nope');
+    await expect(
+      launch({
+        root: makeTmp(),
+        specPath: bad,
+        input: new PassThrough(),
+        output: new PassThrough(),
+        installInterruptHandler: false,
+      }),
+    ).rejects.toThrow(/named explicitly/);
+  });
+
+  it('tolerates a broken PROJECT spec — it costs customisation, not the loop', async () => {
+    const projectDir = makeTmp();
+    fs.writeFileSync(path.join(projectDir, 'skill-spec.json'), '{ nope');
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir,
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    expect(server.specDeclared).toBe(false);
+    const spec = toolJson((await toolCall(server, 'spec.get', {})).result);
+    expect(spec.id).toBe('generic-procedure');
+  });
+
+  it('tools/call with no arguments is treated as an empty object, not a crash', async () => {
+    // The `isPlainObject(...) ? ... : {}` fallback: a host that omits
+    // `arguments` entirely must reach the tool with no arguments rather than
+    // fail on an undefined value.
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir: makeTmp(),
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const outcome = await toolCall(server, 'state.get', undefined);
+    expect(outcome.result?.isError).toBeFalsy();
+  });
+
+  it('readResource takes the narrowed uri it is given — no unreachable guard behind it', async () => {
+    // The -32603 test above is the wire-level truth: `ReadResourceRequestSchema`
+    // rejects `params: {}` before a handler runs, so our own "uri required"
+    // guard could never fire. It was removed rather than pinned, because a
+    // branch that cannot execute is worse than no branch — it reads as
+    // protection in a spot where the type has already been narrowed, and it
+    // hides the fact that the real guard is the SDK's schema. This test records
+    // the narrowed contract so a future re-widening shows up here.
+    const { input, output } = streams();
+    const { server } = await launchTracked({
+      root: makeTmp(),
+      projectDir: makeTmp(),
+      input,
+      output,
+      installInterruptHandler: false,
+    });
+    const read = (server as unknown as { readResource(uri: string): unknown })
+      .readResource.bind(server);
+    // `skillstate://spec` is ungated, so it is the one uri that needs no state
+    // directory and therefore exercises the narrowed parameter directly.
+    const contents = read('skillstate://spec') as {
+      contents: Array<{ uri: string; text: string }>;
+    };
+    expect(contents.contents[0].uri).toBe('skillstate://spec');
+    expect(JSON.parse(contents.contents[0].text).id).toBeDefined();
+  });
+
+  it('tools/call without a name never reaches the handler — the SDK schema refuses it', async () => {
+    // Probed over raw bytes rather than through the client, because the client
+    // cannot send this at all. `CallToolRequestSchema` requires `name: string`,
+    // so the frame is answered with -32603 and a Zod dump naming `params.name`
+    // before our own -32602 guard is reachable. Our guard therefore says
+    // nothing about what a host observes, and a test asserting -32602 here
+    // would be asserting a code this server can no longer produce.
+    //
+    // `makeServer()`, not `launchTracked()`: `rawExchange` starts the server on
+    // its own pipes, and `launch()` has already attached it, so the SDK refuses
+    // a second transport. An unconnected server is what the raw path expects.
+    const server = makeServer();
+    const raw = await parseResult(
+      rawCall(server, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {} }),
+    );
+    expect(raw.error?.code).toBe(-32603);
+    // The dump renders the path as a JSON array (`["params","name"]`), not as
+    // `params.name` — asserted the way it is actually written, because a
+    // substring of a formatted diagnostic is not something to guess at.
+    expect(raw.error?.message).toContain('"name"');
+    expect(raw.error?.message).toContain('expected string');
+  });
+
+  it('tools/call naming no tool is -32602, and that guard IS reachable', async () => {
+    // The counterpart to the test above. The SDK's schema requires `name` to be
+    // a string but accepts the EMPTY string, so this is the one "name required"
+    // path a host can actually reach, and it answers with our own -32602
+    // rather than a Zod dump.
+    const server = makeServer();
+    const raw = await parseResult(
+      rawCall(server, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: '' } }),
+    );
+    expect(raw.error?.code).toBe(-32602);
   });
 
   it('launch honours the SKILLSTATE_SPEC_PATH env', async () => {
@@ -1648,7 +2206,7 @@ describe('MCP launch', () => {
     try {
       process.env['SKILLSTATE_SPEC_PATH'] = specPath;
       const { input, output } = streams();
-      const server = await launch({ root: makeTmp(), input, output, installInterruptHandler: false });
+      const { server } = await launchTracked({ root: makeTmp(), input, output, installInterruptHandler: false });
       const parsed = await toolCall(server, 'spec.get', {});
       expect(toolJson(parsed.result).id).toBe('env-spec');
     } finally {
@@ -1676,7 +2234,7 @@ describe('MCP launch', () => {
       // server session starts (the server itself is inert without it).
       fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
+      const { server } = await launchTracked({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/per-project' } });
       const envelope = JSON.parse(
         fs.readFileSync(path.join(project, '.skillstate', 'skillstate.json'), 'utf-8'),
@@ -1695,7 +2253,7 @@ describe('MCP launch', () => {
     try {
       fs.mkdirSync(path.join(home, '.skillstate', 'global'), { recursive: true });
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
+      const { server } = await launchTracked({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/global' } });
       const envelope = JSON.parse(
         fs.readFileSync(path.join(home, '.skillstate', 'global', 'skillstate.json'), 'utf-8'),
@@ -1803,20 +2361,19 @@ describe('MCP inert until init', () => {
 
   it('state-backed resources are refused; skillstate://spec stays readable', async () => {
     const server = makeInertServer();
-    const state = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://state' }),
-    );
+    const state = await call(server, 'resources/read', { uri: 'skillstate://state' });
     expect(state.error?.code).toBe(-32000);
+    // Exactly one `MCP error -32000: ` prefix. The single one is the SDK CLIENT's
+    // own `McpError` formatting, which is correct and belongs to the host. A
+    // second one would mean the server shipped an already-prefixed message on
+    // the wire — the doubled-prefix defect `rpcError()` exists to prevent — so
+    // this equality is the regression test for it, not a formatting preference.
     expect(state.error?.message).toBe(
-      'no skillstate state in this directory — run `skillstate init`',
+      'MCP error -32000: no skillstate state in this directory — run `skillstate init`',
     );
-    const summary = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://summary' }),
-    );
+    const summary = await call(server, 'resources/read', { uri: 'skillstate://summary' });
     expect(summary.error?.code).toBe(-32000);
-    const spec = await parseResult(
-      call(server, 'resources/read', { uri: 'skillstate://spec' }),
-    );
+    const spec = await call(server, 'resources/read', { uri: 'skillstate://spec' });
     expect(spec.error).toBeUndefined();
     expect(JSON.parse((spec.result?.contents as Array<AnyRecord>)[0].text as string)).toMatchObject({
       id: 'intercode-ctf',
@@ -1826,12 +2383,10 @@ describe('MCP inert until init', () => {
   it('launch skips the session stamp when the state directory is missing', async () => {
     const project = makeTmp();
     const { input, output } = streams();
-    const server = await launch({
+    const { server } = await launchTracked({
       spec: makeSpec(),
       root: path.join(project, '.skillstate'),
       name: 'skillstate.json',
-      input,
-      output,
       installInterruptHandler: false,
     });
     try {
@@ -2011,7 +2566,7 @@ describe('MCP agent-scoped state', () => {
       // would leave it) — the server itself is inert without it.
       fs.mkdirSync(path.join(project, '.skillstate'), { recursive: true });
       const { input, output } = streams();
-      const server = await launch({ spec: makeSpec(), input, output, installInterruptHandler: false });
+      const { server } = await launchTracked({ spec: makeSpec(), input, output, installInterruptHandler: false });
       await toolCall(server, 'state.patch', { patch: { working_dir: '/from-env' } });
       const envelope = JSON.parse(
         fs.readFileSync(
@@ -2259,10 +2814,19 @@ describe('MCP agent.merge', () => {
 
   it('serializes the merge with concurrent patches (cross-process lock)', async () => {
     const server = makeServer();
-    await Promise.all([
+    // Both calls are awaited together and then READ, rather than their writes
+    // being asserted. Under `Promise.all` the merge may win or lose the race, and
+    // that is the point of the test: it asserts the lock kept the two writes from
+    // interleaving, so whichever order they took, the patch is not lost. Reading
+    // it back afterwards is the only assertion that holds in both orders — the
+    // alternative, asserting the patch's own response payload, passes only when
+    // the patch happened to run second.
+    const [mergeOutcome, patchOutcome] = await Promise.all([
       toolCall(server, 'agent.merge', { agent: 'w-merge' }),
       toolCall(server, 'state.patch', { patch: { working_dir: '/during-merge' } }),
     ]);
+    expect(mergeOutcome.result?.isError).toBeFalsy();
+    expect(patchOutcome.result?.isError).toBeFalsy();
     const state = toolJson((await toolCall(server, 'state.get', {})).result);
     expect(state.working_dir).toBe('/during-merge');
   });

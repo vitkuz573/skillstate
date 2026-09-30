@@ -6,7 +6,10 @@
       "args": [
         "-y",
         "@skillstate/mcp@^3"
-      ]
+      ],
+      "env": {
+        "SKILLSTATE_SPEC_PATH": "./skill-spec.json"
+      }
     }
   }
 }

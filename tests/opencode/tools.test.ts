@@ -8,6 +8,8 @@ import {
   registerTools,
   normalizePatch,
   MAX_PATCH_BYTES,
+  resolveSpec,
+  SpecResolver,
   stateScopeFor,
 } from '@skillstate/opencode';
 import type {
@@ -19,6 +21,14 @@ import type {
   UpdateValue,
 } from '@skillstate/opencode';
 import { FakeToolEditor, createPluginHarness, fakeToolContext } from './_support/harness.js';
+
+/** A minimal spec document that passes `parseSpec`. */
+const VALID = {
+  id: 'a-procedure',
+  name: 'A Procedure',
+  version: '1.0.0',
+  instructions: 'Do the thing.',
+};
 
 let tmpDirs: string[] = [];
 let cleanups: Array<() => void> = [];
@@ -585,6 +595,48 @@ describe('a schema that declares nothing is still a schema', () => {
   // refusal then has to say so in words rather than print an empty list, because
   // "This project declares: ." tells a model nothing it can act on, and §6.4
   // guarantees it will be re-asked with the same state.
+  // The gate itself, and the host it has to agree with.
+  //
+  // It used to be `resolution.source === 'file'`, which was only accidentally
+  // right: it enforced a spec the project shipped, and silently skipped one an
+  // operator named through `SKILLSTATE_SPEC_PATH` — declared, and therefore
+  // exactly the case where enforcement is wanted. Meanwhile the MCP server,
+  // writing the same `.skillstate/skillstate.json`, enforced whatever spec it
+  // held including its own fallback, so on a free-form notes project it refused
+  // nine of the ten keys in the file. Both gates are now the same `declared`
+  // flag from the shared resolver; these two tests are that claim, one per side.
+  describe('the declared gate, and the host it must agree with', () => {
+    function resolveIn(projectDir: string) {
+      return new SpecResolver({ env: process.env }).resolve(projectDir);
+    }
+
+    it('enforces a spec the project shipped, and a spec named by the environment', () => {
+      const shipped = makeProject();
+      fs.writeFileSync(
+        path.join(shipped, 'skill-spec.json'),
+        JSON.stringify({ ...VALID, schema: { total: { type: 'number', default: 0 } } }),
+      );
+      expect(resolveIn(shipped).declared).toBe(true);
+
+      const named = makeProject();
+      const specPath = path.join(named, 'elsewhere.json');
+      fs.writeFileSync(
+        specPath,
+        JSON.stringify({ ...VALID, schema: { total: { type: 'number', default: 0 } } }),
+      );
+      const resolution = resolveSpec({ directory: named, specPath, env: {} });
+      expect(resolution.source).toBe('env');
+      expect(resolution.declared).toBe(true);
+    });
+
+    it('does NOT enforce a fallback — this is what the MCP server got wrong', () => {
+      const bare = makeProject();
+      const resolution = resolveIn(bare);
+      expect(resolution.declared).toBe(false);
+      expect(resolution.source).toBe('builtin');
+    });
+  });
+
   it('says "no fields" rather than naming nothing', async () => {
     const { editor } = harness({});
     const result = await editor.tools.get('skillstate_update')!.execute(

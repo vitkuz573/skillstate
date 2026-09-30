@@ -123,7 +123,10 @@ describe('SpecResolver', () => {
     const resolution = new SpecResolver().resolve(dir);
     expect(resolution.source).toBe('builtin');
     expect(resolution.spec).toBe(GENERIC_PROCEDURE_SPEC);
-    expect(resolution.rejected).toMatch(/^invalid JSON: /);
+    // The reason names the FILE, not just the fault: two candidates are tried
+    // (an explicit path, then the project's), and a bare "invalid JSON" does
+    // not say which one to go and fix.
+    expect(resolution.rejected).toContain(`${path.join(dir, SPEC_FILE_NAME)}: invalid JSON: `);
     expect(resolution.path).toBe(path.join(dir, SPEC_FILE_NAME));
   });
 
@@ -136,7 +139,8 @@ describe('SpecResolver', () => {
     const resolution = new SpecResolver().resolve(dir);
     expect(resolution.source).toBe('builtin');
     expect(resolution.rejected).toBe(
-      'schema.a.type must be one of string, number, boolean, array, object',
+      `${path.join(dir, SPEC_FILE_NAME)}: schema.a.type must be one of ` +
+        'string, number, boolean, array, object',
     );
   });
 

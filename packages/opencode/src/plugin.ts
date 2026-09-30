@@ -518,16 +518,19 @@ export const SkillStatePlugin = Plugin.define({
     // said otherwise.
     const resolution = specs.resolve(directory);
     const spec = resolution.spec;
-    // Only a spec the PROJECT SHIPPED counts as a declaration. A `builtin`
-    // source means we fell back to a generic default, and announcing that to
-    // the model as "this project declares these fields" would be a false claim
-    // about a file the project does not have — and it would fire on every
-    // project without one, comparing their notes against a default's field
-    // names and reporting a mismatch that is an artefact of our own fallback.
-    const declaredFields =
-      resolution.source === 'file' && spec !== undefined
-        ? Object.entries(spec.schema).map(([key, field]) => `${key} (${field.type})`)
-        : [];
+    // Only a spec somebody DECLARED counts. The `declared` flag is the shared
+    // resolver's answer to that question, and it is what the MCP server gates
+    // its writes on too — deliberately, because when the two hosts disagreed
+    // here the disagreement was not cosmetic: the server enforced a fallback
+    // schema against notes the plugin was happy to accept, on the same file.
+    //
+    // It replaces `source === 'file'`, which was only accidentally right. It
+    // ignored a spec named through `SKILLSTATE_SPEC_PATH` — declared, and
+    // therefore exactly the case where enforcement is wanted — while catching
+    // the case it was written for.
+    const declaredFields = resolution.declared
+      ? Object.entries(spec.schema).map(([key, field]) => `${key} (${field.type})`)
+      : [];
     const sink = mode !== 'paper' || spec === undefined
       ? undefined
       : new PaperStateSink({ store, spec, scopeFor });
@@ -622,12 +625,12 @@ export const SkillStatePlugin = Plugin.define({
     // model does not need the tool to read: paper mode puts Sigma in the
     // prompt by construction, which is the whole of eq. 1.
     await ctx.tool.transform((editor) => {
-      // Notes mode gets the schema when the project SHIPPED one, so the tool
-      // that writes this file validates against the same §6.2 the paper's
-      // runtime uses. Only `source === 'file'` counts: a builtin spec is our own
-      // fallback, and holding a project's notes to it would reject notes that
-      // are fine. This is the same gate as `declaredFields`, for the same
-      // reason — a default is not a declaration.
+      // Notes mode gets the schema when a spec was DECLARED, so the tool that
+      // writes this file validates against the same §6.2 the paper's runtime
+      // uses. A builtin spec is our own fallback, and holding a project's notes
+      // to it would reject notes that are fine — the same gate as
+      // `declaredFields`, for the same reason: a default is not a declaration.
+      // This is now literally the same flag the MCP server gates on.
       if (mode !== 'paper') {
         registerTools(editor, {
           store,
@@ -641,7 +644,7 @@ export const SkillStatePlugin = Plugin.define({
             turnsSinceWrite.set(scope, 0);
             stateWrites.set(scope, (stateWrites.get(scope) ?? 0) + 1);
           },
-          ...(resolution.source === 'file' && spec !== undefined ? { schema: spec.schema } : {}),
+          ...(resolution.declared ? { schema: spec.schema } : {}),
         });
       }
     });

@@ -600,7 +600,7 @@ The runtime ships first-class adapters for four agent hosts. Every adapter is
 | **Claude Code** | project `.claude/settings.json` hook groups (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + project hook scripts + stdio project `.mcp.json` + shared project `SKILL.md` | state injected per prompt, re-injected after compaction, persisted per Bash tool call (`additionalContext`) | additive — hooks cannot trim history, and compaction hooks cannot inject context |
 | **OpenCode** | npm plugin (`"plugins": ["@skillstate/opencode"]` in the project config) with **native tools**, plus a shared project `SKILL.md` | `notes` (default): one additive, bounded fragment on `event.system`, transcript untouched. `paper` (opt-in): the A.4 context replacement, O(1) in transcript length | additive by default, and deliberately so (see [Why the transcript is never rewritten](#why-the-transcript-is-never-rewritten)); paper mode is opt-in and A.4-conformant |
 | **Codex** | machine-level glue (`skillstate install`): `~/.codex/hooks.json` (`UserPromptSubmit` / `SessionStart(^compact$)` / `PostToolUse(^Bash$)`) + `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML | state injected per prompt, re-injected after compaction, persisted per Bash tool call — project state is picked up automatically from the session cwd | additive via hooks; **programmatic O(1)** via `codex app-server` `thread/fork` trim (experimental) |
-| **MCP** | stdio JSON-RPC server, protocol `2026-07-28` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
+| **MCP** | stdio JSON-RPC server on the official `@modelcontextprotocol/sdk` (`state.get` / `state.patch` / `state.validate` / `state.diff` / `state.checkpoint` / `state.rollback` / `state.summary` / `state.metrics` / `state.finalize` / `spec.get` / `spec.next` / `agent.list` / `agent.read` / `agent.merge`) | any MCP client accesses the runtime state as tools + `skillstate://` resources | n/a — runtime access, not prompting |
 
 All project glue is committed and **inert until init**: a project without
 `.skillstate/` state behaves like a vanilla host — the plugin injects no
@@ -661,7 +661,7 @@ its own `withStateLock` (never the state lock):
   "startedAt": "2026-09-05T09:00:00.000Z",
   "lastActivityAt": "2026-09-05T09:04:12.000Z",
   "agentId": "",
-  "protocolVersion": "2026-07-28"
+  "protocolVersion": "2025-11-25"
 }
 ```
 
@@ -957,16 +957,19 @@ const adapter = new McpAdapter();
 // .mcp.json config registering the skillstate stdio server:
 const config = adapter.generateMcpConfig('/path/to/.mcp.json');
 
-// Or run an in-process server and drive it line-by-line:
+// Or run an in-process server and drive it with the official MCP SDK client.
 // Without an explicit spec the server uses GENERIC_PROCEDURE_SPEC — a
 // description of the storage format, never a task description.
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+
 const server = new McpServer({ root: '.', name: '.skillstate.json' });
-const response = server.handleLine(
-  JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call',
-    params: { name: 'state.get', arguments: {} },
-  }),
-);
+const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+const client = new Client({ name: 'my-host', version: '1.0.0' }, { capabilities: {} });
+await server.connect(serverSide);   // or server.start() for stdio
+await client.connect(clientSide);
+
+const result = await client.callTool({ name: 'state.get', arguments: {} });
 ```
 
 `launch(args)` reads `SKILLSTATE_SPEC_PATH` (or explicit args) and starts a
@@ -977,7 +980,11 @@ The `skillstate-mcp` bin launches it directly. Tools: `state.get`,
 `state.diff`, `state.checkpoint`, `state.rollback`, `state.summary`,
 `state.metrics`, `state.finalize` (session "I am done" marker),
 `spec.get`, `spec.next`. State is redacted on every read;
-the transport is newline-delimited JSON-RPC (protocol `2026-07-28`).
+the transport is newline-delimited JSON-RPC over the official
+[`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk),
+which owns framing, `initialize` negotiation and capability advertisement — so
+the supported protocol revisions come from the SDK rather than from a list in
+this repository.
 
 ### Integrate into your hosts
 
@@ -1247,7 +1254,7 @@ Bins: `@skillstate/cli` ships `skillstate`, `@skillstate/mcp` ships
 - [x] OpenCode v2 adapter (`@non-paper`): native tools via `ctx.tool.transform` (`skillstate_read`/`_update`/`_merge`, typed schemas, discriminated results) plus one additive, bounded `ctx.session.hook('context')` fragment; `event.messages` is never modified, and the invariant is asserted in `tests/opencode/context-integrity.test.ts`
 - [x] Claude adapter: state injected on every `UserPromptSubmit`, re-injected after compaction (`SessionStart` matcher `^compact$`), persisted per Bash tool call (`PostToolUse` matcher `^Bash$`) via self-contained `.cjs` scripts merged into the project `.claude/settings.json`; stdio project `.mcp.json` + the shared project `SKILL.md` installed by `skillstate init`
 - [x] Codex adapter (`@non-paper`): `hooks.json` (`UserPromptSubmit`/`SessionStart(^compact$)`/`PostToolUse(^Bash$)`) + self-contained `.cjs` hook scripts + `[mcp_servers.skillstate]` TOML, wired machine-level by `skillstate install` and picking up each project's state automatically; programmatic O(1) via `codex app-server` `thread/fork`/`thread/rollback` (experimental)
-- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server (protocol `2026-07-28`, newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
+- [x] MCP adapter (`@non-paper`): stdio JSON-RPC 2.0 server on the official `@modelcontextprotocol/sdk` (newline-delimited) exposing `state.get`/`state.patch` (validated single write op)/`state.validate`/`state.diff`/`state.checkpoint`/`state.rollback`/`state.summary`/`state.metrics`/`state.finalize`/`spec.get`/`spec.next`, plus `skillstate://state|spec|summary` resources and secret redaction
 - [x] Session lifecycle (`@non-paper`): `<stateDir>/.session-meta.json` sidecar (statuses `running`/`interrupted`/`completed`/`failed`/`merged`, debounced `lastActivityAt`, `STALE_MS` staleness in `agent.list`/`state.summary`), `state.finalize` marker, SIGINT/SIGTERM interrupt flush via `installShutdown`, and the `SessionStart` interrupted-session note in the claude/codex hooks
 - [ ] OpenCode limitation (deliberate): the v2 plugin does **not** trim the host transcript. Truncating it is what made the previous integration unusable — it deleted the task statement, the tool results and the errors the agent had just been given. The host conversation therefore stays O(T); the runtime's own prompt `(P, Σₜ, Oₜ)` remains O(1) per step, which is what the paper claims and what `tests/core/runtime-footprint.test.ts` asserts
 - [ ] Claude Code limitation: hooks cannot trim history, and compaction-time hooks cannot inject context — state-injection keeps prompts O(T) with fresh state per turn; true O(1) requires host-side trimming

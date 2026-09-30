@@ -6,7 +6,8 @@ was run against the real server — paste and go.
 
 ## 1. Launch the server
 
-Any of these work (Node >= 20, zero dependencies beyond `@skillstate/core`):
+Any of these work (Node >= 20; the only runtime dependencies are
+`@skillstate/core` and the official `@modelcontextprotocol/sdk`):
 
 ```bash
 # from the npm package (pinned major)
@@ -63,14 +64,15 @@ response line per request on stdout.
 ## 2. Handshake
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
 ```
 
-- `initialize` echoes your requested revision if it is one of
-  `2024-11-05` … `2026-07-28`, otherwise answers with the newest —
-  the client decides.
+- `initialize` is handled by the official `@modelcontextprotocol/sdk`: it echoes
+  your requested revision if the SDK knows it, otherwise answers with the SDK's
+  newest (`2025-11-25`) and the client decides. The revision list is the SDK's,
+  not this package's — that is the point of depending on it.
 - `tools/list` returns **14 tools**: `state.get`, `state.patch`,
   `state.validate`, `state.diff`, `state.checkpoint`, `state.rollback`,
   `state.summary`, `state.metrics`, `state.finalize`, `spec.get`,
@@ -121,7 +123,7 @@ One file per line, all verified against the generic spec above:
 
 ```bash
 printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
 '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"spec.next","arguments":{}}}' \
 '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"state.patch","arguments":{"patch":{"goal":"Ship quickstart","next_steps":["write guide"]}}}}' \
 '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"state.checkpoint","arguments":{"label":"before-test"}}}' \

@@ -108,5 +108,17 @@ export {
 } from './mode.js';
 export type { ModeResolution, ModeSource, PluginMode, ResolveModeOptions } from './mode.js';
 /** Resolving P for paper mode. */
-export { SPEC_FILE_NAME, SpecResolver, parseSpec } from './spec-loader.js';
-export type { SpecResolution, SpecSource } from './spec-loader.js';
+// The whole shared resolution contract, not the two names this package used to
+// need. A host embedding the plugin has to be able to ask the same question the
+// plugin asks — is a spec declared, where did it come from, was it rejected —
+// and answering it with a narrower surface than core offers is how the two
+// hosts drift apart in the first place.
+export {
+  DEFAULT_SPEC_PATH,
+  SPEC_FILE_NAME,
+  SpecResolutionError,
+  SpecResolver,
+  parseSpec,
+  resolveSpec,
+} from './spec-loader.js';
+export type { ResolveSpecOptions, SpecResolution, SpecSource } from './spec-loader.js';

@@ -5,6 +5,151 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**The MCP server now runs on the official SDK, and two claims it used to make
+are gone.**
+
+`@skillstate/mcp` depended on zero packages and spoke JSON-RPC by hand — 65 lines
+of framing, dispatch and `initialize` negotiation. The line count was never the
+argument. A hand-written revision table is correct the day it is written and
+silently wrong the day the spec moves, because no test suite can see the spec: a
+hand-rolled `initialize` cannot fail a test that only knows what this server
+already believed. It was declaring `2026-07-28`, a revision the official SDK does
+not recognise, and nothing in the build said so.
+
+Now on `@modelcontextprotocol/sdk@^1.31.0`. The SDK's low-level `Server` is used
+rather than its `McpServer` sugar — that is the seam where the SDK owns the
+protocol and this package owns the payloads. Framing, JSON-RPC, revision
+negotiation, capability advertisement, transport lifecycle and error framing are
+the SDK's. Every tool schema and resource body is unchanged, byte for byte,
+because those schemas are a published contract with hosts.
+
+Removed, and not replaced:
+
+- `SUPPORTED_PROTOCOL_VERSIONS`, `PROTOCOL_VERSION`, `negotiateProtocolVersion()`
+  — a list that rots. Negotiated revisions now come from the SDK.
+- `handleLine()` and `feed()` — a second, private wire encoder. Replaced by
+  `connect(transport)`, which accepts any SDK transport, so the same server runs
+  over stdio, over `InMemoryTransport` in tests, or over HTTP in an embedder.
+- `prompts/list` returned `{prompts: []}`. It advertised a capability this package
+  does not implement, and a host reading it would show an empty prompt picker and
+  conclude skillstate had none. It is now `-32601`.
+
+### Breaking
+
+- `handleLine()`, `feed()` and `negotiateProtocolVersion()` are gone from the
+  public API, and `stop()` is now `Promise<void>` rather than `void`.
+- `state.summary` reports `protocolVersion` as the SDK's `LATEST_PROTOCOL_VERSION`
+  (`2025-11-25`) instead of this package's own newest entry (`2026-07-28`). The
+  field described what this server claimed to speak; it now describes what it can
+  actually speak.
+
+### Testing
+
+The MCP suite now talks to the server through a real SDK `Client`, so framing,
+negotiation and validation are the SDK's to get right rather than this project's
+own encoder agreeing with itself.
+
+**Two spec resolvers, two contracts, and the stricter one was enforcing a spec
+nobody had written.**
+
+There were two implementations of "which procedural spec applies". The OpenCode
+plugin probed `<project>/skill-spec.json`, validated it field by field, and
+reported where the spec came from. The MCP server had a private one that read
+only an argument or an environment variable, never looked in the project
+directory, and `JSON.parse`d the result straight into a `ProceduralSpec` with no
+validation at all.
+
+Both write the same `.skillstate/skillstate.json`, so this was not a tidy-up. It
+was measured, in a live OpenCode session holding one project and one state file:
+
+- the plugin saw the project's `skill-spec.json` and the server did not, so the
+  two enforced different schemas on one file;
+- a malformed spec would have reached `spec.get`, and `spec.get` returns
+  `spec.instructions` verbatim — the v1 failure, where a spec's own instructions
+  ("You are an autonomous CTF agent … find the flag") overrode the user, arriving
+  through the one door that had never learned to validate;
+- and the decisive one: the server validated every write against whatever spec it
+  held, *including the builtin fallback*. On a free-form notes project,
+  `state.patch` answered `Unknown key: todo` for nine of the ten keys the state
+  file actually contained. The plugin, writing the same file, had never done that
+  — it enforced a schema only when the project had shipped one. The rule that
+  survived was "a default is not a declaration", written into the plugin as a
+  comment, and the sibling broke it.
+
+`resolveSpec()` now lives in `@skillstate/core` and is the single resolution both
+hosts use: an in-memory spec, then a named file, then the project's
+`skill-spec.json`, then the neutral builtin — each tried in order, each validated,
+a rejected file recorded and stepped over. It also reports `declared`, and that
+flag is what gates enforcement, so a fallback is never enforced as a declaration.
+
+Two behaviours fell out of making the order explicit:
+
+- A **named** spec that is unusable no longer falls through to the project's. It
+  used to be tempting, and it is not a graceful degradation: the operator asked
+  for one procedure and would silently receive another. The answer is the neutral
+  builtin, or a throw.
+- `strict` decides between those. The plugin does not take it — a broken project
+  file costs the model its customisation, and failing a live agent loop over it
+  is the worse outcome. The MCP server does, because its process outlives the
+  session and its operator named the spec.
+
+**Host config is a dialect, not a format.**
+
+`McpAdapter` emitted one document and assumed every host read it. MCP is a
+standard, and "MCP is a standard" is what made that assumption look safe. The
+shapes differ in ways that are not cosmetic: Claude Code reads `.mcp.json` with
+`command` as a string, `args`, and `env`; OpenCode reads its own config with
+`mcp`, `type: "local"`, `command` as one array, and `environment`. A generated
+config in the wrong dialect is not a misconfigured server — it is not a server
+entry in the document being read, and it fails silently. On this repository the
+plugin's tools were live, so the integration looked healthy while the MCP server
+was never started at all.
+
+`generateMcpConfig()` takes a `host`, and `mergeIntoOpencodeConfig()` merges into
+an existing `opencode.json` rather than overwriting it — that file carries
+`plugins`, `permission` and the rest of a real configuration, and a host cannot
+tell an installer from a user. It refuses a malformed document rather than
+treating it as empty, because a merge that "succeeds" into `{}` deletes the
+user's plugins and permissions: a destructive success.
+
+**Also fixed here, both found by the same exercise**
+
+- The generated launcher path was one directory too high. `bin/` and `dist/` are
+  siblings in the published package, so `../../../bin/mcp.js` resolved above the
+  package, to a file that does not exist — every generated config pointed `node`
+  at nothing. The test beside it asserted the path ended in `/bin/mcp.js` and was
+  satisfied by a path that was not there. It now asserts the file exists.
+- A thrown `McpError` shipped its own prefix on the wire. The SDK's constructor
+  rewrites `message` to `MCP error <code>: …` and its protocol layer sends
+  `error.message` verbatim, so a host read
+  `MCP error -32000: MCP error -32000: no skillstate state in this directory`.
+  `rpcError()` restores the message after construction.
+- Three guards were unreachable and have been removed rather than pinned:
+  `Invalid params: name required` and `uri required` are now answered by the
+  SDK's own schema (`-32603` with a Zod dump) before a handler runs, and a
+  `PassThrough` transform in `asByteStream` could never see a string, because
+  `bytes.write(string)` decodes to a `Buffer` before any transform runs. The
+  test that appeared to guard that branch was green for an unrelated reason.
+
+### Breaking
+
+- `McpConfigOptions.host` is new. `generateMcpConfig()` still emits the Claude
+  dialect by default, so existing callers are unchanged, but a caller that meant
+  "whatever OpenCode reads" was emitting the wrong document and should now say
+  `host: 'opencode'`.
+- `LaunchArgs.projectDir` is new and defaults to the process cwd. `root` remains
+  the state directory; resolving a spec against `root` looks for
+  `skill-spec.json` inside `.skillstate/`, where it never is.
+- `McpServerOptions.specDeclared` is new and defaults to `true`, so an embedder
+  passing a spec it built is never silently unenforced. `launch()` sets it from
+  the real resolution.
+- `@skillstate/opencode` re-exports `resolveSpec`, `parseSpec`, `SpecResolver`,
+  `SPEC_FILE_NAME`, `DEFAULT_SPEC_PATH`, `SpecResolutionError` and the resolution
+  types from `@skillstate/core`. `SpecSource` widens from `'builtin' | 'file'` to
+  also include `'explicit'` and `'env'`, and a resolution now carries `declared`.
+
 ## [3.0.1] - 2026-09-30
 
 **Answered: the host has no agent loop to borrow, so the adapter is not optional.**

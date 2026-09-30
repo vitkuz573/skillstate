@@ -13,8 +13,11 @@
 ---
 
 `@skillstate/mcp` exposes the skillstate runtime ([`@skillstate/core`](../core))
-as a **Model Context Protocol** server (protocol revision `2026-07-28`) over
-stdio (JSON-RPC 2.0, newline-delimited). It reuses the paper-exact core
+as a **Model Context Protocol** server, built on the official
+[`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk),
+over stdio (JSON-RPC 2.0, newline-delimited). Framing, `initialize` negotiation
+and capability advertisement belong to the SDK; every tool schema and resource
+body belongs to this package. It reuses the paper-exact core
 directly — `mergeState`, `createInitialState`, `validatePatchDeep`, `migrate`,
 `redactSecrets` — so any MCP client can read, patch, checkpoint, and roll back
 the execution state as tools and resources.
@@ -129,18 +132,21 @@ init\`` and nothing is created. Verify with:
 # provides the same state as native tools — a second surface over one file
 # with different write rules is a hazard, and costs ~1.6k tokens per request
 # in resident tool descriptions.
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | node packages/mcp/bin/mcp.js
-# -> protocolVersion "2026-07-28" + 14 tools
+# -> protocolVersion "2025-11-25" + 14 tools
 ```
 
 ## API / Exports
 
-Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`,
-`PROTOCOL_VERSION`, and `SUPPORTED_PROTOCOL_VERSIONS` (plus the types
-`McpServerOptions`, `LaunchArgs`, `JsonRpcRequest`, `McpToolResult`,
+Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer` and `launch`
+(plus the types `McpServerOptions`, `LaunchArgs`, `McpToolResult`,
 `ToolAnnotations`, and `McpConfigOptions`).
+
+There is no exported protocol-revision list. Negotiated revisions come from the
+SDK, and a list maintained in this repository would be a list that is correct on
+the day it is written and silently wrong the day the spec moves.
 
 - `new McpAdapter()` — `name = 'mcp'`.
   - `generateMcpConfig(target, options?): string` — a deterministic,
@@ -149,15 +155,19 @@ Root path `@skillstate/mcp` exports `McpAdapter`, `McpServer`, `launch`,
     the state from its own cwd.
   - `saveMcpConfig(target, options?): Promise<string>` — atomic write.
 - `new McpServer(options: McpServerOptions)` — `{ spec, root, name, agent?, tracker? }`.
-  - `protocolVersion` is the newest supported revision (`'2026-07-28'`).
-    `initialize` echoes the client's requested revision when it is one of
-    `SUPPORTED_PROTOCOL_VERSIONS` (`2024-11-05` … `2026-07-28`) and answers
-    with the newest otherwise — the client decides whether it can work with
-    the negotiated revision (per the MCP spec).
-  - `handleLine(line): Promise<string | null>` — process one already-framed
-    JSON-RPC message.
-  - `feed(chunk): Promise<string[]>` — consume streamed stdin
-    (newline-delimited JSON-RPC; partial lines are buffered).
+  - `serverInfo` — `{ name: 'skillstate', version }`, advertised at handshake.
+  - `capabilities` — `tools`, `resources`, `logging`, `prompts`, negotiated by
+    the SDK. `prompts` is advertised but has no handlers, so `prompts/list`
+    answers `-32601`: this package implements no prompts, and claiming otherwise
+    would show a host an empty prompt picker instead of an honest refusal.
+  - `connect(transport): Promise<McpServer>` — attach any SDK transport. This is
+    what makes an embedded or HTTP-hosted server possible, and what the test
+    suite uses to drive the server with a real MCP `Client` over
+    `InMemoryTransport` in the same process.
+  - `start(input?, output?): Promise<McpServer>` — shorthand for
+    `connect(new StdioServerTransport(input, output))`, defaulting to the
+    process's own streams.
+  - `stop(): Promise<void>` — close the transport.
   - `start(input?, output?): Promise<McpServer>` / `stop()` / `get isRunning()`.
 - `launch(args?): Promise<McpServer>` — resolves the spec from args or env
   and starts a stdio server; the state always resolves from the server's cwd.

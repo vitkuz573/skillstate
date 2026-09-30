@@ -37,6 +37,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { PassThrough } from 'node:stream';
 import type { Readable, Writable } from 'node:stream';
 import {
   FileStore,
@@ -47,6 +48,7 @@ import {
   readSessionMeta,
   redactSecrets,
   resolveHostStateForCwd,
+  resolveSpec,
   resolveStatePath,
   sanitizeAgentId,
   sessionStaleness,
@@ -56,7 +58,19 @@ import {
   CURRENT_STATE_VERSION,
   SESSION_META_FILE,
 } from '@skillstate/core';
-import type { SessionMeta } from '@skillstate/core';
+import type { SessionMeta, SpecResolution } from '@skillstate/core';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  LATEST_PROTOCOL_VERSION,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { installShutdown } from '@skillstate/core';
 import { GENERIC_PROCEDURE_SPEC, INTERCODE_CTF_SPEC } from '@skillstate/core/schemas';
 import type {
@@ -67,26 +81,6 @@ import type {
   StateSchema,
   TokenTracker,
 } from '@skillstate/core';
-
-/**
- * MCP protocol revisions this server speaks, oldest first. `initialize`
- * echoes the client's requested revision when it is listed here and falls
- * back to `PROTOCOL_VERSION` (the newest) otherwise — the negotiation
- * shape recommended by the MCP spec.
- */
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
-  '2024-11-05',
-  '2025-03-26',
-  '2025-06-18',
-  // OpenCode 1.17 requests exactly this revision (86 occurrences in its
-  // binary) — without it the client rejects our initialize answer.
-  '2025-11-25',
-  '2026-07-28',
-];
-
-/** The newest supported revision — the `initialize` fallback answer. */
-export const PROTOCOL_VERSION: string =
-  SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
 
 /** `notes` is truncated to this many chars in summary projections. */
 const SUMMARY_NOTES_MAX_CHARS = 200;
@@ -111,12 +105,26 @@ const NOT_INITIALIZED_MESSAGE =
 /** Tools that stay callable in an uninitialized directory: config-only. */
 const UNGATED_TOOLS: ReadonlySet<string> = new Set(['spec.get']);
 
-/** A JSON-RPC request object (id may be a number, string, or null). */
-export interface JsonRpcRequest {
-  jsonrpc?: string;
-  id?: number | string | null;
-  method?: unknown;
-  params?: unknown;
+/**
+ * A JSON-RPC error whose `message` is exactly what reaches the host.
+ *
+ * `McpError`'s constructor rewrites the message to `MCP error <code>: <message>`
+ * for human readability in a stack trace, and the SDK's protocol layer puts
+ * `error.message` on the wire verbatim. So a handler that throws an `McpError`
+ * ships the SDK's own formatting as part of the protocol payload, and a host
+ * that reads it through an SDK client — which wraps once more — ends up printing
+ * `MCP error -32000: MCP error -32000: no skillstate state in this directory`.
+ * The doubled prefix is ours, not the host's: the code is a number the SDK
+ * reads, but the message is a sentence meant for a person, so only the code
+ * earns the constructor and the sentence is put back afterwards.
+ *
+ * Still an `McpError`, so anything that branches on the class — the SDK's own
+ * `instanceof` checks, a caller re-throwing it — behaves exactly as before.
+ */
+function rpcError(code: number, message: string): McpError {
+  const error = new McpError(code, message);
+  error.message = message;
+  return error;
 }
 
 /** The MCP tool-result payload returned on `tools/call`. */
@@ -135,6 +143,24 @@ export interface ToolAnnotations {
 export interface McpServerOptions {
   /** Procedural spec: drives `spec.get`/`spec.next`, schema validation, and state defaults. */
   spec: ProceduralSpec;
+  /**
+   * Whether {@link spec} was DECLARED — shipped by the project or named by the
+   * operator — as opposed to being our own builtin fallback.
+   *
+   * This gates schema enforcement, and it is the whole reason this option
+   * exists. The OpenCode plugin has always held a project's writes to a schema
+   * only when the project shipped one ("a default is not a declaration"). This
+   * server did not: it validated every write against whatever spec it had,
+   * including the generic fallback, so on a free-form notes project
+   * `state.patch` answered `Unknown key: todo` for nine of the ten keys the
+   * state file actually contained. Both write the same
+   * `.skillstate/skillstate.json`, so the stricter rule was the rule the agent
+   * felt — and it was the one enforcing a specification nobody had written.
+   *
+   * Defaults to `true` so an embedder that passes a spec it built itself is
+   * never silently unenforced. `launch()` sets it from the real resolution.
+   */
+  specDeclared?: boolean;
   /**
    * State file root directory (confined by `resolveStatePath`). The
    * launch-time existence of this DIRECTORY is the inert gate: while it
@@ -160,6 +186,20 @@ export interface McpServerOptions {
 export interface LaunchArgs {
   spec?: ProceduralSpec;
   specPath?: string;
+  /**
+   * Project directory probed for `skill-spec.json`. Defaults to the process
+   * cwd, which is the project a stdio server is launched in.
+   *
+   * Separate from `root` on purpose, and they are not the same place: the spec
+   * sits at the project root beside the code, while `root` is the STATE
+   * directory (`.skillstate/`). Resolving the spec against `root` would look
+   * for `skill-spec.json` inside `.skillstate/`, where it never is — a mistake
+   * that reads as "this project has no spec" and is invisible.
+   *
+   * The argument exists for embedders and tests, which need the answer not to
+   * depend on where the process happens to be standing.
+   */
+  projectDir?: string;
   /** State root override; defaults to the per-project state directory. */
   root?: string;
   /** State file name override; defaults to the per-project state file name. */
@@ -362,6 +402,37 @@ function buildExamplePatch(schema: StateSchema): StatePatch {
   return example as StatePatch;
 }
 
+/**
+ * Present a `Readable` as a byte stream, whatever its own decoder setting is.
+ *
+ * A stream with `setEncoding()` applied emits STRINGS on `data`; one without
+ * emits `Buffer`s. `StdioServerTransport` concatenates `Buffer`s, so a string
+ * chunk would throw inside the SDK's read buffer, which it reports as an error
+ * and then closes itself over — producing a server that accepts input, reports
+ * nothing and answers nothing: silent, and indistinguishable from a hung one to
+ * whoever launched it.
+ *
+ * The forwarding listener below is what actually fixes that, and it is the only
+ * place the conversion has to happen. An earlier version also normalised inside
+ * a `PassThrough` transform, on the theory that the string would arrive there —
+ * it cannot. `bytes.write(string)` decodes to a `Buffer` in the Writable before
+ * any transform runs, so that branch was unreachable and the test guarding it
+ * was green for a reason unrelated to the code. `Buffer.from` is kept here
+ * because it is explicit at the boundary, and this doc records why the second
+ * copy of it was deleted rather than added.
+ */
+function asByteStream(source: Readable): Readable {
+  const bytes = new PassThrough();
+  // `pipe` writes into `bytes`; the SDK must read from `bytes`. Written as an
+  // explicit listener rather than `.pipe()` chaining so the direction is
+  // unambiguous — `.pipe(a).pipe(b)` reads left to right and would flow the
+  // wrong way here.
+  source.on('data', (chunk: Buffer | string) => {
+    bytes.write(typeof chunk === 'string' ? Buffer.from(chunk, 'utf-8') : chunk);
+  });
+  return bytes;
+}
+
 /** Filesystem-safe label: weird chars collapse to '-', empty → 'checkpoint'. */
 function sanitizeLabel(raw: string): string {
   const cleaned = raw
@@ -372,29 +443,37 @@ function sanitizeLabel(raw: string): string {
 }
 
 /**
- * Protocol-version negotiation for `initialize`: echo the client's
- * requested revision when this server supports it, else answer with the
- * newest supported revision (`PROTOCOL_VERSION`) — the client then decides
- * whether it can work with it (per the MCP spec). Missing, non-string, or
- * empty `protocolVersion` params are treated as unknown → newest.
- */
-export function negotiateProtocolVersion(requested: unknown): string {
-  return (
-    typeof requested === 'string' &&
-    SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-      ? requested
-      : PROTOCOL_VERSION
-  );
-}
-
-/**
- * The `skillstate` MCP server: a JSON-RPC 2.0 over stdio server exposing
- * the skillstate runtime as MCP tools and resources.
+ * The `skillstate` MCP server: exposes the skillstate runtime as MCP tools and
+ * resources over any SDK transport.
+ *
+ * ## Why the official SDK is a runtime dependency, not a suggestion
+ *
+ * The first version of this file spoke JSON-RPC by hand: 65 lines of framing,
+ * dispatch and protocol-version negotiation, measured at 7% of the file against
+ * 93% skillstate logic. The line count was never the problem.
+ *
+ * **A hand-written negotiation table is correct on the day it is written and
+ * silently wrong the day the spec moves**, because nothing in a test suite can
+ * see the spec — a hand-rolled `initialize` cannot fail a test that only knows
+ * what this server already believed. Shipping a protocol implementation is a
+ * liability, and the users of this package should not have to carry one.
+ *
+ * The cost is real and was measured rather than assumed: `@modelcontextprotocol/sdk`
+ * pulls 91 packages and 27 MB into `node_modules`, of which a stdio-only server
+ * uses none of `express`, `hono`, `jose` or `express-rate-limit`. Paid on purpose.
+ *
+ * ## What did NOT move
+ *
+ * The SDK's low-level `Server` is used rather than its `McpServer` sugar,
+ * because that is the seam where the SDK owns the protocol and this package owns
+ * the payloads. Framing, JSON-RPC, `initialize` negotiation, capability
+ * advertisement, transport lifecycle and error framing are the SDK's; every tool
+ * schema and resource body is still produced by the code below, **byte for byte
+ * what this server advertised before**. Those schemas are a published contract
+ * with hosts, and regenerating them from Zod shapes would have changed them.
  */
 export class McpServer {
-  /** Newest supported revision — the fallback `initialize` answer. */
-  readonly protocolVersion = PROTOCOL_VERSION;
-  /** Advertised server capabilities. */
+  /** Advertised server capabilities — the SDK negotiates against these. */
   readonly capabilities = {
     tools: { listChanged: true },
     resources: {},
@@ -404,10 +483,12 @@ export class McpServer {
   /** Advertised server identity. */
   readonly serverInfo = { name: 'skillstate', version: '1.0.0' };
 
-  private buffer = '';
+  /**
+   * The SDK server, created once with its handlers registered. `start()` only
+   * attaches a transport to it.
+   */
+  readonly #protocol: Server;
   private running = false;
-  /** Serializes `start()` stream handling so chunk order is preserved. */
-  private chain: Promise<void> = Promise.resolve();
   /**
    * Diff baselines are persisted to disk (`.diff-baseline.json` next to
    * each state file, under the cross-process lock) — the "since your last
@@ -421,11 +502,6 @@ export class McpServer {
   private readonly lastActivityWrite = new Map<string, number>();
   /** Uninstall closure for the SIGINT/SIGTERM interrupt handler (if wired). */
   private uninstallShutdown: (() => void) | null = null;
-  /** The `{ source, handler }` pair attached by `start()` (removed by `stop()`). */
-  private attached: {
-    source: Readable;
-    handler: (chunk: Buffer | string) => void;
-  } | null = null;
 
   constructor(private readonly options: McpServerOptions) {
     if (
@@ -435,6 +511,70 @@ export class McpServer {
     ) {
       throw new Error(`Invalid agent id: ${options.agent}`);
     }
+    this.#protocol = new Server(this.serverInfo, { capabilities: this.capabilities });
+    this.registerHandlers();
+  }
+
+  /**
+   * Whether this server's spec was declared rather than defaulted. Gates
+   * schema enforcement on every write; see {@link McpServerOptions.specDeclared}.
+   */
+  get specDeclared(): boolean {
+    return this.options.specDeclared ?? true;
+  }
+
+  /**
+   * Attach the request handlers to the SDK server, once, in the constructor.
+   *
+   * Registration is a concept the hand-rolled dispatch did not have, so it could
+   * not promise that a handler could not be attached twice. Here it cannot: the
+   * constructor runs once, and a second `start()` attaches a transport to a
+   * server that is already fully wired.
+   *
+   * Every payload comes from the same method the previous implementation used, so
+   * the advertised schemas and resource bodies are unchanged.
+   */
+  private registerHandlers(): void {
+    this.#protocol.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: this.toolsList() as never,
+    }));
+    this.#protocol.setRequestHandler(CallToolRequestSchema, async (request) => {
+      // `name` is a string by `CallToolRequestSchema` — the SDK validates the
+      // frame before this runs, so there is no `typeof` test to write. The
+      // guard that IS reachable is the empty one, and it is reachable: the
+      // schema accepts `name: ""` and answers a request naming no tool with
+      // -32602, which is a different and more useful thing than a Zod dump.
+      const params = request.params as { name: string; arguments?: unknown };
+      if (params.name.length === 0) {
+        throw rpcError(ErrorCode.InvalidParams, 'Invalid params: name required');
+      }
+      const args = isPlainObject(params.arguments) ? params.arguments : {};
+      try {
+        return (await this.callTool(params.name, args)) as never;
+      } catch (err) {
+        // A tool that throws answers with a RESULT carrying `isError`, not with a
+        // JSON-RPC error — a tool that failed is a tool that ran. Both shapes are
+        // in the spec; only one of them is a behaviour change, and changing it
+        // would break every host that reads `isError` to tell a refusal from a
+        // transport failure.
+        return {
+          content: [{ type: 'text', text: redactSecrets(String(err)) }],
+          isError: true,
+        } as never;
+      }
+    });
+    this.#protocol.setRequestHandler(ListResourcesRequestSchema, () => ({
+      resources: this.resourcesList() as never,
+    }));
+    this.#protocol.setRequestHandler(ReadResourceRequestSchema, (request) => {
+      // `uri` is a string by `ReadResourceRequestSchema`; the SDK validates the
+      // frame before this runs. A `typeof` test here would be a guard that can
+      // never fire, which is worse than none — it reads as protection in a place
+      // where the type has already been narrowed, and it hides the fact that
+      // the wire-level guard lives in the SDK.
+      const params = request.params as { uri: string };
+      return this.readResource(params.uri) as never;
+    });
   }
 
   /**
@@ -529,74 +669,61 @@ export class McpServer {
   }
 
   /**
-   * Process a single (already-framed) JSON-RPC message line and return the
-   * response string, or `null` when the message needs no reply (a
-   * notification). The stateless unit entry point used by tests and the
-   * stdio transport.
+   * Attach an SDK transport of any kind. Resolves once connected; `stop()` closes
+   * it.
+   *
+   * This is the SDK's own shape (`Protocol.connect`) and it is the reason the
+   * server stopped being a stdio program with a protocol bolted on: an embedder
+   * can hand this server a `StreamableHTTPServerTransport` and get the same
+   * tools, and a test can hand it an `InMemoryTransport` and talk to it in the
+   * same process with a real MCP client — no child process, no framing to
+   * reimplement, and no way for the test to pass against a protocol the server
+   * no longer speaks.
    */
-  handleLine(line: string): Promise<string | null> {
-    const text = line.trim();
-    if (text.length === 0) {
-      return Promise.resolve(null);
-    }
-    return this.processRaw(text);
-  }
-
-  /**
-   * Feed a raw chunk of stdin and return every newline-delimited response
-   * produced by the complete messages it contains. Partial lines are
-   * buffered until the rest arrives. Each response ends with a newline.
-   */
-  async feed(chunk: string): Promise<string[]> {
-    this.buffer += chunk;
-    const responses: string[] = [];
-    for (;;) {
-      const newline = this.buffer.indexOf('\n');
-      if (newline === -1) {
-        break;
-      }
-      const line = this.buffer.slice(0, newline).trim();
-      this.buffer = this.buffer.slice(newline + 1);
-      if (line.length === 0) {
-        continue;
-      }
-      const response = await this.processRaw(line);
-      if (response !== null) {
-        responses.push(`${response}\n`);
-      }
-    }
-    return responses;
-  }
-
-  /**
-   * Attach the server to a stdin/stdout pair (defaults to `process`).
-   * Resolves once the server is reading; `stop()` detaches it. Chunks are
-   * processed strictly in arrival order even though handling is async.
-   */
-  async start(
-    input?: Readable,
-    output?: Writable,
-  ): Promise<McpServer> {
-    const source = input ?? process.stdin;
-    const sink = output ?? process.stdout;
+  async connect(transport: Transport): Promise<McpServer> {
     this.running = true;
-    const handler = (chunk: Buffer | string) => {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      void this.pump(text, sink);
-    };
-    source.on('data', handler);
-    this.attached = { source, handler };
+    await this.#protocol.connect(transport);
     return this;
   }
 
   /**
-   * Mark the server stopped (idempotent): detaches the input listener
-   * attached by `start()` so embedded servers release their streams.
+   * Attach stdio — on the given streams, or on the process's own. Kept as its own
+   * method because `launch()` and every stdio host call it by that name.
+   *
+   * The streams are parameters because `StdioServerTransport` takes them, which
+   * is what makes an embedded server — and a test with two pipes — possible
+   * without spawning a child process.
+   *
+   * The input is re-wrapped so it can only ever emit `Buffer`s. The SDK's
+   * transport requires that and says so nowhere: `ReadBuffer.append()` does
+   * `Buffer.concat([...])`, which throws on a string chunk, and
+   * `StdioServerTransport._ondata` turns that throw into an `onerror` and a
+   * `close()` — so a stream carrying a `setEncoding('utf-8')` produces a server
+   * that reads nothing and says nothing, forever. A host cannot diagnose that,
+   * because nothing is reported to it. Any `Readable` is legal input to this
+   * method, so the normalization happens here rather than being left as a trap
+   * for the next embedder.
    */
-  stop(): void {
+  async start(input?: Readable, output?: Writable): Promise<McpServer> {
+    return this.connect(
+      new StdioServerTransport(
+        input === undefined ? undefined : asByteStream(input),
+        output,
+      ),
+    );
+  }
+
+  /**
+   * Close the transport (idempotent).
+   *
+   * The SDK owns listener teardown, so there is nothing to detach by hand. That
+   * is why this class no longer carries an `attached` field, a `removeListener`
+   * call, or a serialized promise chain to keep chunk order — the transport owns
+   * ordering now.
+   */
+  async stop(): Promise<void> {
     this.running = false;
-    this.attached?.source.removeListener('data', this.attached.handler);
-    this.attached = null;
+    await this.#protocol.close();
   }
 
   /** Whether the server is currently reading from its input stream. */
@@ -604,139 +731,24 @@ export class McpServer {
     return this.running;
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  JSON-RPC dispatch                                                  */
-  /* ------------------------------------------------------------------ */
-
-  /** Append one chunk to the ordered stream pipeline. */
-  private async pump(text: string, sink: Writable): Promise<void> {
-    this.chain = this.chain.then(async () => {
-      for (const response of await this.feed(text)) {
-        sink.write(response);
-      }
-    });
-    await this.chain;
-  }
-
-  /** Parse raw text into a message and dispatch; `-32700` on parse error. */
-  private processRaw(text: string): Promise<string | null> {
-    let message: unknown;
-    try {
-      message = JSON.parse(text);
-    } catch {
-      return Promise.resolve(this.errorResponse(null, -32700, 'Parse error'));
-    }
-    return this.processMessage(message);
-  }
-
-  private processMessage(message: unknown): Promise<string | null> {
-    if (typeof message !== 'object' || message === null || Array.isArray(message)) {
-      return Promise.resolve(this.errorResponse(null, -32600, 'Invalid Request'));
-    }
-    const msg = message as JsonRpcRequest;
-    const id = 'id' in msg ? msg.id ?? null : null;
-    const method = msg.method;
-    const hasId = 'id' in msg;
-
-    if (typeof method === 'string' && method.startsWith('notifications/')) {
-      if (hasId) {
-        return Promise.resolve(
-          this.errorResponse(id, -32600, 'Invalid Request: notifications must not include an id'),
-        );
-      }
-      return Promise.resolve(null);
-    }
-
-    if (typeof method !== 'string' || method.length === 0) {
-      return Promise.resolve(this.errorResponse(id, -32600, 'Invalid Request'));
-    }
-
-    if (!hasId) {
-      return Promise.resolve(null);
-    }
-
-    return this.handleRequest(id, method, msg.params);
-  }
-
-  private async handleRequest(
-    id: number | string | null,
-    method: string,
-    params: unknown,
-  ): Promise<string> {
-    switch (method) {
-      case 'initialize': {
-        const requested =
-          isPlainObject(params) ? params['protocolVersion'] : undefined;
-        return this.successResponse(id, {
-          protocolVersion: negotiateProtocolVersion(requested),
-          capabilities: this.capabilities,
-          serverInfo: this.serverInfo,
-        });
-      }
-      case 'ping':
-        return this.successResponse(id, {});
-      case 'tools/list':
-        return this.successResponse(id, { tools: this.toolsList() });
-      case 'tools/call':
-        return this.handleToolCall(id, params);
-      case 'resources/list':
-        return this.successResponse(id, { resources: this.resourcesList() });
-      case 'resources/read':
-        return this.handleResourceRead(id, params);
-      case 'prompts/list':
-        return this.successResponse(id, { prompts: [] });
-      case 'logging/setLevel':
-        return this.successResponse(id, {});
-      default:
-        return this.errorResponse(id, -32601, `Method not found: ${method}`);
-    }
-  }
-
-  private async handleToolCall(
-    id: number | string | null,
-    params: unknown,
-  ): Promise<string> {
-    if (!isPlainObject(params)) {
-      return this.errorResponse(id, -32602, 'Invalid params: expected an object');
-    }
-    const name = params['name'];
-    if (typeof name !== 'string' || name.length === 0) {
-      return this.errorResponse(id, -32602, 'Invalid params: name required');
-    }
-    const args = params['arguments'];
-    const argsObj = isPlainObject(args) ? args : {};
-    try {
-      const result = await this.callTool(name, argsObj);
-      return this.successResponse(id, result);
-    } catch (err) {
-      return this.successResponse(id, {
-        content: [{ type: 'text', text: redactSecrets(String(err)) }],
-        isError: true,
-      });
-    }
-  }
-
   /**
    * `resources/read` for the three advertised URIs. INERT UNTIL INIT:
    * `skillstate://state` and `skillstate://summary` read the persisted
-   * state, so they are refused with a JSON-RPC error (code `-32000`,
+   * state, so they are refused with an `McpError` (code `-32000`,
    * message = {@link NOT_INITIALIZED_MESSAGE}) when the launch-time state
    * directory does not exist — a read must not imply state exists.
    * `skillstate://spec` reads the in-memory config and stays ungated.
+   *
+   * The refusal is THROWN rather than returned as a JSON-RPC error object,
+   * because the SDK owns the framing now: an `McpError` produces the same wire
+   * shape a hand-built `-32000` did, and cannot get the `id` or the `jsonrpc`
+   * field wrong on the way.
    */
-  private handleResourceRead(
-    id: number | string | null,
-    params: unknown,
-  ): string {
-    const uri =
-      isPlainObject(params) && typeof params['uri'] === 'string'
-        ? (params['uri'] as string)
-        : undefined;
-    if (uri === undefined) {
-      return this.errorResponse(id, -32602, 'Invalid params: uri required');
-    }
+  private readResource(uri: string): {
+    contents: Array<{ uri: string; mimeType: string; text: string }>;
+  } {
     if (uri !== 'skillstate://spec' && this.isStateDirMissing()) {
-      return this.errorResponse(id, -32000, NOT_INITIALIZED_MESSAGE);
+      throw rpcError(-32000, NOT_INITIALIZED_MESSAGE);
     }
     let text: string;
     switch (uri) {
@@ -767,11 +779,11 @@ export class McpServer {
         break;
       }
       default:
-        return this.errorResponse(id, -32602, `Unknown resource: ${uri}`);
+        throw rpcError(ErrorCode.InvalidParams, `Unknown resource: ${uri}`);
     }
-    return this.successResponse(id, {
+    return {
       contents: [{ uri, mimeType: 'application/json', text }],
-    });
+    };
   }
 
   /* ------------------------------------------------------------------ */
@@ -843,22 +855,28 @@ export class McpServer {
     if (!isPlainObject(patch)) {
       throw new Error('patch must be an object');
     }
-    const validation = validatePatchDeep(
-      this.options.spec.schema,
-      patch as StatePatch,
-    );
-    if (!validation.valid) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: redactSecrets(
-              JSON.stringify({ valid: false, error: validation.error, field: validation.field }),
-            ),
-          },
-        ],
-        isError: true,
-      };
+    // Only a DECLARED spec gates a write. See `specDeclared` for the measurement
+    // that made this conditional: enforcing the builtin fallback rejected
+    // perfectly good notes, and the OpenCode plugin — writing the same file —
+    // never did.
+    if (this.specDeclared) {
+      const validation = validatePatchDeep(
+        this.options.spec.schema,
+        patch as StatePatch,
+      );
+      if (!validation.valid) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: redactSecrets(
+                JSON.stringify({ valid: false, error: validation.error, field: validation.field }),
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
     }
     const filePath = this.resolveStore(args);
     const { before, after } = await withStateLock(filePath, () => {
@@ -884,6 +902,22 @@ export class McpServer {
     const patch = args['patch'];
     if (!isPlainObject(patch)) {
       throw new Error('patch must be an object');
+    }
+    // Same gate as `state.patch`, and it has to be the same: a dry run that
+    // answers `valid: false` for a patch `state.patch` would have accepted is
+    // worse than no dry run, because it teaches the model the tool lies.
+    if (!this.specDeclared) {
+      return this.textResult(
+        redactSecrets(
+          JSON.stringify({
+            valid: true,
+            unvalidated: true,
+            reason:
+              'no declared procedural spec for this project, so there is no schema ' +
+              'to check the patch against. state.patch will accept it.',
+          }),
+        ),
+      );
     }
     const validation = validatePatchDeep(
       this.options.spec.schema,
@@ -1001,7 +1035,7 @@ export class McpServer {
       session: {
         statePath: filePath,
         envelopeVersion: CURRENT_STATE_VERSION,
-        protocolVersion: this.protocolVersion,
+        protocolVersion: LATEST_PROTOCOL_VERSION,
         seq: this.writeSeq.get(filePath) ?? 0,
         status: meta?.status ?? null,
         lastActivityAt: meta?.lastActivityAt ?? null,
@@ -1539,25 +1573,6 @@ export class McpServer {
   /*  JSON-RPC response builders                                         */
   /* ------------------------------------------------------------------ */
 
-  private successResponse(
-    id: number | string | null,
-    result: unknown,
-  ): string {
-    return JSON.stringify({ jsonrpc: '2.0', id, result });
-  }
-
-  private errorResponse(
-    id: number | string | null,
-    code: number,
-    message: string,
-  ): string {
-    return JSON.stringify({
-      jsonrpc: '2.0',
-      id,
-      error: { code, message },
-    });
-  }
-
   private textResult(text: string): McpToolResult {
     return { content: [{ type: 'text', text }] };
   }
@@ -1622,35 +1637,45 @@ function listCheckpoints(
 }
 
 /**
- * Resolve the procedural spec for a launch: explicit `args.spec` wins, then
- * a `SKILLSTATE_SPEC_PATH`/`args.specPath` JSON file, else the neutral
- * `GENERIC_PROCEDURE_SPEC`. Pure w.r.t. the returned value.
+ * Resolve the procedural spec for a launch, through the SHARED resolver.
  *
- * THE DEFAULT IS NOT THE CTF SPEC. It used to be
- * `INTERCODE_CTF_SPEC`, whose instructions read "You are an autonomous CTF
- * agent operating inside an InterCode CTF environment: a Docker container
- * with a hidden flag somewhere on its filesystem". Because `spec.get`
- * returns `spec.instructions` verbatim, any host launched without
- * `SKILLSTATE_SPEC_PATH` handed the model a task description it had never
- * been asked for -- the reported symptom was an agent that would not do the
- * user's task and kept looking for a flag instead.
+ * This used to be a private function with its own rules, and those rules were
+ * not the plugin's. It read an argument or an environment variable, never
+ * looked in the project directory, and `JSON.parse`d the result into a
+ * `ProceduralSpec` without validating a single field. Three consequences, all
+ * measured in a live OpenCode session holding the same project and the same
+ * state file as the plugin:
  *
- * A spec is a task description, so a default must be a description of the
- * STORAGE FORMAT and nothing else. The CTF spec stays reachable, but only
- * when a caller asks for it by name.
+ * - the project's own `skill-spec.json` was invisible here, so this server
+ *   enforced the builtin default while the plugin enforced the project's — two
+ *   different contracts on one file;
+ * - a malformed spec reached `spec.get`, and `spec.get` returns
+ *   `spec.instructions` verbatim, which is the v1 failure ("You are an
+ *   autonomous CTF agent … find the flag") arriving through the one door that
+ *   had never learned to validate;
+ * - `GENERIC_PROCEDURE_SPEC` was enforced as if the project had declared it.
+ *
+ * So the resolution now lives in `@skillstate/core` (`spec-resolve.ts`) and is
+ * the same one the plugin uses. What stays here is the reason this call is
+ * `strict`: the plugin tolerates a broken spec because a live agent loop must
+ * not die over a project file, but this process outlives the session and its
+ * operator named the spec — serving a default in its place would corrupt every
+ * run for the life of the process with no signal at all. See
+ * {@link resolveSpec} for the order and {@link SpecResolutionError} for the
+ * failure.
  */
-function resolveSpec(
+function resolveLaunchSpec(
   args: LaunchArgs | undefined,
   env: NodeJS.ProcessEnv,
-): ProceduralSpec {
-  if (args?.spec) {
-    return args.spec;
-  }
-  const specPath = args?.specPath ?? env['SKILLSTATE_SPEC_PATH'];
-  if (typeof specPath === 'string' && specPath.length > 0) {
-    return JSON.parse(fs.readFileSync(specPath, 'utf-8')) as ProceduralSpec;
-  }
-  return GENERIC_PROCEDURE_SPEC;
+  directory: string,
+): SpecResolution {
+  return resolveSpec({
+    directory,
+    spec: args?.spec,
+    specPath: args?.specPath,
+    env,
+    strict: true,
+  });
 }
 
 /**
@@ -1698,17 +1723,21 @@ export { resolveHostStateForCwd as resolveStatePathForCwd } from '@skillstate/co
  * state directory itself.
  */
 export async function launch(args?: LaunchArgs): Promise<McpServer> {
-  const spec = resolveSpec(args, process.env);
   const statePath = resolveHostStateForCwd(process.cwd(), os.homedir());
   const root = args?.root ?? path.dirname(statePath);
   const name = args?.name ?? path.basename(statePath);
+  // The project directory, not the state directory: `skill-spec.json` sits at
+  // the project root next to the code, and probing `root` would look for it in
+  // `.skillstate/`, where it never is.
+  const resolution = resolveLaunchSpec(args, process.env, args?.projectDir ?? process.cwd());
   const agentEnv = process.env['SKILLSTATE_AGENT_ID'];
   const agent =
     args?.agent ??
     (typeof agentEnv === 'string' && agentEnv.length > 0 ? agentEnv : '');
   const sanitizedAgent = agent.length > 0 ? sanitizeAgentId(agent) : '';
   const server = new McpServer({
-    spec,
+    spec: resolution.spec,
+    specDeclared: resolution.declared,
     root,
     name,
     agent,
@@ -1730,7 +1759,7 @@ export async function launch(args?: LaunchArgs): Promise<McpServer> {
         status: 'running',
         startedAt: new Date().toISOString(),
         agentId: sanitizedAgent,
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion: LATEST_PROTOCOL_VERSION,
       });
     } catch {
       // Best-effort stamp: an unwritable sidecar must not block the server.
