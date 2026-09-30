@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**`skillstate spec check` was permanently red for a key the log remembered and
+the state had never kept.**
+
+Found live, on this repository: two debug keys written by an earlier session and
+deliberately removed from the state. `check` reconciled the spec against the
+history writes as well as the state, so the fossil counted as drift — and the log
+is append-only, so nothing could ever clear it. Not deleting the key, which is
+what the finding itself recommends considering; not `--include-history`, which
+would declare the fossil. A gate that cannot be closed is not a gate.
+
+A spec claims to describe the state, and a key that is in the log and absent from
+the state is not part of the state. `check` now reconciles against the state and
+reports the untyped writes as a finding rather than as drift; `scaffold` still
+refuses, because a spec cannot be produced that accounts for a key nobody can
+type. Where one of them reports it and the other stops is the whole design.
+
+**A paper-mode loop that spent a step per turn for ever, with the ceiling 100
+turns away and a restart having just zeroed it.**
+
+Measured in a live session after a server restart, not in a fixture: nineteen
+turns in seven minutes, each one a state patch naming an action and a runtime
+wake-up, ending when a human interrupted it.
+
+```
+09:36:45 synthetic  The server restarted while you were working.
+09:36:56 assistant  {"state_patch": …, "action": "read src/mod2.ts"}
+09:37:31 user       {"text": ""}
+09:37:32 assistant  {"state_patch": …, "action": "read src/mod2.ts"}
+09:38:37 user       {"text": ""}
+```
+
+`action` is a label — `HOST_ACTION_NOTE` says so in as many words: "The `action`
+field is a label, not a command: nothing executes it." Work is done by tool
+calls, and the model made none. `maxSteps` counted STEPS and never asked whether
+a step had done anything, so each patch spent one. The ceiling that eventually
+stops such a loop lives in the process and the restart had just zeroed it.
+
+The next turn is not a retry with better information. The context hook re-renders
+(P, Σₜ, Oₜ), and Σₜ now holds the patch the model just wrote, so what it is
+handed back is its own output. Nineteen identical turns is the only outcome
+available to it, not bad luck.
+
+There is now a second ceiling, `DEFAULT_MAX_TOOLLESS = 3`, on consecutive steps
+that end without a single tool call, with its own stop reason `no_progress` so a
+stalled run is never recorded as a finished one. Override with
+`SKILLSTATE_MAX_TOOLLESS_STEPS`; `0` disables the guard and restores the previous
+behaviour exactly. Three rather than one because a model may legitimately think
+before its first call, and stopping it for that would end working runs to
+shorten a broken one.
+
+The signal is the host's own `message.part.updated` carrying a tool part, which
+is durable and documented. `StepBoundary.actionTaken` carried a comment saying no
+trustworthy tool event existed and pointing at the durable stream as the reason
+it had to infer progress from the patch; that was written against an older host
+and is now corrected in place rather than left to mislead the next reader.
+
+### Fixed
+
+**The 100% coverage gate was not enforced.**
+
+`thresholds` were declared inside each project's `coverage` block in
+`vitest.config.ts`. Under `projects`, vitest takes thresholds from the ROOT
+config and ignores the children's. The run reported 99.85% and exited 0; adding
+a function with zero coverage to a package still passed. The project believed it
+was gated at 100% — the note said so in more than one place — while nothing was
+checking. The gate is now in the root block, verified by injecting an uncovered
+function and watching it fail.
+
+Enforcing it exposed gaps that had been invisible the whole time, all now closed:
+
+- Two tests in `tests/opencode/history.test.ts` asserted the right answer for the
+  wrong reason. Their fixtures did not name the tool, so the reader's
+  pre-filter dropped the frames before the guards under test were reached, and a
+  later edit to either guard would have broken nothing. Their fixtures now
+  survive the filter.
+- `skillstate spec --answers` resolved its path against the process's working
+  directory while `--spec` resolved against the project directory. The two flags
+  name files for the same project and are usually given in the same command, so
+  `--spec ./s.json --answers ./a.json` read one of them from somewhere the other
+  could not see.
+- `--answers -` reads the process's standard input, which no test could reach
+  because `node:fs` is not configurable. `readProcessStdin` reads
+  `process.stdin.fd`, which is settable, so the shipped default is now covered
+  by the same substitution a pipe performs rather than only through an injected
+  stand-in.
+
+Removed rather than covered, because each is unreachable rather than untested:
+five `?? ''` and `instanceof Error` guards over columns the schema makes NOT NULL
+or throws only `Error`s; a `|| 'none'` fallback over a source list that is never
+empty; a `notes.length > 0` guard over a list `gatherEvidence` always fills; a
+tool name stored on every tool event and read by nothing.
+
+**The opencode history reader dropped every write when `state` was a primitive.**
+`(record['state'] ?? record)['name']` on a string is a lookup that returns
+`undefined` rather than throwing, so a host upgrade that started sending `state`
+as a string would have made the reader report "no writes" for a project that
+plainly had them. It now falls back to the record, where the arguments are.
+
+**The MCP server's `MCP error <code>:` prefix was doubled on the wire.**
+
+### Added
+
+- `skillstate spec observe|check|scaffold` — derives a project's procedural spec
+  from what the project actually holds. The schema is *observed*; the meanings
+  are *asked*. History does not declare keys by default; `--include-history`
+  is an explicit vouch that the log is append-only. `--answers` and `-` take the
+  answers from a file or standard input. JSON and markdown, exit 1 on drift.
+- `HistorySource` is a port in `@skillstate/core`, with the opencode
+  implementation in `@skillstate/opencode` reading `~/.local/share/opencode`
+  through `node:sqlite` — no dependency, read-only, indexed on `session_id`.
+  The reader filters on the tool name before `JSON.parse`, so a store full of
+  unrelated frames costs a substring test rather than a parse.
+
+### Removed
+
+- `HelpRequestedSpecError`, a class nothing threw. `parseSpecArgs` raises an
+  ordinary `Error` for `--help`; the class was a second, unreachable answer to a
+  question the argument parser had already settled.
+
 **The MCP server now runs on the official SDK, and two claims it used to make
 are gone.**
 

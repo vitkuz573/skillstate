@@ -655,6 +655,61 @@ describe('scaffold', () => {
     }
   });
 
+  it('does not fail a check on a key history holds and the state does not', async () => {
+    // A fossil: written once, never persisted, deliberately removed. The spec
+    // describes the state, the key is not in the state, and the log is
+    // append-only — so failing here is a red gate with no action that can clear
+    // it, not deleting the key (which is what the note recommends considering)
+    // and not `--include-history` (which would declare the fossil).
+    //
+    // Found live: two debug keys from an earlier session kept `spec check` red in
+    // this repository for good.
+    const dir = makeProject({ goal: 'a' }, {
+      id: 'p',
+      name: 'P',
+      version: '1.0.0',
+      instructions: 'A note.',
+      schema: { goal: { type: 'string', default: '' } },
+    });
+    setOpencodeStorePath(
+      makeStore([{ dir, type: 'assistant', data: updateFrame({ fossil_probe: 'x' }) }]),
+    );
+    try {
+      const { code, out } = await run(dir, {
+        subcommand: 'check',
+        useHistory: true,
+        history: ['opencode'],
+      });
+      expect(code).toBe(0);
+      // Still reported, because "written and never landed" is worth knowing.
+      expect(out).toContain('fossil_probe');
+      expect(out).toContain('NOT counted as drift');
+    } finally {
+      setOpencodeStorePath(undefined);
+    }
+  });
+
+  it('still REFUSES to scaffold over a key history holds and the state does not', async () => {
+    // The other half of the same split, and the half that must not move: a spec
+    // cannot be produced that accounts for a key nobody can type. Where `check`
+    // reports the fossil, `scaffold` still stops.
+    const dir = makeProject({ goal: 'a' });
+    setOpencodeStorePath(
+      makeStore([{ dir, type: 'assistant', data: updateFrame({ fossil_probe: 'x' }) }]),
+    );
+    try {
+      const { code } = await run(dir, {
+        subcommand: 'scaffold',
+        useHistory: true,
+        history: ['opencode'],
+      });
+      expect(code).toBe(1);
+      expect(fs.existsSync(path.join(dir, 'skill-spec.json'))).toBe(false);
+    } finally {
+      setOpencodeStorePath(undefined);
+    }
+  });
+
   it('rejects a history id nobody implements', async () => {
     const dir = makeProject({ goal: 'a' });
     await expect(run(dir, { history: ['claude'] })).rejects.toThrow(/unknown history source/);

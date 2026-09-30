@@ -2,37 +2,57 @@
   "id": "generic-procedure",
   "name": "State-based Execution",
   "version": "1.0.0",
-  "instructions": "You are operating in state-based execution mode on an arbitrary task.\n\nYour execution state is persisted externally and restored between\nsteps. Conversation history is trimmed automatically: never rely on\nit to carry information. Anything you need later MUST go into\nstate_patch this step.\n\nProcess for every step:\n1. Read the current state and the latest observation.\n2. Reason about the single next action that makes the most progress\n   toward the goal.\n3. Emit a JSON block with exactly two keys:\n   { \"state_patch\": { ... }, \"action\": \"<what you are doing next>\" }\n\nState discipline:\n- Keep `goal` accurate; refine it as understanding improves.\n- Move finished work into `progress`; keep `next_steps` current.\n- Record produced or modified files in `artifacts`.\n- Track unknowns and obstacles in `blockers` instead of memory.\n- Use `notes` for anything else worth persisting.\n- Set a key to null in state_patch to delete it.\n\nIterate observation -> reasoning -> state_patch -> action until the\ngoal is achieved and `progress` reflects it.",
+  "instructions": "Execution state for this project is a set of durable notes, restored between steps.\nConversation history is trimmed automatically; never rely on it to carry information. Anything needed later belongs in the state.\n\nThe state holds these keys:\n\n- `decisions` (array) — Choices made and the reason for each\n- `experiment` (object) — The running measurement: arms, numbers, what would invalidate it\n- `findings` (array) — What was learned, especially what contradicted an earlier belief\n- `goal` (string) — What this repository's work is trying to achieve, in one sentence\n- `invariants` (array) — Facts a future change must not break, and why they hold\n- `open` (array) — Questions still unanswered, and why each matters\n- `process` (array) — How this project is worked: state, tooling, committing\n- `shipped` (array) — What is done and verified, with the evidence\n- `todo` (array) — What is left to do\n- `todo_ongoing` (array) — Work currently in flight\n\nA patch is sparse: a key it does not mention keeps its current value. An array is replaced whole rather than appended to, so adding one item means sending the whole list. A nested object merges recursively. A key set to null is deleted.",
   "schema": {
+    "decisions": {
+      "type": "array",
+      "default": [],
+      "description": "Choices made and the reason for each"
+    },
+    "experiment": {
+      "type": "object",
+      "default": {},
+      "description": "The running measurement: arms, numbers, what would invalidate it"
+    },
+    "findings": {
+      "type": "array",
+      "default": [],
+      "description": "What was learned, especially what contradicted an earlier belief"
+    },
     "goal": {
       "type": "string",
       "default": "",
-      "description": "What the current procedure is trying to achieve"
+      "description": "What this repository's work is trying to achieve, in one sentence"
     },
-    "progress": {
+    "invariants": {
       "type": "array",
       "default": [],
-      "description": "Completed steps or milestones"
+      "description": "Facts a future change must not break, and why they hold"
     },
-    "next_steps": {
+    "open": {
       "type": "array",
       "default": [],
-      "description": "Planned next actions"
+      "description": "Questions still unanswered, and why each matters"
     },
-    "artifacts": {
+    "process": {
       "type": "array",
       "default": [],
-      "description": "Files or paths produced or modified so far"
+      "description": "How this project is worked: state, tooling, committing"
     },
-    "blockers": {
+    "shipped": {
       "type": "array",
       "default": [],
-      "description": "Current obstacles or unknowns"
+      "description": "What is done and verified, with the evidence"
     },
-    "notes": {
-      "type": "string",
-      "default": "",
-      "description": "Free-form working notes persisted between steps"
+    "todo": {
+      "type": "array",
+      "default": [],
+      "description": "What is left to do"
+    },
+    "todo_ongoing": {
+      "type": "array",
+      "default": [],
+      "description": "Work currently in flight"
     }
   }
 }

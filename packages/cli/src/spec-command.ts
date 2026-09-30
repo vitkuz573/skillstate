@@ -433,11 +433,33 @@ export async function cmdSpec(
       );
       return 1;
     }
-    const result = reconcile(existing.spec, evidence.state, evidence.writes);
+    // Reconciled against the STATE, with no history writes — the spec claims to
+    // describe the state, and a key that is in the log and absent from the
+    // state is not part of the state. A fossil written once and deliberately
+    // removed is not drift, and the log is append-only, so failing on one means
+    // `check` is red for ever with no action that can clear it: not deleting the
+    // key, which is what the finding is already telling the author to consider,
+    // and not `--include-history`, which would declare the fossil.
+    //
+    // The finding is still reported — `report.untyped` is in both output forms —
+    // because "a key was written and never landed" is worth knowing. It just is
+    // not a statement about whether the spec is right.
+    const result = reconcile(existing.spec, evidence.state);
     out(
       flags.format === 'json'
         ? JSON.stringify({ ...report, reconciliation: result }, null, 2)
-        : formatReconcile(result),
+        : [
+            formatReconcile(result),
+            '',
+            ...(untyped.length === 0
+              ? []
+              : [
+                  `written but never persisted, so not declared and NOT counted as ` +
+                    `drift (${untyped.join(', ')}):`,
+                  '  history cannot tell a write that never landed from one that was',
+                  '  deliberately undone, and the spec describes the state, not the log.',
+                ]),
+          ].join('\n'),
     );
     return result.clean ? 0 : 1;
   }
