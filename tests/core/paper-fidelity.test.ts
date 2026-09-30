@@ -418,3 +418,37 @@ describe('GENERIC_PROCEDURE_SPEC.instructions is descriptive, not directive', ()
     }
   });
 });
+
+describe('the model is told what §3.1 tells the operator', () => {
+  // §3.1: "A patch is sparse by definition: omitted keys are untouched." That is
+  // the operator's contract, and A.4 — the template the model actually reads —
+  // says only "<dict: your state updates>". A model that never learns the patch
+  // is sparse can reasonably believe it must resend the whole state, and at
+  // ninety files it does.
+  //
+  // Measured, 90 files: the state grew cleanly to eleven filenames and then one
+  // patch wrote `done` as a single entry. Everything after that rebuilt from
+  // one. Twenty reads, twelve distinct, `done: 3/90` at the end — and the base
+  // prompt 97% of a full A_t, because there was almost no state left to carry.
+  //
+  // §4.1 makes P the operator's procedural specification and the model reads it
+  // alongside A.4, so this is where a property the template omits belongs. It is
+  // §3.1's own sentence, stated descriptively.
+  it('states that a patch is sparse', () => {
+    const text = GENERIC_PROCEDURE_SPEC.instructions;
+    expect(text).toMatch(/patch is sparse/i);
+    // The clause spans a line break, because the instructions are an array of
+    // lines and the sentence did not fit one. Matching the flattened text is
+    // the only way to assert a property that is a property of the prompt.
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).toMatch(/does not mention is left exactly as it is/i);
+  });
+
+  it('does not tell the model to resend a field it is only appending to', () => {
+    // The failure is specific: a growing list rewritten in full. Anything that
+    // reads as "send the whole state" is the same instruction with more words.
+    const text = GENERIC_PROCEDURE_SPEC.instructions;
+    expect(text).not.toMatch(/resend the (whole|entire) state/i);
+    expect(text).not.toMatch(/repeat the (whole|entire) state/i);
+  });
+});
