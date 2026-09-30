@@ -1399,6 +1399,39 @@ describe('MCP installInterruptHandler', () => {
     });
   }
 
+  /**
+   * Wait for the baseline to say what the test is about to assert.
+   *
+   * The handler is `async` and AWAITS a meta write before it writes the baseline,
+   * so both are filesystem writes in sequence. A fixed sleep of ten milliseconds
+   * before reading is a bet on how fast two writes land, and it loses under load —
+   * which is exactly when `just gate` runs it, because the coverage step is
+   * competing for the same machine.
+   *
+   * It failed there and passed in isolation, which is the worst possible shape: a
+   * test whose result depends on what else the machine is doing. Polling for the
+   * condition removes the bet without making the test any less strict — it still
+   * fails if the baseline is ever wrong, only not if the machine is busy.
+   */
+  async function baselineSettled(
+    file: string,
+    what: (baseline: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (fs.existsSync(file)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+          if (what(parsed)) return parsed;
+        } catch {
+          // A half-written file: not settled yet. Reading it is the mistake this
+          // helper exists to stop making.
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error(`the baseline at ${file} never settled`);
+  }
+
   it('SIGTERM flushes status interrupted + re-pins the baseline, then exits', async () => {
     const dir = makeTmp();
     const server = makeServer({ root: dir });
@@ -1455,10 +1488,13 @@ describe('MCP installInterruptHandler', () => {
     const uninstall = server.installInterruptHandler();
     try {
       process.emit('SIGTERM', 'SIGTERM');
-      await nextTick();
-      const baseline = JSON.parse(
-        fs.readFileSync(path.join(dir, '.diff-baseline.json'), 'utf-8'),
-      ) as AnyRecord;
+      // Wait for the WRITE, not for a duration. The handler awaits the meta write
+      // before flushing the baseline, so the baseline is second in a sequence of
+      // two filesystem writes and a fixed sleep races it.
+      const baseline = await baselineSettled(
+        path.join(dir, '.diff-baseline.json'),
+        (b) => b['working_dir'] === '/second',
+      );
       expect(baseline.working_dir).toBe('/second'); // re-pinned to the surviving state
     } finally {
       uninstall();
