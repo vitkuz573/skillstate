@@ -21,7 +21,9 @@
 
 import { describe as group, it, expect } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const REPO = path.resolve(__dirname, '..', '..');
 const PROBE = path.join(REPO, 'scripts', 'ab-blind.sh');
@@ -141,5 +143,104 @@ group('the fixture reads as a sentence', () => {
     expect((text.match(/sparse/gi) ?? []).length).toBe(1);
     expect((text.match(/replaced whole/gi) ?? []).length).toBe(1);
     expect(text).toMatch(/null value deletes that key/i);
+  });
+});
+
+group('a run records whether the plugin was live at all', () => {
+  // A run whose plugin never loaded leaves a clean state file and a model that
+  // answers in prose, and the scorer reports state_ok False — the same verdict as
+  // a model that engaged and got it wrong. Those are different results and only
+  // one of them is about the model.
+  //
+  // This bit was added after a probe plugin took four packaging attempts to get
+  // the host to load it while the project's own package loaded 4 of 4. A
+  // measurement that cannot tell "the model did not use the state" from "the
+  // state was never there" is not measuring the model.
+  // `files` is a parameter because state_ok compares the recorded count against
+  // it, and a test about plugin_live that also asserts state_ok has to satisfy
+  // the count too. Asserting both from one fixture couples two unrelated things;
+  // the count is the scorer's business and it has its own tests.
+  const score = (dir: string, files = '1'): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: files },
+      }),
+    ) as Record<string, unknown>;
+
+  const runDir = (events: unknown[], state: unknown): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), events.map((e) => JSON.stringify(e)).join('\n'));
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state }));
+    return dir;
+  };
+
+  const patchFence = 'ok\n\n```json\n{"state_patch":{"total":1523,"done":["a"]},"action":"read"}\n```';
+
+  it('is false when nothing touched the state and no tool was called', () => {
+    const dir = runDir(
+      [
+        { part: { type: 'tool', tool: 'read', state: { input: { path: 'a.ts' }, output: 'x' } } },
+        { part: { type: 'text', text: 'The total is 1523.' } },
+      ],
+      { total: 0, done: [] },
+    );
+    const record = score(dir);
+    expect(record.plugin_live).toBe(false);
+    // And the verdict a dead plugin produces is indistinguishable from a model
+    // that engaged and failed — which is the reason this bit exists.
+    expect(record.state_ok).toBe(false);
+  });
+
+  it('is true when the model emitted a fenced patch', () => {
+    const record = score(runDir([{ part: { type: 'text', text: patchFence } }], { total: 1523, done: ['a'] }));
+    expect(record.plugin_live).toBe(true);
+    expect(record.state_ok).toBe(true);
+  });
+
+  it('is true when the state was written from inside the execute sandbox', () => {
+    // The case that made the first version of this check wrong. A trial called
+    // `await tools.skillstate_update({ patch: ... })` thirty-one times and has NOT
+    // ONE direct skillstate tool call in its transcript, so a detector that only
+    // looked at tool names called that run dead.
+    const dir = runDir(
+      [
+        {
+          part: {
+            type: 'tool',
+            tool: 'execute',
+            state: {
+              input: { code: 'const r = await tools.skillstate_update({ patch: { total: 1523, done: ["a"] } }); return r;' },
+              output: '{"ok":true}',
+            },
+          },
+        },
+      ],
+      { total: 1523, done: ['a'] },
+    );
+    const record = score(dir);
+    const engagement = record.engagement as Record<string, boolean>;
+    expect(record.plugin_live).toBe(true);
+    expect(engagement.skillstate_in_sandbox).toBe(true);
+    expect(engagement.skillstate_tool).toBe(false);
+  });
+
+  it('does not count a tool that merely mentions the name in its output', () => {
+    // Otherwise a model that reads the state file, or a log containing the word,
+    // counts as engagement and the gate is worth nothing.
+    const dir = runDir(
+      [
+        {
+          part: {
+            type: 'tool',
+            tool: 'read',
+            state: { input: { path: '.skillstate/skillstate.json' }, output: 'skillstate_update is documented here' },
+          },
+        },
+      ],
+      { total: 0, done: [] },
+    );
+    expect(score(dir).plugin_live).toBe(false);
   });
 });

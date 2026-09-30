@@ -48,6 +48,26 @@ def _assistant_texts(path: str) -> list[str]:
     return texts
 
 
+def _parts(out: str) -> list[dict[str, Any]]:
+    """Every part of the transcript, for questions about tool names."""
+    parts: list[dict[str, Any]] = []
+    if not os.path.exists(out):
+        return parts
+    with open(out, errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            part = event.get("part")
+            if isinstance(part, dict):
+                parts.append(part)
+    return parts
+
+
 def _tool_census(path: str) -> dict[str, int]:
     census: dict[str, int] = {}
     with open(path, errors="replace") as handle:
@@ -170,9 +190,42 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     # evidence for the state having done the work.
     outsourced, built = _code_delegation(out)
 
+    # Was the plugin even LIVE? Not an academic question: a run whose plugin
+    # never loaded produces a clean, un-touched state file and a model that
+    # answers in prose — which the scorer would report as state_ok False, the
+    # same verdict as a model that engaged and got it wrong.
+    #
+    # This bit was added after a probe plugin took four attempts to get the host
+    # to load it at all, while the project's own package loaded 4 of 4. A
+    # measurement that cannot distinguish "the model did not use the state" from
+    # "the state was never there" is not measuring the model.
+    paper_engaged = any("```json" in t for t in texts)
+    parts = _parts(out)
+    notes_engaged = any(
+        str((part.get("tool") or "")).startswith("skillstate_") for part in parts
+    )
+    # …and through the host's `execute` sandbox, which is how one trial did it:
+    # `await tools.skillstate_update({patch: …})`, thirty-one times, with not
+    # one direct skillstate tool call anywhere in the transcript. A first version
+    # of this check missed exactly that case and called the run dead — a detector
+    # with a false negative on the known instance is worse than no detector,
+    # because it produces a confident wrong verdict instead of a missing one.
+    sandboxed = any(
+        str((part.get("tool") or "")) in {"execute", "bash", "python", "python3", "shell", "run"}
+        and "skillstate_" in json.dumps((part.get("state") or {}).get("input") or {})
+        for part in parts
+    )
+    engaged = paper_engaged or notes_engaged or sandboxed
+
     return {
         "record_id": record_id,
         "arm": arm,
+        "plugin_live": engaged,
+        "engagement": {
+            "patch_in_text": paper_engaged,
+            "skillstate_tool": notes_engaged,
+            "skillstate_in_sandbox": sandboxed,
+        },
         "state_ok": total == truth and done_count == files and total_typed,
         "accumulated": (
             total == truth
