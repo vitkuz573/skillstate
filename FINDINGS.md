@@ -761,6 +761,19 @@ answered, and the honest next step is a run that finishes.
 
 ## 14. Where the saving goes
 
+**Read this section next to the one about wall clock, because they point opposite
+ways.** §7 counts characters and by characters the mechanism wins by 46.9x. By
+elapsed time at the same thirty files it **loses by 3.7x**: the control runs took
+1.7, 5.5 and 9.1 minutes and the bounded arm 15.6, 21.6 and 34.6. Neither number
+is wrong and §7 is the one the paper defines — but a reader deciding whether to
+use this needs both, and for most of a day the project only had the flattering one.
+
+It is also a hard limit, not merely a comparison. The slowest thirty-file run used
+2075 of the stand's 2400 seconds, 87% of the harness budget for 30 files, and the
+bounded arm costs about 0.34 minutes per file. Ninety files is ~40 minutes against
+a 40-minute cap — which is why that fixture is unmeasurable here, and why raising
+the step ceiling bought six more files and then the same wall.
+
 Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
 transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
 separates them.

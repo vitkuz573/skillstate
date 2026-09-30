@@ -282,6 +282,30 @@ per call:
 Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
 the loop, which is exactly what this host cannot give it.
 
+**And by wall clock the mechanism is not cheaper at all — it is 3.7x slower.**
+Thirty files, three trials each, spans of the transcripts' own timestamps:
+
+| arm | durations |
+| --- | --- |
+| notes — transcript | 1.7, 5.5, 9.1 min |
+| paper — bounded | **15.6, 21.6, 34.6 min** |
+
+`§7` counts characters, and by characters the bounded arm wins by 46.9x. The
+character count does not see that a turn carrying `Aₜ` also costs the host
+re-sending its own context, re-rendering the state hint, and running the step
+boundary — so the number the paper defines and the number a user pays point in
+opposite directions. **Both are real and the mechanism's advantage is in the one
+the paper measures.** Anyone deciding whether to use this should read both.
+
+It is also a hard operational limit, not only a comparison: the slowest
+thirty-file run used 2075 of the stand's 2400 seconds, **87% of the harness budget
+for 30 files**, and the paper arm costs roughly 0.34 minutes per file. Ninety
+files is about forty minutes against a forty-minute cap, which is why that
+fixture is not measurable here — the cap and the length are the same constraint.
+Both runs of it were killed by the harness, and `at_timeout` in the scorer is how
+the next one says so by itself. The records for all of this are in
+[`measurements/`](measurements/README.md).
+
 **And then the length made the request count work for the mechanism instead of
 against it.** At 90 files the control needed 192 tool calls and the bounded arm
 128 — so the bounded arm now pays the host's overhead *less* often as well as
