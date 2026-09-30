@@ -30,6 +30,22 @@ const SCORER = path.join(REPO, 'scripts', 'blind-score.py');
 const probe = fs.readFileSync(PROBE, 'utf-8');
 const scorer = fs.readFileSync(SCORER, 'utf-8');
 
+/**
+ * The instructions the model is given about how to maintain the state.
+ *
+ * Sliced to the VALUE, not to the surrounding heredoc: the value is the prose a
+ * model reads, and the shell around it is not, so a test about sentence
+ * fragments has to be looking at the sentences.
+ */
+function instructionsSource(): string {
+  const start = probe.indexOf('"instructions": "');
+  expect(start, 'the spec fixture instructions not found').toBeGreaterThan(-1);
+  const from = start + '"instructions": "'.length;
+  const end = probe.indexOf('",\n', from);
+  expect(end, 'the end of the instructions string not found').toBeGreaterThan(from);
+  return probe.slice(from, end).replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** The function that builds what the model is actually asked. */
 function taskTextSource(): string {
   const start = probe.indexOf('task_text() {');
@@ -93,5 +109,37 @@ group('the scorer judges the state, not the sentence', () => {
     // the answer wrong, which is the run that proved the old fixture was
     // scoring copies.
     expect(scorer).not.toMatch(/'correct'\s*:/);
+  });
+});
+
+group('the fixture reads as a sentence', () => {
+  // Two edits to the instructions string, in sequence, left "Resending To add a
+  // file to `done`, send the whole list..." — the tail of the sentence that was
+  // replaced followed by the sentence that replaced it, with no seam. The
+  // 90-file run that caught it read the garbled version.
+  //
+  // A fixture whose text IS the treatment has no test watching it, and this file
+  // already guards the parts that would let the experiment lie. The prose is the
+  // remaining unguarded surface.
+  it('has no sentence fragments left over from a previous wording', () => {
+    const text = instructionsSource();
+
+    // A capital letter mid-sentence with no punctuation before it is the shape
+    // two edits make when the second starts where the first was cut.
+    expect(text).not.toMatch(/[a-z0-9`)]\s+[A-Z][a-z]/);
+    // And no doubled sentence boundary.
+    expect(text).not.toMatch(/[.!?]\s*\./);
+    // Ends properly.
+    expect(text.trimEnd().endsWith('.')).toBe(true);
+  });
+
+  it('says each of the two merge rules once, and in the right words', () => {
+    const text = instructionsSource();
+    // Sparseness is §3.1, and the array rule is §3.1's closing clause. Both were
+    // added because the 90-file run showed a model getting each of them wrong,
+    // and a duplicated restatement would be the same problem as a missing one.
+    expect((text.match(/sparse/gi) ?? []).length).toBe(1);
+    expect((text.match(/replaced whole/gi) ?? []).length).toBe(1);
+    expect(text).toMatch(/null value deletes that key/i);
   });
 });
