@@ -66,6 +66,26 @@ it was given back. Plus where the two agree.
 
 [`FINDINGS.md`](./FINDINGS.md)
 
+The one measurement that argues *for* the mechanism, with every other variable
+held fixed — same model, same fixture, one switch:
+
+| arm | reads | state | answer |
+| --- | --- | --- | --- |
+| paper — bounded context | 46 | **30/30, total 1523** | 1523 |
+| notes — transcript in context | 31 | **0 files, total 0** | 1523 |
+
+Both answered correctly. Only one has a state. With the transcript on screen the
+model has no reason to keep a record; take the transcript away and the same
+model keeps it perfectly. That is the thesis, observed rather than argued.
+
+And the one that bounds it. Priced in §4.3's unit — raw string chars, not wall
+tokens, which include the host's own per-call context — the paper arm sends
+100,040 chars against the 2,300,920 a prefix-sum baseline would: **23.00×,
+against a theoretical (T+1)/2 of 23.00**. Exact. And **81% of Aₜ is the constant
+base prompt**; the state is 19% of the request, and the host re-sends its own
+context on each of 59 calls where the baseline makes 31. The arithmetic is
+right. The upper bound is doing more work than the claim.
+
 ## How it works
 
 ```mermaid

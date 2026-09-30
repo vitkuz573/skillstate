@@ -143,3 +143,78 @@ post-mortem.
   holds in a run, not only in a unit test. Pinned by test `4d`.
 - **§3.3's four clauses hold** under adversarial input, including the array
   clause that made finding 1 expressible in the first place.
+
+---
+
+## 7. The result that argues for the mechanism
+
+Same task, same model, same fixture, one variable: whether the model could see
+its own transcript.
+
+| arm | reads | state | answer |
+| --- | --- | --- | --- |
+| paper — bounded context | 46 | **30/30, total 1523** | 1523 |
+| notes — transcript in context | 31 | **0 files, total 0** | 1523 |
+
+Both arms answered correctly. Only one of them has a state.
+
+The notes arm computed 1523 and wrote nothing. Not a partial state, not a wrong
+one — `done` empty, `total` 0, and the scorer confirmed it from the state file
+without looking at the answer. With the transcript in front of it the model had
+no reason to maintain a record, because the record was already on screen. Remove
+the transcript and the same model maintains it perfectly.
+
+That is the paper's thesis, observed rather than argued: the state is worth
+something only where the transcript is not available. It is also the first
+measurement in this project where the state and the mechanism are separated from
+everything else — same model, same fixture, same task, one switch.
+
+**What it does not show.** It does not show the mechanism saving tokens, which is
+finding 8.
+
+---
+
+## 8. Where the saving goes
+
+Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
+transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
+separates them.
+
+**The mechanism does what §7 says.** Replaying the paper trial's 45 patches
+through the runtime's own merge:
+
+```
+SUM |A_t|                100,040 chars
+prefix-sum baseline    2,300,920 chars
+reduction, eq. 8            23.00x
+theoretical (T+1)/2         23.00x
+```
+
+Exact, and exact because Aₜ barely moves — 1977 to 2406 chars across 45 steps —
+so the prefix sum collapses onto the closed form. The paper's arithmetic is
+right.
+
+**And 81% of Aₜ is the constant base prompt.** The state — the thing the entire
+argument is about — is 19% of the request: 464 of 2432 chars. §7's ratio is
+measured against a component that is a fifth of what is sent.
+
+**Then the host re-sends its own context on every call.** The system prompt and
+the tool schemas are not part of Aₜ, cost the same on every call, and the paper
+arm makes 59 of them where the notes arm makes 31. That cost is invisible to
+§4.1's accounting by construction — it is outside Aₜ — and it is most of the
+wall-token difference.
+
+So the honest statement, and it is narrower than the paper's:
+
+> The reduction is real and reproduces exactly **against a baseline that
+> re-sends a growing transcript**. In a host that gives the agent its transcript
+> for free, there is nothing for it to reduce, and the host's own per-call
+> context is larger than the state it is displacing.
+
+The paper never claims otherwise — *"an upper bound, not a deployment claim,
+because real observation sizes vary"* — but the upper bound is doing more work
+here than the claim, and 81% is the number that says so.
+
+**Reproduction.** `node scripts/replay-at.mjs <transcript.jsonl>`, after
+`npm run build`. It runs no model and reads no verdict.
+
