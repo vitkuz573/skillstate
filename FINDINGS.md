@@ -10,21 +10,26 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
-**How to read a number in this document.** Three of them were confidently wrong
-for most of a day — a correctness column, an erasure count, and a lag rate — each
-a counter that ran, printed, and was never compared against a second opinion.
-Two of them are corrected in place with the counter that produced them, so the
-mistake is as findable as the finding. Where a section reports one trial it says
-so; `n=3` appears where three ran, and at n=3 nothing here supports a claim about
-accuracy in either direction.
+**How to read a number in this document.** Five of them were confidently wrong
+for most of a day — a correctness column, an erasure count, a lag rate, a drift
+counter, and the question of whether the plugin was loaded at all. Each was a
+counter or a gate that ran, printed, and was never compared against a second
+opinion. Two are corrected in place with the counter that produced them, so the
+mistake is as findable as the finding; the rest are sections of their own. Where a
+section reports one trial it says so; `n=3` appears where three ran, and at n=3
+nothing here supports a claim about accuracy in either direction.
+
+---
 
 **Reproduction.** Every figure comes from a script that runs no model:
 
 ```
 node scripts/census.mjs     <run>/out.json [...]   # the counters in 1, 3, 4, 10
 node scripts/replay-at.mjs  <run>/out.json         # SUM |A_t| and eq. 8, in section 14
-node scripts/crossover.mjs <paper>/ <notes>/       # the H ceiling, in section 14
+node scripts/crossover.mjs <paper>/ <notes>/       # the H ceiling
 ```
+
+and `blind-score.py` reports `plugin_live` for every run — see the last section.
 
 `just ab-blind` produces the runs. `npm run build` first — these import the
 compiled core, so the merge they use is the merge the runtime uses.
@@ -635,4 +640,42 @@ here than the claim, and 81% is the number that says so.
 
 **Reproduction.** `node scripts/replay-at.mjs <transcript.jsonl>`, after
 `npm run build`. It runs no model and reads no verdict.
+
+---
+
+## 15. Was the plugin even loaded?
+
+A run whose plugin never loaded leaves a clean state file and a model that answers
+in prose. The scorer reported `state_ok: false` — the same verdict as a model that
+engaged and got it wrong.
+
+This was found by trying to build a throwaway probe plugin for
+`ctx.session.generate`, the one API that could let the paper's own
+`SkillStateRuntime` run in the host with the adapter out of the loop. The probe
+would not load. Four packaging attempts, and the project's own package loaded four
+of four from the same directory, with the same `opencode.json`, on the same model.
+
+**The probe's logic never ran, so the API question is still open.** What the
+failure established is worth more than the question was: a measurement of mine
+could have gone the same way and nothing in the harness would have said so. A
+transcript with a clean state file and a plausible answer is exactly what "the
+model did not use the state" looks like, and exactly what "the state was never
+there" looks like.
+
+So every run now records `plugin_live` — a fenced patch in the text, or a
+`skillstate_*` tool call, or a `skillstate_*` call from inside the host's
+`execute` sandbox. That last one is required and not decorative: the notes trial
+that wrote a complete state did it thirty-one times from inside `execute`, with
+not one direct tool call anywhere in its transcript, and the first version of the
+check missed it and called that run **dead**. A detector with a false negative on
+the known instance is worse than no detector, because it produces a confident
+wrong verdict instead of a missing one.
+
+Re-scored against every run taken for this document: the paper arms carry 45 and
+130 fenced responses, one notes trial wrote through the sandbox, all four are
+live. **The measurements stand.**
+
+The five instruments in this project, all of them now checked: the correctness
+column, the erasure count, the lag rate, the drift counter, and this gate that
+exists because the first four were each wrong in a different direction.
 
