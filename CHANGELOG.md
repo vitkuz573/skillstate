@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Added: the records behind the numbers are in the repository, and a test reads
+them.**
+
+`measurements/` holds the scorer's output for every run behind a figure in
+`FINDINGS.md` and `README.md` — eleven runs, all derived, none hand-written — plus
+`derived.json` for the §7 arithmetic, produced by `scripts/replay-at.mjs`. A test
+fails if the prose disagrees with a record: every bounded-arm file count has to
+appear, every derived Σ|Aₜ| has to be in the table it is claimed for, eq. 8 has to
+equal `(T+1)/2`, and no table may quote a Σ no run produces.
+
+It does not verify the claims. It verifies that a number the document leans on is
+the number the run actually produced, which is the part that went wrong every time:
+the run was real, the number was real, and the reading of it was not.
+
+**Fixed: two tables in the documentation re-derived from nothing.** The §14 Σ
+figures (100,040 at T=45, 155,672 at T=61) and the crossover rows (60 against 31 at
+both lengths) were both from a superseded fixture generation whose transcripts are
+not in the record. Re-derived, eq. 8 reproduces exactly on all five bounded runs and
+the reduction ratio **grows** with length — 23.00x at 45 patches, 65.50x at 130 —
+because Σ|Aₜ| grows linearly while the prefix-sum baseline grows quadratically.
+
+**Changed: the ninety-file cost claim is a range, not a number.** Against the control
+run that kept 90 of 90 filenames the bounded arm makes fewer requests and wins
+twice — 46.9x on content, and the H condition stops binding at −266,648. Against
+the control run that kept 10 of 90 it makes 32 more requests — 4.3x, and the
+condition binds at 37,917. Same bounded run, both true. §7 on its own, which does
+not depend on a control at all, is the claim that survives.
+
+**Added: `at_timeout` — the harness's own clock, measured.** The stand's `timeout`
+sends SIGTERM, the host closes the socket, and the transcript's last line reads
+"Transport: The socket connection was closed unexpectedly": a harness decision
+wearing the costume of a network failure. Two 90-file runs died at 39.9 minutes
+against a `timeout 2400` while the control at the same length finished in 6.9, and
+each was read for a day as a network failure and once as a step ceiling. The scorer
+now reads the run's own duration against the cap the stand records in `meta.json`.
+Verified on a live SIGTERM: 415.5 seconds of a 420-second cap, flagged with nobody
+reading anything.
+
+**Added: `ended_on_error`.** The same runs, one level up — the transcript ends on an
+error, so the run did not finish for any reason this project controls. Tri-state
+alongside `stopped_by_ceiling`: absent is `null`, never `false`, because `false`
+would read as "this run finished" for a run whose ending was never recorded.
+
+**Fixed: `at_timeout` uses an absolute band, not a fraction of the cap.** `0.98` is
+47 minutes of slack at a 2400-second cap and 12 seconds at a 20-second one — one
+number meaning two things, which is the unit mistake again. The band is 30 seconds:
+long enough for SIGTERM to land, short enough that a run using more than 99% of its
+budget is not quietly called a success.
+
+**Fixed: four transcript readers in the scorer disagreed about what a transcript
+is.** A bare `[]` took the whole scorer down with an AttributeError, and the same
+shape took down all three of `census.mjs`, `replay-at.mjs` and `crossover.mjs` on a
+bare `null`. Those are the scripts behind every number in the documentation.
+
 **Added: a run now says how it stopped, and the ceiling it stopped under.**
 
 §10.1's loop has three exits and one return value. `break` on `isDone`, `break`

@@ -10,24 +10,35 @@ Every measurement here is a live run. None of it is in the paper, and none of it
 is a claim about the paper — it is a claim about what happened when the paper's
 mechanism was run.
 
-**How to read a number in this document.** Seven instruments in this project were
-confidently wrong, each in a different direction: a correctness column, an erasure
-count, a lag rate, a drift counter, a liveness check with a false negative, and a
-probe whose output was read as evidence when it was the confound. Each ran, each
-printed, and none was compared against a second opinion. Two are corrected in
-place with the counter that produced them, so the mistake is as findable as the
-finding; the rest have sections of their own.
+**How to read a number in this document.** Twelve instruments in this project were
+wrong or missing, and the counts are worth separating because the two kinds are
+found differently.
 
-An eighth was not wrong but *absent*, which is harder to see than a wrong number:
-nothing recorded why a loop stopped, and nothing recorded that the host had
-dropped the run at all. See 13a.
+**Eight were wrong**, each in a different direction: a correctness column, an
+erasure count, a lag rate, a drift counter that was blind in one mode, a tool
+counter that counted one message N times, a plugin probe whose output was the
+confound rather than the evidence, a liveness check that was dead on a run that
+wrote and live on a run that did not, and a truncation summary that reported bytes
+next to a character limit. Each ran, each printed, and none was compared against a
+second opinion.
 
-A ninth came with it and has the same shape: the stand runs the model under
-`|| true`, so a crashed, timed-out or quota-starved run leaves the same files
-behind as a clean one. **Both absences are about one question — did the run finish
-at all — and a day's headline number sat on a run whose answer was a closed
-socket.** Reading the last line of a transcript is cheap. Not having any reason to
-is not. Where a
+**Four were absent**, which is harder to see than a wrong number because there is
+nothing to check: nothing recorded why a loop stopped, nothing recorded that the
+host had dropped the run, nothing compared the run's own duration against the cap
+the harness gave it, and nothing checked this document against the runs it quotes.
+**The three absences are one question — did the run finish at all — and a day's
+headline number sat on a run that a `timeout 2400` had killed at 39.9 minutes.**
+Reading the last line of a transcript is cheap. Not having any reason to is not.
+
+The fourth absence is why the records are committed in
+[`measurements/`](measurements/README.md) and read by a test: a claim in this
+document that no record supports is a claim with nothing behind it, and this
+document has now contained two tables that re-derived from nothing — the §14 Σ
+figures and the crossover rows, both from a superseded fixture generation.
+
+Two of the wrong eight are corrected in place with the counter that produced them,
+so the mistake is as findable as the finding; the rest have sections of their own.
+Where a
 section reports one trial it says so; `n=3` appears where three ran, and at n=3
 nothing here supports a claim about accuracy in either direction.
 
