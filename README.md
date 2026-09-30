@@ -82,6 +82,24 @@ truth"*, not *"the state accumulated the truth"*. §10.2's check 1 cannot ask
 whether the model arrived there by the mechanism the state exists to carry.
 `node scripts/census.mjs <transcript>` counts the attempts, no model required.
 
+And the effect that dominates is neither. Four counters, same model, same 30
+files:
+
+| arm | reads | distinct | re-reads | patches | lag | erasure | sum-outsourced |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| notes | 31 | 30 | 1 (3%) | 0 | — | 0 | **0** |
+| paper | 46 | 29 | 17 (37%) | 45 | 36 (80%) | 0 | 3 |
+| paper | 37 | 29 | 8 (22%) | 43 | 36 (84%) | 0 | 3 |
+| `values` | 87 | 30 | 57 (66%) | 112 | 70 (63%) | 1 | 6 |
+
+**Lag** is a patch naming fewer files than have been read. It happens on four
+fifths of the paper arm's steps, so the state trails the work and 37% of its reads
+are re-reads going back for what it lost. §5.1 has the runtime choose the action
+and execute it, one per step, so Σ cannot trail by construction — this host's
+plugin has no execute capability and the agent loop batches, so a model can read
+three files in a turn and name one. Three prompt-level fixes for it have been
+tried and measured; all three reached the model and all three were declined.
+
 ### What live runs showed that the conformance suite cannot test
 
 The suite above pins the implementation to `state.md`. It cannot say what

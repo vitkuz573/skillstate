@@ -14,23 +14,36 @@ mechanism was run.
 
 ## 1. The erasure mechanism, exactly
 
-**Observed.** A model that wants to stop early does not set a flag. It sends
-`action=''` carrying a full patch, then in the same turn sends
-`{"total": null, "done": null}`.
+**Observed.** One instance in 112 patches across four runs, and it is not what I
+first described. From the `values` run:
 
-**Why it works.** §3.1 rule 2: *"If `ΔΣ[k] = null`, then `k` is **removed
-entirely** from `Σ'`. The key no longer exists; it is not set to any sentinel."*
-So the state does not reset to its defaults — it becomes `{}`. §10.1 then
-assigns `Σ = stepResult.newState` and never calls `create_initial_state` again,
-so nothing re-seeds it. On the next step the model is shown an empty state and
-nothing else.
+```
+{"total": 1523, "done": null, "values": null}
+action: "All 30 files read and recorded. State final: done has 30 filenames,
+         values holds REAL_1..REAL_30, total = 1523."
+```
+
+§3.1 rule 2 removes `done` and `values` entirely. The model deleted its record
+and described the record as complete **in the same turn**, and the scorer passed
+the run because a later patch rebuilt it.
+
+The rate is 0–1% of patches. It is not a mechanism models reach for; it is
+something that happens to them, and the instance is a self-contradiction rather
+than a deliberate early exit. The zero-`total`-and-`done` pair I first wrote down
+is the same mechanism with one field — it did not appear in any of these runs.
+
+**Why it is expressible.** §3.1 rule 2: *"If `ΔΣ[k] = null`, then `k` is
+**removed entirely** from `Σ'`. The key no longer exists; it is not set to any
+sentinel."* So the state does not reset to its defaults — the key is gone.
+§10.1 then assigns `Σ = stepResult.newState` and never calls
+`create_initial_state` again, so nothing re-seeds it.
 
 The wrong answer, and the one I first wrote down, is that `null` restores
 defaults. It does not, and the difference is the whole mechanism: a defaulting
 merge would still show the model `total: 0, done: []`, which reads as *no
-progress yet*. An empty object reads as *nothing was ever recorded*, which on
-step 47 is indistinguishable from a fresh run — and it is also what a scorer
-looking for `done` and `total` finds when both are gone.
+progress yet*. An absent key reads as *nothing was ever recorded*, which on step
+47 is indistinguishable from a fresh run — and it is also what a scorer looking
+for `done` and `total` finds when both are gone.
 
 **It does not self-heal.** One later patch re-introduces only the key it names.
 After `{count: 3}` on an erased state, `state.log` does not exist, and a consumer
@@ -39,13 +52,16 @@ deleted simply does not exist"* — and the throw is the consumer's problem, not
 the merge's.
 
 **What the paper offers.** Nothing that would catch it. §6.2 checks types, and
-`{"total": null, "done": null}` is a perfectly typed patch against a schema that
-declares both fields. The paper's own two clauses — null is always legal, and
-null removes the key — compose into erasure without either being wrong.
+`{"done": null}` is a perfectly typed patch against a schema that declares
+`done`. The paper's own two clauses — null is always legal, and null removes the
+key — compose into erasure without either being wrong.
 
-**Where it is recorded.** Test `3d`, which asserts the empty state, asserts
-that it is *not* the defaults, and asserts that a second step does not re-seed
-it. Asserting only the first would pass against the wrong implementation.
+**Where it is recorded.** Test `3d`, which asserts the empty state, asserts that
+it is *not* the defaults, and asserts that a second step does not re-seed it.
+Asserting only the first would pass against the wrong implementation. The rate
+is counted by `scripts/census.mjs`, and the counter had to be corrected first: it
+fired on patches that merely omitted fields, and sparse is the *definition* of a
+patch. See `1b`.
 
 ---
 
@@ -64,6 +80,82 @@ Recorded because the wrong account is the more natural one. A merge that deletes
 is a natural place to fall back to a schema default, and that fallback would
 have passed every test written before this one — they all asserted that the key
 was *absent*, which is true under both accounts.
+
+---
+
+## 1b. A count that was wrong in the direction that flattered the finding
+
+I reported **9 erasures in 45 patches** — a fifth of the steps. The counter fired
+on patches that merely *omitted* fields. Nine of that run's forty-five patches
+were `{}` or partial, and §3.1 makes a patch sparse by definition: *"omitted keys
+are untouched."* So the counter was reporting ordinary incremental patches as
+deletions, and the real count was **0**.
+
+The direction matters. A finding that reads "models erase the state in a fifth of
+all steps" is a much stronger claim than "this happened once", and it was
+manufactured by a predicate that could not tell an absent key from an absent
+*mention*. The erasure was still real — it is finding 1, and it is one instance
+in 112 patches across four runs — but the evidence is a single self-contradicting
+patch, not a rate.
+
+**What would have caught it.** A second implementation of the counter, compared
+against the first on the same input. That is now a test
+(`tests/bench/census.test.ts`, "the two implementations agree") for the two
+copies of the outsourcing detector, and the erasure predicate is pinned by three
+assertions that it must *not* fire on a sparse patch and must *not* fire on `{}`.
+
+The general shape: this project's most damaging errors have all been counters
+that were plausible, ran, and were never compared against a second opinion. The
+blind probe's correctness column was one. This was another.
+
+---
+
+## 1c. The dominant effect, which is not erasure
+
+`scripts/census.mjs` counts four things per run. Same model, same 30 files, same
+truth:
+
+| arm | reads | distinct | re-reads | patches | lag | erasure | sum-outsourced |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| notes | 31 | 30 | 1 (3%) | 0 | — | 0 | **0** |
+| paper | 46 | 29 | 17 (37%) | 45 | 36 (80%) | 0 | 3 |
+| paper | 37 | 29 | 8 (22%) | 43 | 36 (84%) | 0 | 3 |
+| `values` | 87 | 30 | 57 (66%) | 112 | 70 (63%) | 1 | 6 |
+
+**Lag** is a patch that names fewer files than have been read. It happens on four
+fifths of the paper arm's steps. The state therefore trails the work, and the
+model goes back for what it missed — 37% of its reads are re-reads, against 3%
+for the control. The sequence is visible in the transcript:
+
+```
+read cfg1.ts
+read cfg2.ts
+patch  total=88  done=1        <- two files read, one named
+read cfg1.ts                   <- back for the one it lost
+patch  total=139 done=2        <- now it is right
+```
+
+**The cause is the adapter's, not the method's.** §5.1 has the runtime choose
+`aₜ` and execute it — `O_{t+1} ← execute(aₜ, Σ_{t+1})` — so one step is one
+action and Σ cannot trail by construction. The plugin has no execute capability
+(`ctx.tool` registers, `ctx.shell` hooks, `ctx.session` prompts) and the host's
+agent loop batches, so a model can read three files in one turn and name one.
+
+The obvious fix is to say so. It has been tried three times in this project and
+measured each time: the host action note, the order marker, and the drift notice.
+All three were delivered — the system-slot probe proved a marker planted in the
+state file reaches the model verbatim — and all three were declined. The step
+boundary (`SKILLSTATE_STEP_BOUNDARY=1`) does enforce alternation by withholding
+tools, and it is off by default because the measured result was that a tool-less
+turn is answered with prose rather than a patch: *"the saved execution state is
+still {total:0, files:0} … I will restart from src/cfg1.ts"*. It stops at file
+one.
+
+So the lag stands, and it is written down rather than fixed with a fourth prompt.
+`values` was the schema-level attempt and it made every number worse: lag 63%,
+re-reads 66%, six sum-outsourcing attempts, and the `done` list built in a
+JavaScript loop.
+
 
 
 ---
