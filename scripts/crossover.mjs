@@ -177,7 +177,8 @@ if (pTok && nTok) {
     row('verdict', 'equal call counts — paper is cheaper on content alone');
   } else {
     const headroom = (controlContent - paper.sumA) / extraCalls;
-    row('H ceiling', `${Math.round(headroom).toLocaleString()} chars/call (~${Math.round(headroom / 4).toLocaleString()} tokens)`);
+      row('H ceiling', `${Math.round(headroom).toLocaleString()} chars/call (~${Math.round(headroom / 4).toLocaleString()} tokens)`);
+    row('the condition', 'paper wins  <=>  H  <  (C - SUM|A_t|) / (T_paper - T_notes)');
     row('reading', 'the bounded context is cheaper while the host re-sends less than this per call');
   }
   row('control context', `${controlContent.toLocaleString()} chars`);

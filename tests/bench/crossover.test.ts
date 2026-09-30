@@ -177,3 +177,35 @@ describe('crossover turns two runs into a threshold', () => {
     ).toThrow();
   });
 });
+
+describe('the ceiling is a comparison, not a promise', () => {
+  // The number the project will be judged on is "the bounded context is
+  // X% cheaper". What is measured is a CEILING on the host's per-call overhead,
+  // and the two are not the same claim. A ceiling that moved from 60,262 to
+  // 56,146 chars/call between fixtures is not a saving that improved or
+  // worsened; it is a threshold that a reader has to check the host against.
+  it('states the condition in the same words as the number', () => {
+    const report = crossover(6, 3, 8000);
+    const ceiling = number(report, 'H ceiling');
+    const reading = row(report, 'reading');
+    expect(ceiling).toBeGreaterThan(0);
+    expect(reading).toMatch(/cheaper while the host re-sends less/);
+    // And the threshold is restated as an inequality in the output itself, not
+    // only in the file's comments, so a reader who runs the script and reads
+    // nothing else still gets the condition rather than a number to quote.
+    // Read as a whole line, not through `row`: the value contains runs of two
+    // spaces, which `row` treats as a field separator. That is the helper
+    // working as written and being wrong for this one label.
+    const condition = report.split('\n').find((l) => l.startsWith('the condition'))!.trim();
+    expect(condition).toBe('the condition                 : paper wins  <=>  H  <  (C - SUM|A_t|) / (T_paper - T_notes)');
+  });
+
+  it('refuses to print a saving percentage', () => {
+    // There is no percentage anywhere in the output, by design. The host's
+    // overhead is not in these numbers, so a ratio built from them would be a
+    // ratio of two things the model never paid. Three headline numbers in this
+    // project's history were a constant standing in for a measurement.
+    const report = crossover(6, 3, 8000);
+    expect(report).not.toMatch(/\d+(\.\d+)?\s*%/);
+  });
+});
