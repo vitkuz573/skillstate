@@ -205,10 +205,23 @@ model keeps it perfectly. That is the thesis, observed rather than argued.
 And the one that bounds it. Priced in §4.3's unit — raw string chars, not wall
 tokens, which include the host's own per-call context — the paper arm sends
 100,040 chars against the 2,300,920 a prefix-sum baseline would: **23.00×,
-against a theoretical (T+1)/2 of 23.00**. Exact. And **81% of Aₜ is the constant
-base prompt**; the state is 19% of the request, and the host re-sends its own
-context on each of 59 calls where the baseline makes 31. The arithmetic is
-right. The upper bound is doing more work than the claim.
+against a theoretical (T+1)/2 of 23.00**. Exact, and exact again at 90 files:
+**31.00× against 31.00**, with the transcript tripled.
+
+That is the length axis, and it is the one that decides the question:
+
+| fixture | transcript | Σ\|Aₜ\| | eq. 8 | (T+1)/2 |
+| --- | --- | --- | --- | --- |
+| 30 files | 115k chars | 100,040 | 23.00x | 23.00 |
+| 90 files | 338k chars | 155,672 | 31.00x | 31.00 |
+
+Tripling the transcript grew the state's cost by 56%, against a baseline that
+grows quadratically. **The saving is real and its condition is not weakening with
+length.** What has not changed is the call count — 60 against the control's 31 —
+so the host re-sends its own context nearly twice as often, and
+`scripts/crossover.mjs` puts the ceiling at 56,146 chars/call: below that, the
+bounded context is cheaper; above it, it is not. The arithmetic is right. The
+condition is the whole claim.
 
 ## How it works
 

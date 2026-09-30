@@ -480,23 +480,32 @@ Two quantities were being compared as one. `scripts/replay-at.mjs` prices a
 transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
 separates them.
 
-**The mechanism does what §7 says.** Replaying the paper trial's 45 patches
-through the runtime's own merge:
+**The mechanism does what §7 says.** Replaying each trial's patches through the
+runtime's own merge:
 
-```
-SUM |A_t|                100,040 chars
-prefix-sum baseline    2,300,920 chars
-reduction, eq. 8            23.00x
-theoretical (T+1)/2         23.00x
-```
+| fixture | patches | Σ\|Aₜ\| | eq. 8 | (T+1)/2 | \|Aₜ\| range |
+| --- | --- | --- | --- | --- | --- |
+| 30 files, 115k transcript | 45 | 100,040 | **23.00x** | 23.00 | 1977–2406 |
+| 90 files, 338k transcript | 61 | 155,672 | **31.00x** | 31.00 | 2271–2820 |
 
-Exact, and exact because Aₜ barely moves — 1977 to 2406 chars across 45 steps —
-so the prefix sum collapses onto the closed form. The paper's arithmetic is
-right.
+Exact on both, and exact because Aₜ barely moves *relative to its own size* —
+22% of growth across 45 steps, 24% across 61 — so the prefix sum collapses onto
+the closed form. The paper's arithmetic is right.
 
-**And 81% of Aₜ is the constant base prompt.** The state — the thing the entire
-argument is about — is 19% of the request: 464 of 2432 chars. §7's ratio is
-measured against a component that is a fifth of what is sent.
+**And the length axis is the one that matters.** Three times the files tripled
+the transcript (115k → 338k) and Σ\|Aₜ\| grew by 56%, against a baseline that
+would grow quadratically. The H ceiling — the host's per-call overhead below
+which the bounded context wins — moved from 60,262 to 56,146 chars/call: it does
+not improve much, because the arm is still making 60 calls against the control's
+31. **The saving is real and the condition on it is not weakening with length; the
+call count is what has to change.**
+
+**And most of Aₜ is the constant base prompt, not the state.** At 30 files the
+base is 1944 chars of a 2406-char Aₜ — **81%**, so the state the entire argument
+is about is 19% of the request. At 90 files the split moves the other way: 1867
+chars of base against a state listing 38 filenames, so the state is the larger
+part. §7's ratio is measured against a component that starts as a fifth of what
+is sent.
 
 **Then the host re-sends its own context on every call.** The system prompt and
 the tool schemas are not part of Aₜ, cost the same on every call, and the paper
