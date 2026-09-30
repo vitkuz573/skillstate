@@ -794,20 +794,34 @@ transcript in the unit §4.3 actually uses — raw string chars of Aₜ — and
 separates them.
 
 **The mechanism does what §7 says.** Replaying each trial's patches through the
-runtime's own merge:
+runtime's own merge, with `node scripts/replay-at.mjs <run>/out.json`:
 
-| fixture | patches | Σ\|Aₜ\| | eq. 8 | (T+1)/2 | \|Aₜ\| range |
-| --- | --- | --- | --- | --- | --- |
-| 30 files, 115k transcript | 45 | 100,040 | **23.00x** | 23.00 | 1977–2406 |
-| 90 files, 338k transcript | 61 | 155,672 | **31.00x** | 31.00 | 2271–2820 |
+| run | files | T | Σ\|Aₜ\| | mean \|Aₜ\| | baseline | eq. 8 | (T+1)/2 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `30-files/p-1` | 30 | 45 | 113,270 | 2517 | 2,605,210 | **23.00x** | 23.00 |
+| `30-files/p-2` | 30 | 47 | 117,229 | 2494 | 2,813,496 | **24.00x** | 24.00 |
+| `30-files/p-3` | 30 | 65 | 161,861 | 2490 | 5,341,413 | **33.00x** | 33.00 |
+| `90-files/p-1-ceiling100` | 90 | 130 | 371,747 | 2860 | 24,349,428 | **65.50x** | 65.50 |
+| `90-files/p-1-ceiling200` | 90 | 125 | 361,971 | 2896 | 22,804,173 | **63.00x** | 63.00 |
 
-Exact on both, and exact because Aₜ barely moves *relative to its own size* —
-22% of growth across 45 steps, 24% across 61 — so the prefix sum collapses onto
-the closed form. The paper's arithmetic is right.
+**Exact on all five**, and exact for a visible reason: `mean |Aₜ|` barely moves
+— 2517, 2494, 2490, 2860, 2896 — so the prefix sum collapses onto the closed
+form. That is the paper's arithmetic being right, and the reason it is right is
+that Aₜ grows with the *work*, not with the *transcript*.
 
-**And the length axis is the one that matters.** Three times the files tripled
-the transcript (115k → 338k) and Σ\|Aₜ\| grew by 56%, against a baseline that
-would grow quadratically.
+**The old table for this section was from a superseded fixture generation and none
+of it re-derived.** It quoted Σ\|Aₜ\| of 100,040 at T=45 and 155,672 at T=61; no
+run here has either. T=61 is (2×31) and 100,040 is not 45 × 2517. The numbers
+were not wrong by arithmetic — they described runs whose transcripts are not in
+the record, which is the same failure as the overwritten `p-1` and the same reason
+`measurements/` and its test now exist.
+
+**And the length axis is the one that matters, more strongly than the old table
+claimed.** T went 45 → 130 (2.89x) and Σ\|Aₜ\| went 3.28x — linear in T, with
+`mean |Aₜ|` up only 14%. The prefix-sum baseline over the same runs went 9.3x,
+which is quadratic (2.89² = 8.35, the rest is file sizes growing). **So the
+reduction ratio itself grows with length: 23.00x at 45 steps, 65.50x at 130.** The
+paper's §7 predicts exactly that, and the old "56% growth" understated it.
 
 The condition, stated as `scripts/crossover.mjs` states it — the host's per-call
 overhead below which the bounded context wins:

@@ -257,22 +257,35 @@ establish is the mechanism's purpose: the state is the only record there is when
 the transcript is not, and the model uses it whenever it is the only record.
 
 And the one that bounds it. Priced in §4.3's unit — raw string chars, not wall
-tokens, which include the host's own per-call context — the paper arm sends
-100,040 chars against the 2,300,920 a prefix-sum baseline would: **23.00×,
-against a theoretical (T+1)/2 of 23.00**. Exact, and exact again at 90 files:
-**31.00× against 31.00**, with the transcript tripled.
+tokens, which include the host's own per-call context — every bounded run
+reproduces eq. 8 exactly. Re-derived from the transcripts in
+[`measurements/`](measurements/README.md):
 
-That is the length axis, and it is the one that decides the question:
+| run | files | T | Σ\|Aₜ\| | mean \|Aₜ\| | baseline | eq. 8 | (T+1)/2 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `30-files/p-1` | 30 | 45 | 113,270 | 2517 | 2,605,210 | **23.00x** | 23.00 |
+| `30-files/p-2` | 30 | 47 | 117,229 | 2494 | 2,813,496 | **24.00x** | 24.00 |
+| `30-files/p-3` | 30 | 65 | 161,861 | 2490 | 5,341,413 | **33.00x** | 33.00 |
+| `90-files/p-1-ceiling100` | 90 | 130 | 371,747 | 2860 | 24,349,428 | **65.50x** | 65.50 |
+| `90-files/p-1-ceiling200` | 90 | 125 | 361,971 | 2896 | 22,804,173 | **63.00x** | 63.00 |
 
-| fixture | transcript | Σ\|Aₜ\| | eq. 8 | (T+1)/2 |
-| --- | --- | --- | --- | --- |
-| 30 files | 115k chars | 100,040 | 23.00x | 23.00 |
-| 90 files | 338k chars | 155,672 | 31.00x | 31.00 |
+**Exact on all five, and exact for a visible reason:** `mean |Aₜ|` barely moves
+across a 3x difference in length — 2490 to 2896 — so the prefix sum collapses
+onto the closed form. Aₜ grows with the work, not with the transcript, and that
+is the whole of §7's argument.
 
-Tripling the transcript grew the state's cost by 56%, against a baseline that
-grows quadratically. On *content*, the saving improves with length. On wall tokens
-it depends on the request count, because the host re-sends its own context once
-per call:
+**And the ratio itself grows with length, more strongly than this page claimed
+before today.** T went 45 → 130 and Σ\|Aₜ\| went 3.28x, while the prefix-sum
+baseline over the same runs went 9.3x. Linear against quadratic: **23.00x at 45
+steps, 65.50x at 130.**
+
+The previous table here quoted Σ\|Aₜ\| of 100,040 and 155,672 at T=45 and T=61.
+No run produces either number, and T=61 is the mark of a superseded fixture
+generation whose transcripts are not in the record. Same class as an overwritten
+record and the reason the records are committed and checked now.
+
+On *content*, the saving improves with length. On wall tokens it depends on the
+request count, because the host re-sends its own context once per call:
 
 | fixture | paper calls | control calls | H ceiling |
 | --- | --- | --- | --- |

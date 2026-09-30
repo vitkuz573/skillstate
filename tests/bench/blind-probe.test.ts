@@ -621,16 +621,15 @@ group('the documentation agrees with the records', () => {
   // on is the number the run actually produced, which is the part that went wrong
   // every time: the run was real, the number was real, and the reading of it was
   // not.
-  const ROOT = path.resolve(import.meta.dirname, '../..');
   const load = (relative: string): Record<string, unknown>[] => {
-    const dir = path.join(ROOT, 'measurements', relative);
+    const dir = path.join(REPO, 'measurements', relative);
     const files = fs.existsSync(dir)
       ? fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
       : [];
     return files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as Record<string, unknown>);
   };
-  const findings = fs.readFileSync(path.join(ROOT, 'FINDINGS.md'), 'utf-8');
-  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf-8');
+  const findings = fs.readFileSync(path.join(REPO, 'FINDINGS.md'), 'utf-8');
+  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf-8');
 
   const ninety = load('90-files');
   const thirty = load('30-files');
@@ -717,5 +716,95 @@ group('the documentation agrees with the records', () => {
     // Both cases present, so this is a rule and not a description of one era.
     expect(stamped).toBeGreaterThan(0);
     expect(stamped).toBeLessThan(ninety.length + thirty.length);
+  });
+});
+
+
+group('eq. 8 is re-derivable from the runs it is claimed for', () => {
+  // §7's arithmetic is the paper's central claim, and for most of a day the table
+  // carrying it quoted Σ|Aₜ| = 100,040 at T=45 and 155,672 at T=61. No run
+  // produces either number: T=45 means 45 patches and 45 × 2517 = 113,270, and
+  // T=61 is the signature of a superseded fixture generation whose transcripts are
+  // not in the record. The numbers were not wrong by arithmetic — they described
+  // runs nobody kept, which is the same failure as an overwritten `p-1` and the
+  // reason `measurements/derived.json` is committed and read here.
+  const derived = JSON.parse(
+    fs.readFileSync(path.join(REPO, 'measurements', 'derived.json'), 'utf-8'),
+  ) as {
+    runs: Record<string, { patches_replayed: number; sum_a_chars: number; mean_a_chars: number; eq8: number; theoretical: number; prefix_sum_baseline_chars: number }>;
+  };
+  const findings = fs.readFileSync(path.join(REPO, 'FINDINGS.md'), 'utf-8');
+  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf-8');
+  const runs = Object.entries(derived.runs);
+
+  it('reproduces eq. 8 exactly on every run, from the number of patches', () => {
+    // (T+1)/2 is the closed form. It holds because mean |Aₜ| barely moves relative
+    // to its own size, and that is the whole of §7's argument — so if a run ever
+    // fails it, something about Aₜ changed and that is a finding, not a bug.
+    expect(runs.length).toBeGreaterThan(0);
+    for (const [id, run] of runs) {
+      expect(run.eq8, `${id}: eq. 8 does not reproduce`).toBeCloseTo(run.theoretical, 2);
+      expect(run.theoretical, `${id}: (T+1)/2 is not what the run reports`).toBeCloseTo(
+        (run.patches_replayed + 1) / 2,
+        2,
+      );
+    }
+  });
+
+  it('has SUM |Aₜ| equal to T times the mean it reports', () => {
+    // The internal consistency that caught the 100,040: if a Σ is quoted it has to
+    // be the product of the other two numbers in its own row.
+    //
+    // The tolerance is T/2, not a round number, because the mean is reported to a
+    // whole char and T multiplications of a rounded value drift by up to T/2. At
+    // T=130 that is 65 — and 371,800 against 371,747 is 53, which is inside it.
+    // 100,040 against 45 x 2517 = 113,265 is 13,225 outside, and would fail by
+    // three orders of magnitude.
+    for (const [id, run] of runs) {
+      const product = run.patches_replayed * run.mean_a_chars;
+      expect(
+        Math.abs(run.sum_a_chars - product),
+        `${id}: SUM ${run.sum_a_chars} is not T x mean ${product}`,
+      ).toBeLessThanOrEqual(run.patches_replayed / 2 + 1);
+    }
+  });
+
+  it('puts every derived SUM in the table of both documents', () => {
+    for (const [id, run] of runs) {
+      const formatted = run.sum_a_chars.toLocaleString('en-US');
+      expect(findings.includes(formatted) || readme.includes(formatted), `${id}: ${formatted} is in neither table`).toBe(true);
+      expect(findings.includes(id) || readme.includes(id), `${id}: the table does not name the run`).toBe(true);
+    }
+  });
+
+  it('quotes no Σ that no run produces, in any table', () => {
+    // 100,040 and 155,672, named in the prose as the numbers that were there
+    // before. Naming them is the point; putting them back in a table is the
+    // failure. So the check is scoped to table rows rather than counting
+    // occurrences — an earlier version counted, and rejected a document that
+    // mentioned the number twice while explaining that it was wrong, which is
+    // exactly where it belongs.
+    const tableRows = (doc: string): string[] =>
+      doc
+        .split('\n')
+        .filter((line) => line.trim().startsWith('|') && line.includes('---') === false)
+        .join('\n');
+    for (const ghost of ['100,040', '155,672']) {
+      for (const [name, doc] of [
+        ['FINDINGS.md', findings],
+        ['README.md', readme],
+      ] as const) {
+        expect(tableRows(doc), `${name} has a ghost Σ in a table: ${ghost}`).not.toContain(ghost);
+      }
+    }
+  });
+
+  it('still names the old numbers in prose, so the correction is findable', () => {
+    // A number that vanishes leaves no way to check that it was ever wrong. Both
+    // documents have to say out loud that the table was replaced.
+    for (const doc of [findings, readme]) {
+      expect(doc).toContain('100,040');
+      expect(doc).toContain('155,672');
+    }
   });
 });
