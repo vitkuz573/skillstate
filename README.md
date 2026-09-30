@@ -108,6 +108,20 @@ wrote `cfg1..18 + cfg20` — `cfg19`'s value in the total, its name skipped — 
 the next patch put `cfg19` in, moving the drift from +121 back to +84. A double
 count cancelling a missed file by accident.
 
+And the error is a **step function**, not a random walk. Replaying all 84 patches
+of the 90-file run against the truth at each file count:
+
+| files | 5 | 10 | 20 | 30 | 40 | 50 | 60 | 70 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| error | −65 | −65 | −65 | −65 | −65 | +27 | +21 | **+194** |
+
+One mistake at the fifth file, held for **thirty-five consecutive steps** while
+the model stayed self-consistent with its own wrong total — it never re-derives a
+total from the list it also keeps, and nothing checks. −65 is exactly `REAL_4`: a
+value in the total whose filename was not in `done`, the mirror image of the +84
+above. So a run's total is as wrong as the sum of its discrete miscounts, and no
+single one is visible in the final number.
+
 §6.2 validates type, not value, and cannot do otherwise: checking 1523 needs the
 fixture, and the fixture is what the state is being scored on. `state_ok` caught
 this trial as a **failure** — the two verdicts are separate for a reason — but the

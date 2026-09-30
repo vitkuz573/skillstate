@@ -231,6 +231,25 @@ It is worse than a constant offset, for one step. At 19 files the model wrote
 name was skipped. The next patch put `cfg19` in and the drift went **+121 back to
 +84**, because a double count cancelled a missed file by accident.
 
+**And the drift is a step function, not a drift.** Replaying all 84 patches of the
+90-file run against the truth at each file count:
+
+| files | 5 | 10 | 20 | 30 | 40 | 50 | 60 | 70 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| error | −65 | −65 | −65 | −65 | −65 | +27 | +21 | **+194** |
+
+One mistake, made at the fifth file, held for **thirty-five consecutive steps**.
+The model was self-consistent with its own wrong total the whole way, because it
+never re-derives a total from the list it also keeps — and there is no check that
+would notice. Then the error jumps: another mistake at 50, another at 70. So a
+run's total is as wrong as the sum of its discrete miscounts, and no single one
+of them is visible in the final number.
+
+One of those errors is recognisable: −65 is exactly `REAL_4`, a value in the
+total whose filename was not in `done` — the mirror of the 30-file trial's +84,
+where the value was added and the name skipped. The other direction, the same
+defect.
+
 **Why nothing catches it.** §6.2 validates *type*, not *value*, and cannot:
 checking 1523 requires knowing the fixture, and the fixture is what the state is
 being scored on. A runtime that knew the answer would be the paper measuring its
