@@ -208,6 +208,60 @@ group('§10.2 conformance harness', () => {
     expect(validatePatch(SPEC.schema, { nope: 1 })).toEqual(unknown);
   });
 
+  it('7b. §7 eq. 8 — (T+1)/2 is a CEILING, and the code stays under it', () => {
+    // §7's closed form is the claim most likely to be misquoted as a result: the
+    // paper says plainly that it is "an upper bound, not a deployment claim,
+    // because real observation sizes vary". Asserting the number alone would let
+    // a regression into the model that looks like a PASS.
+    //
+    // Fixed prompt: the factor is exactly (T+1)/2 — 50.50 at T=100, 100.50 at
+    // T=200, the two figures Table 1 reports.
+    for (const [T, expected] of [[10, 5.5], [100, 50.5], [200, 100.5]] as const) {
+      const tracker = new TokenTracker();
+      for (let i = 1; i <= T; i += 1) {
+        tracker.recordStep({
+          step: i,
+          observation: obs('o'),
+          reasoning: 'r',
+          statePatch: {},
+          action: 'a',
+          promptChars: 593,
+          responseChars: 100,
+          timestamp: 1,
+          success: true,
+        });
+      }
+      expect(tracker.compareWithBaseline().reductionFactor).toBeCloseTo(expected, 6);
+    }
+
+    // Growing prompt — which is what a real state does as it accumulates fields
+    // and observations lengthen. The factor must FALL and never exceed the
+    // constant-prompt figure. A model that reported a number above the ceiling
+    // would be claiming a saving the paper says cannot exist.
+    const factors: number[] = [];
+    for (const growth of [0, 0.01, 0.05]) {
+      const tracker = new TokenTracker();
+      for (let i = 1; i <= 100; i += 1) {
+        tracker.recordStep({
+          step: i,
+          observation: obs('o'),
+          reasoning: 'r',
+          statePatch: {},
+          action: 'a',
+          promptChars: 593 * (1 + growth * (i - 1)),
+          responseChars: 100,
+          timestamp: 1,
+          success: true,
+        });
+      }
+      factors.push(tracker.compareWithBaseline().reductionFactor);
+    }
+    for (const factor of factors) expect(factor).toBeLessThanOrEqual(50.5);
+    // Monotone in growth, which is the direction the maths requires.
+    expect(factors[1]).toBeLessThan(factors[0]!);
+    expect(factors[2]).toBeLessThan(factors[1]!);
+  });
+
   it('3b. §3.3 — the operator contract, all four clauses', () => {
     // §3.3 verbatim, as four assertions. Check 2 covers semantics; this covers
     // the properties the operator PROMISES, which are what a second
