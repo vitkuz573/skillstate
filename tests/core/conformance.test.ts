@@ -21,6 +21,7 @@ import { describe as group, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as core from '@skillstate/core';
 import { FileStore, SkillStateRuntime, PromptTransformer, TokenTracker, mergeState, validatePatch } from '@skillstate/core';
 import type { ActionExecutor, LLMFn, Observation, ProceduralSpec, StatePatch } from '@skillstate/core';
 
@@ -652,5 +653,49 @@ group('§9.3 on-disk format', () => {
     const accepted = validatePatch(SPEC.schema, rogue);
     const next = accepted.valid ? mergeState(initial, rogue) : initial;
     expect(Object.keys(next).sort()).toEqual(Object.keys(SPEC.schema).sort());
+  });
+});
+
+group('§9.2 — the five primitives every adapter must expose', () => {
+  // "Every adapter surfaces the same primitive operations, independent of
+  // language". This is the interop surface a second implementation in another
+  // language is entitled to call, so its being present and being reachable from
+  // the package root is part of conformance, not an internal detail.
+  const spec: ProceduralSpec = { ...SPEC, schema: SPEC.schema };
+
+  it('exposes all five by name from the package root', () => {
+    for (const [name, fn] of [
+      ['createInitialState', core.createInitialState],
+      ['mergeState', core.mergeState],
+      ['validatePatch', core.validatePatch],
+      ['serializeState', core.serializeState],
+      ['deserializeState', core.deserializeState],
+    ] as const) {
+      expect(typeof fn, `${name} is missing from the package root`).toBe('function');
+    }
+  });
+
+  it('create_initial_state fills defaults, and an override map seeds them', () => {
+    const fresh = core.createInitialState(spec.schema);
+    expect(fresh).toEqual({ mood: 'neutral', count: 0, log: [] });
+
+    const seeded = core.createInitialState(spec.schema, { mood: 'calm' });
+    expect(seeded.mood).toBe('calm');
+    // The rest still gets its default — the override is a seed, not a
+    // replacement, which is what makes it optional.
+    expect(seeded.count).toBe(0);
+  });
+
+  it('serialize is compact JSON, the interchange format §5.2 requires', () => {
+    // Compact, not pretty: a state file is read by other implementations and
+    // spaces are bytes every one of them pays to parse.
+    const text = core.serializeState({ mood: 'calm', count: 2, log: [] });
+    expect(text).toBe('{"mood":"calm","count":2,"log":[]}');
+    expect(text).not.toContain('\n');
+  });
+
+  it('deserialize round-trips serialize without loss', () => {
+    const state = { mood: 'calm', count: 2, log: ['a', 'b'] };
+    expect(core.deserializeState(core.serializeState(state))).toEqual(state);
   });
 });
