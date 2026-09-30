@@ -90,12 +90,19 @@ ab *files:
 # truth and reads correctness from the STATE, and reports the answer separately
 # because the two disagree.
 #
-# `just ab-blind`                      30 files, 3 trials per arm
-# `just ab-blind space-bunny-free 2 8` model, trials, files
-ab-blind model="opencode-go/space-bunny-free" trials="3" files="30":
+# The fourth argument is the transcript-length axis, and it is the one that
+# decides the question. 38 decoys per file leaves a 115k-char transcript, cheap
+# enough that a host hands it over for nothing; 150 leaves 480k, which is where
+# a bounded context has something to be worth. The answer is the same either
+# way, so the two are directly comparable.
+#
+# `just ab-blind`                               30 files, 3 trials, 38 decoys
+# `just ab-blind space-bunny-free 2 8`          model, trials, files
+# `just ab-blind space-bunny-free 1 30 150`     long transcript
+ab-blind model="opencode-go/space-bunny-free" trials="3" files="30" decoys="38":
     @just _banner "a/b (blind)"
     npm run build
-    ./scripts/ab-blind.sh {{model}} {{trials}} {{files}}
+    ./scripts/ab-blind.sh {{model}} {{trials}} {{files}} {{decoys}}
 
 # The historical corpus survey: what transcripts cost, priced honestly.
 # 1810 real runs, no model required.

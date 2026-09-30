@@ -42,6 +42,18 @@ set -euo pipefail
 MODEL="${1:-opencode-go/space-bunny-free}"
 TRIALS="${2:-3}"
 FILES="${3:-30}"
+# Decoy fields per file. This is the TRANSCRIPT-LENGTH axis, and it is separate
+# from FILES on purpose.
+#
+# FILES sets how much arithmetic there is. DECOYS sets how much text the model
+# reads to do it. At 38 the whole transcript is 115k chars, which is short
+# enough that a host handing it over for free costs nothing — so the mechanism
+# has nothing to save and 30 files cannot say whether it pays. At 150 the same
+# thirty files read 480k chars, and now the question is real: does the bounded
+# context win once the transcript is expensive to carry?
+#
+# The truth is a function of FILES alone, so raising DECOYS does not move it.
+DECOYS="${4:-38}"
 ROOT="${BLIND_AB_ROOT:-/tmp/ss-blind-ab}"
 SEED="$ROOT/seed"
 SCRIPTER="$(dirname "$0")/blind-score.py"
@@ -64,9 +76,9 @@ PY
 seed_fixture() {
   rm -rf "$SEED"
   mkdir -p "$SEED/src" "$SEED/.skillstate"
-  python3 - "$SEED" "$FILES" <<'PY'
+  python3 - "$SEED" "$FILES" "$DECOYS" <<'PY'
 import os, sys
-root, n_files = sys.argv[1], int(sys.argv[2])
+root, n_files, n_decoys = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 for i in range(1, n_files + 1):
     value = (i * 37 + 11) % 97 + 3
     body = [
@@ -77,7 +89,7 @@ for i in range(1, n_files + 1):
     # wants is the one named REAL_n and the rest are noise. This is also what
     # makes "read the files one at a time" and "grep for it" different jobs,
     # which is the comparison the A/B is about.
-    for k in range(1, 39):
+    for k in range(1, n_decoys + 1):
         body.append(
             f'export const CFG{i}_FIELD_{k} = {{ id: "m{i}-{k}", '
             f'label: "field {k} of module {i}", enabled: {str(k % 2 == 0).lower()} }};'
