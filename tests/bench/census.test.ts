@@ -430,3 +430,129 @@ describe('a transcript that is not a stream of objects', () => {
     expect(out).not.toContain('%');
   });
 });
+
+
+describe('the shape of the drift, not only its size', () => {
+  // A state can be complete and wrong, and the size of the error says nothing about
+  // why. Four shapes, and the fourth is the one this classifier had to be taught:
+  //
+  //   NONE       every state matched.
+  //   STEP       the error jumped and held — something left and nothing put it
+  //             back. 30 files: -65 held for 35 steps.
+  //   MONOTONE   the error only ever grew — the INCREMENTS are wrong, not the
+  //             state. 60 files on the way up: +628 over 52 steps.
+  //   RECOVERY   it grew and came back to the truth. The 60-file run: +628 at file
+  //             52, and 3075 — exact — at file 60.
+  //
+  // RECOVERY is invisible to a size check, because the final error is zero by
+  // definition. `blind-score.py` reports `state_ok`; it cannot report "this run was
+  // wrong for most of its length and then fixed itself", and that is the more
+  // interesting fact about it.
+  const ROOT2 = path.resolve(import.meta.dirname, '../..');
+  const DRIFT = path.join(ROOT2, 'scripts', 'drift-profile.mjs');
+
+  /** Truth for files of 100, 200, 300, 400, 500 is 100/300/600/1000/1500. */
+  const VALUES = [100, 200, 300, 400, 500];
+  const TRUTH = [100, 300, 600, 1000, 1500];
+
+  /** A run whose reported `total` is `TRUTH + error` at each step. */
+  const runDir = (errors: number[]): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-'));
+    fs.mkdirSync(path.join(dir, 'src'));
+    VALUES.forEach((v, i) => {
+      fs.writeFileSync(
+        path.join(dir, 'src', `cfg${i + 1}.ts`),
+        `export const REAL_${i + 1} = ${v};\n`,
+      );
+    });
+    fs.writeFileSync(
+      path.join(dir, 'out.json'),
+      errors
+        .map((e, i) =>
+          JSON.stringify({
+            part: {
+              type: 'text',
+              text: `\`\`\`json\n${JSON.stringify({
+                state_patch: { total: TRUTH[i]! + e, done: [`cfg${i + 1}.ts`] },
+              })}\n\`\`\``,
+            },
+          }),
+        )
+        .join('\n'),
+    );
+    return dir;
+  };
+
+  const profile = (dir: string): string => execFileSync('node', [DRIFT, dir], { encoding: 'utf8' });
+  const shapeOf = (dir: string): string =>
+    (profile(dir).match(/shape\s+:\s+(.+)/) ?? [, ''])[1]!;
+
+  it('calls a growing error MONOTONE', () => {
+    expect(shapeOf(runDir([5, 10, 15, 20, 25]))).toMatch(/^MONOTONE/);
+  });
+
+  it('calls a held error a STEP, because that is what a step is', () => {
+    // Thirty under at every step, held to the end: something left and did not come
+    // back. That is a different defect from wrong increments.
+    expect(shapeOf(runDir([-30, -30, -30, -30, -30]))).toMatch(/^STEP/);
+  });
+
+  it('calls an error that comes back RECOVERY, and reports the peak it reached', () => {
+    // The case no final-error check can see. The run is wrong for four of five
+    // steps and ends exact, so anything reading the last value calls it clean.
+    const dir = runDir([30, 60, 90, 60, 0]);
+    expect(shapeOf(dir)).toMatch(/^RECOVERY \(peak \+90\)/);
+    expect(profile(dir)).toContain('final error            : +0');
+  });
+
+  it('admits when it has no name for a curve', () => {
+    // Rises, falls, rises. The first version of this classifier called that a STEP.
+    // It is not one, and a wrong name is worse than no name — the name is what a
+    // reader carries away.
+    expect(shapeOf(runDir([15, 20, 20, 15, 5]))).toMatch(/^IRREGULAR/);
+  });
+
+  it('says NONE when every state matched, rather than calling that a shape', () => {
+    expect(shapeOf(runDir([0, 0, 0, 0, 0]))).toMatch(/^NONE/);
+  });
+
+  it('refuses a truth passed in, because a command line is not a source of truth', () => {
+    // The whole design of the probe is that the expected total exists nowhere the
+    // model can reach. A script that takes it as an argument is one keystroke from
+    // someone pasting the model's answer, and then it agrees with itself.
+    const dir = runDir([0, 0, 0, 0, 0]);
+    fs.rmSync(path.join(dir, 'src'), { recursive: true, force: true });
+    let stderr = '';
+    let code = 0;
+    try {
+      execFileSync('node', [DRIFT, dir, '999'], { encoding: 'utf8', stdio: 'pipe' });
+    } catch (error) {
+      const e = error as { status?: number; stderr?: Buffer };
+      code = e.status ?? 0;
+      stderr = e.stderr?.toString() ?? '';
+    }
+    expect(code).toBe(3);
+    expect(stderr).toContain('refuses a passed-in truth');
+  });
+
+  it('does not crash on a transcript that is not a stream of objects', () => {
+    // The same lesson as the other three instruments, on the fourth. It says so on
+    // stderr and exits 3, which is the right shape: a diagnostic that cannot find
+    // what it was asked for must not print a profile that looks like a finding.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-garbage-'));
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'cfg1.ts'), 'export const REAL_1 = 5;\n');
+    fs.writeFileSync(path.join(dir, 'out.json'), '[]\nnull\n42\nnot json\n');
+    let stderr = '';
+    let code = 0;
+    try {
+      execFileSync('node', [DRIFT, dir], { encoding: 'utf8', stdio: 'pipe' });
+    } catch (error) {
+      const e = error as { status?: number; stderr?: Buffer };
+      code = e.status ?? 0;
+      stderr = e.stderr?.toString() ?? '';
+    }
+    expect(code).toBe(3);
+    expect(stderr).toContain('no patch carried both a numeric `total` and a `done` entry');
+  });
+});

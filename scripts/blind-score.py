@@ -9,7 +9,11 @@ is the finding:
               from the files, and it is the artifact the mechanism exists to
               produce.
 
-  `answer_ok` the model also said the right number. A sentence is not a result.
+  `answer_ok` the model also said the right number — the LAST one it said, which is
+              not the same as the first. A run that reported 3703 for fifty turns
+              and then 3075 finished on 3075, and a verdict read off the first
+              match is a verdict about a number the run had already abandoned.
+              `answered_first` and `revised` carry the rest.
 
 A third, non-verdict, gates how the other two may be read:
 
@@ -297,8 +301,17 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         errors, ended_on_error = [], False
         duration = None
 
-    match = ANSWER.search("\n".join(texts))
-    answered = int(match.group(1)) if match else None
+    # The LAST answer, not the first. Measured: a completed sixty-file run answered
+    # 3703 for fifty turns, caught itself, and answered 3075 — the exact truth — for
+    # the twelve after that. Taking the first match scored the run on the number it
+    # had already abandoned, which is the moment the run had stopped believing.
+    #
+    # Both are reported, because the revision IS the finding: a run that changed its
+    # answer has told you something a run that was right the first time has not.
+    every = [int(m) for m in ANSWER.findall("\n".join(texts))]
+    answered = every[-1] if every else None
+    answered_first = every[0] if every else None
+    revised = len(set(every)) > 1
 
     state = _state(directory)
     total = state.get("total")
@@ -455,6 +468,10 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         "total_is_number": total_typed,
         "n_done": done_count,
         "answered": answered,
+        "answered_first": answered_first,
+        # True means the run gave more than one number and the last one is what it
+        # finished on. A scorer that reads only the first cannot see this at all.
+        "revised": revised if every else None,
         "answer_ok": answered == truth,
         "tools": sum(census.values()),
         "reads": census.get("read", 0),

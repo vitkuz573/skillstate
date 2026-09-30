@@ -1020,3 +1020,76 @@ group("the truncation guard is about LINES, not files", () => {
     expect(probe).toMatch(/bisection/);
   });
 });
+
+
+group('the answer that counts is the last one', () => {
+  // A completed sixty-file run answered 3703 for fifty turns, caught itself, and
+  // answered 3075 — the exact truth — for the twelve after. The scorer read the
+  // FIRST match and reported `answer_ok: false` on a run that finished correct.
+  //
+  // A verdict read off a moment the run had already abandoned is not a stricter
+  // measurement; it is a measurement of the wrong moment. Both numbers are now
+  // reported, because the revision is itself the finding.
+  const score = (answers: string[]): Record<string, unknown> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-'));
+    fs.writeFileSync(
+      path.join(dir, 'out.json'),
+      answers
+        .map((a) => JSON.stringify({ part: { type: 'text', text: `the total is TOTAL=${a}` } }))
+        .join('\n'),
+    );
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [] } }),
+    );
+    return JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+  };
+
+  it('scores the answer the run finished on', () => {
+    const r = score(['1500', '1523']);
+    expect(r.answered).toBe(1523);
+    expect(r.answer_ok).toBe(true);
+  });
+
+  it('still reports the first, and that the run revised itself', () => {
+    // The revision is the finding. A scorer that reports only the last number
+    // cannot tell a run that thought about it from one that got it first try.
+    const r = score(['1600', '1500', '1523']);
+    expect(r.answered_first).toBe(1600);
+    expect(r.revised).toBe(true);
+  });
+
+  it('says revised false for a run that answered once and was right', () => {
+    const r = score(['1523', '1523', '1523']);
+    expect(r.answered_first).toBe(1523);
+    expect(r.answered).toBe(1523);
+    expect(r.revised).toBe(false);
+    expect(r.answer_ok).toBe(true);
+  });
+
+  it('revised is null, not false, when the run never answered', () => {
+    // Absent is absent. `false` would read as "it answered once and did not
+    // change it", which is a claim about a run that never spoke.
+    const r = score([]);
+    expect(r.answered).toBeNull();
+    expect(r.answered_first).toBeNull();
+    expect(r.revised).toBeNull();
+    expect(r.answer_ok).toBe(false);
+  });
+
+  it('a revised-and-still-wrong run is not rescued by having been right once', () => {
+    // The other direction: reporting the last number must not turn a wrong ending
+    // into a pass. A run that found the truth and then gave it up fails.
+    const r = score(['1523', '1900']);
+    expect(r.answered).toBe(1900);
+    expect(r.answered_first).toBe(1523);
+    expect(r.revised).toBe(true);
+    expect(r.answer_ok).toBe(false);
+  });
+});
