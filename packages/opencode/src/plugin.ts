@@ -86,6 +86,7 @@
 import { Plugin } from '@opencode/plugin';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolvePluginMode } from './mode.js';
 import type { PluginMode } from './mode.js';
 import { HOST_ACTION_NOTE, applyPaperContext, buildPaperPrompt, latestObservation } from './paper-mode.js';
@@ -143,6 +144,62 @@ const invalidations = new Map<string, { readonly attempts: number; readonly last
  * `SessionMessageIdle`, which is a different thing entirely and reads like an
  * event name because it is not one.
  */
+/**
+ * Write `.skillstate/.build.json`: the plugin id, the package version, and the
+ * build's own mtime and size.
+ *
+ * Deliberately cheap and deliberately once. The mtime is the whole point — it is
+ * the thing that differs between two builds of identical source, which is exactly
+ * the case a version string cannot see.
+ *
+ * Never throws and never blocks setup: a stamp that fails to write is a missing
+ * field in a diagnostic file, and a plugin that cannot start is worse.
+ */
+function writeBuildStamp(directory: string): void {
+  try {
+    // The module's OWN file, not a guessed sibling. The first version of this
+    // stat'd `path.join(here, 'index.js')` — right under `dist/`, absent under
+    // `src/` — so the try/catch swallowed ENOENT and the function was silently
+    // dead in every test that ran it. The same shape as this whole day: guessing
+    // at a path instead of measuring the thing already in hand.
+    const entry = fileURLToPath(import.meta.url);
+    const here = path.dirname(entry);
+    const stat = fs.statSync(entry);
+    // No inner try: the outer one already covers this, and a stamp that cannot be
+    // written is a missing diagnostic, not a failure. The inner catch returned
+    // 'unknown', which is a number no run could ever check against anything — an
+    // unreachvable branch that the coverage gate was right to refuse.
+    // `version` is optional in a package.json, so it may be absent, and absence
+    // is the honest rendering: JSON.stringify drops an undefined field on its
+    // own. `?? 'unknown'` produced a string no run could check against anything,
+    // and a ternary guarding the field produced a second unreachable branch for
+    // the coverage gate to refuse. Both are the same mistake — a fallback value
+    // where a missing one was already correct.
+    const version = (
+      JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf-8')) as {
+        version?: string;
+      }
+    ).version;
+    // Only into an EXISTING `.skillstate/`. The plugin is inert for a project
+    // that never ran `skillstate init` — and it uses the presence of that
+    // directory as the definition of "initialised". Creating it here would
+    // initialise every project the plugin is installed into, which is not a
+    // diagnostic, it is a side effect with consequences.
+    //
+    // Caught by an existing test, "creates no files in a project that has no
+    // state", three lines after this was written. A run with a state file is a
+    // run worth stamping; a project that has none is not a run at all.
+    const dir = path.join(directory, '.skillstate');
+    if (!fs.existsSync(dir)) return;
+    fs.writeFileSync(
+      path.join(dir, '.build.json'),
+      `${JSON.stringify({ plugin: PLUGIN_ID, version, distMtimeMs: stat.mtimeMs, distBytes: stat.size }, null, 2)}\n`,
+    );
+  } catch {
+    // A diagnostic that cannot be written is not a reason to refuse to run.
+  }
+}
+
 function isStepEnded(event: unknown): event is { type: 'session.step.ended'; data: { sessionID: string } } {
   if (typeof event !== 'object' || event === null) return false;
   const typed = event as { type?: unknown; data?: { sessionID?: unknown } };
@@ -400,6 +457,20 @@ export const SkillStatePlugin = Plugin.define({
     // which in v2 is the server's cwd, not the session's project.
     const directory = ctx.location.project.canonical;
     const store = new ProjectStateStore({ directory });
+
+    // Stamp the build, once, so a run records WHICH plugin it used.
+    //
+    // The host resolves plugins by workspace rather than by the name in
+    // `opencode.json` (measured: asking for a package that does not exist loads
+    // the one that does), and the plugin loads from `dist/`. So a run's
+    // behaviour depends on a build that is not named anywhere in its own output,
+    // and a fix that was committed without a rebuild produces a measurement of
+    // the previous version while looking like a measurement of this one.
+    //
+    // This project has already paid for that twice: an alias gap made the bench
+    // tests silently load a stale dist, and a fixture knob was measured after
+    // the stand had been seeded with an older fixture. Both were invisible.
+    void writeBuildStamp(directory);
 
     const mode: PluginMode = resolvePluginMode({ directory }).mode;
     const specs = new SpecResolver();

@@ -244,3 +244,55 @@ group('a run records whether the plugin was live at all', () => {
     expect(score(dir).plugin_live).toBe(false);
   });
 });
+
+group('a run records the build it used', () => {
+  // The host resolves plugins by workspace rather than by the name in
+  // opencode.json — measured, and it is why a copy of the plugin in a project is
+  // silently ignored in favour of the repository's build. The plugin loads from
+  // dist/. So a run's behaviour depends on a build that appears nowhere in its own
+  // output, and a fix committed without a rebuild measures the previous version
+  // while looking like a measurement of this one.
+  //
+  // Paid for twice in this project already: an alias gap made the bench tests
+  // load a stale dist, and a fixture knob was measured after the stand had been
+  // seeded with the older fixture. Both were invisible.
+  const score = (dir: string): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+
+  const runDir = (stamp: unknown): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), '');
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: {} }));
+    if (stamp !== undefined) {
+      fs.writeFileSync(path.join(dir, '.skillstate', '.build.json'), JSON.stringify(stamp));
+    }
+    return dir;
+  };
+
+  it('is null on a run that predates the stamp, not a guess', () => {
+    // A missing stamp must read as null. Filling it in from the CURRENT build
+    // would be exactly the lie this exists to prevent: the run used a build that
+    // is not the one on disk now.
+    expect(score(runDir(undefined)).build).toBeNull();
+  });
+
+  it('carries the version and the dist mtime when the stamp is there', () => {
+    const stamp = { plugin: 'skillstate', version: '3.0.1', distMtimeMs: 1, distBytes: 2 };
+    expect(score(runDir(stamp)).build).toEqual(stamp);
+  });
+
+  it('does not fail on a corrupt stamp', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-bad-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), '');
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: {} }));
+    fs.writeFileSync(path.join(dir, '.skillstate', '.build.json'), 'not json at all');
+    expect(score(dir).build).toBeNull();
+  });
+});

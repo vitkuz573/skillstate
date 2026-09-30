@@ -217,9 +217,24 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     )
     engaged = paper_engaged or notes_engaged or sandboxed
 
+    # Which build? The host resolves plugins by workspace and the plugin loads
+    # from dist/, so a run's behaviour depends on a build named nowhere in its
+    # own output. A fix committed without a rebuild produces a measurement of the
+    # previous version while looking like a measurement of this one — and this
+    # project has paid for that twice already.
+    build: dict[str, Any] | None = None
+    stamp_path = os.path.join(directory, ".skillstate", ".build.json")
+    if os.path.exists(stamp_path):
+        try:
+            with open(stamp_path) as handle:
+                build = json.load(handle)
+        except (OSError, ValueError):
+            build = None
+
     return {
         "record_id": record_id,
         "arm": arm,
+        "build": build,
         "plugin_live": engaged,
         "engagement": {
             "patch_in_text": paper_engaged,

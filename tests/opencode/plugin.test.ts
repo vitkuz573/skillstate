@@ -285,3 +285,67 @@ describe('plugin — sub-agent isolation end to end', () => {
     ).toEqual({ phase: 'early' });
   });
 });
+
+describe('the build stamp', () => {
+  // Every run now records which build produced it. The host resolves plugins by
+  // workspace rather than by the name in opencode.json — measured — and the
+  // plugin loads from dist/, so a run's behaviour depends on a build named
+  // nowhere in its own output. A fix committed without a rebuild measures the
+  // previous version while looking like a measurement of this one.
+  it('writes a stamp that names the build, into an INITIALISED project', async () => {
+    // Only where `.skillstate/` already exists. The plugin is inert for a project
+    // that never ran `skillstate init` and uses that directory's presence as the
+    // definition of "initialised", so creating it here would initialise every
+    // project the plugin is installed into.
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-')));
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(
+      path.join(dir, '.skillstate', 'skillstate.json'),
+      JSON.stringify({ version: 1, state: { total: 0, done: [] } }),
+    );
+    const harness = createPluginHarness({ projectDir: dir });
+    const cleanup = await harness.start();
+    const stamp = JSON.parse(
+      fs.readFileSync(path.join(dir, '.skillstate', '.build.json'), 'utf-8'),
+    ) as Record<string, unknown>;
+    expect(stamp.plugin).toBe('skillstate');
+    expect(typeof stamp.version).toBe('string');
+    // The mtime is the part a version string cannot see: two builds of identical
+    // source differ, and a stale dist is exactly that case.
+    expect(typeof stamp.distMtimeMs).toBe('number');
+    expect(typeof stamp.distBytes).toBe('number');
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not refuse to start when the stamp cannot be written', async () => {
+    // A diagnostic that cannot be written is a missing field, not a reason to
+    // take the plugin down. The path is made unwritable by pointing the project
+    // at a file rather than a directory.
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-ro-')));
+    // A FILE where the directory should be: mkdir is not attempted, and the
+    // write fails. The plugin must still start.
+    fs.writeFileSync(path.join(dir, '.skillstate'), 'not a directory');
+    const harness = createPluginHarness({ projectDir: dir });
+    const cleanup = await harness.start();
+    expect(harness.streamEnded()).toBe(false);
+    expect(fs.readFileSync(path.join(dir, '.skillstate'), 'utf-8')).toBe('not a directory');
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('the stamp never creates a project', () => {
+  // The plugin is inert for a project that never ran `skillstate init`, and it
+  // uses the presence of `.skillstate/` as the definition of that. A diagnostic
+  // that created the directory would initialise every project the plugin is
+  // installed into.
+  it('writes nothing into a project with no .skillstate directory', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-absent-')));
+    const harness = createPluginHarness({ projectDir: dir });
+    const cleanup = await harness.start();
+    expect(fs.readdirSync(dir)).toEqual([]);
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
