@@ -876,6 +876,26 @@ group('the crossover rows name the runs they came from', () => {
     }
   });
 
+  it('claims no percentage anywhere, and says so in both documents', () => {
+    // \u00a77 measures chars, and a percentage would be a ratio of two things the
+    // model never paid: the numerator excludes the host's per-call context and the
+    // denominator includes it. Both documents state the rule in prose; a rule that
+    // lives only in prose survives until the first convenient edit.
+    //
+    // The percentages that DO appear are descriptive — re-read rates, lag rates,
+    // and the paper's own reported pass@1 — so the pattern is a percentage attached
+    // to a cost word, not a percentage at all.
+    const COST = /[0-9.]+\s*%\s*(cheaper|less|saving|lower)|(cheaper|saving|lower|less)\s*(by\s*)?[0-9.]+\s*%/i;
+    for (const [name, doc] of [
+      ['FINDINGS.md', findings],
+      ['README.md', readme],
+    ] as const) {
+      expect(doc, `${name} makes a percentage cost claim`).not.toMatch(COST);
+    }
+    expect(findings).toMatch(/No percentage is claimed/i);
+    expect(readme).toMatch(/No percentage is claimed/i);
+  });
+
   it('carries the unfavourable instance as well as the favourable one', () => {
     // A table that quotes only 46.9x is the shape of the mistake this project has
     // been making. Both documents have to carry 4.3x and its bound, or the reader
