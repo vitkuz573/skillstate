@@ -884,3 +884,127 @@ group('§9.2 — the five primitives every adapter must expose', () => {
     expect(core.deserializeState(core.serializeState(state))).toEqual(state);
   });
 });
+
+group('§10.1 — how a run stopped', () => {
+  // §10.1's pseudocode is `for step in range(maxSteps)`, so it leaves the loop
+  // by finishing, by the `break` on an invalidated step, or by running out of
+  // steps — and returns `StepResult[]` from all three. The third is the one that
+  // lies: a run stopped at the ceiling is indistinguishable from a run that
+  // finished.
+  //
+  // That is not hypothetical. A 90-file measurement was read as "the model lost
+  // track of its running sum at file 78" when §10.1's default ceiling of 100
+  // steps arrived first, at ~1.67 patches per file. Nothing in the library said
+  // so; the correction came from counting patches by hand.
+
+  const counting = (): { llm: LLMFn; calls: () => number } => {
+    let n = 0;
+    return {
+      llm: async () => {
+        n += 1;
+        return llmText(`step ${n}`, { count: n }, 'go on');
+      },
+      calls: () => n,
+    };
+  };
+
+  it("is undefined before the first run, so 'never ran' is not 'finished'", async () => {
+    const { llm } = counting();
+    const runtime = new SkillStateRuntime({ spec: SPEC, llm, execute: () => obs('x') });
+    expect(runtime.lastRunStop).toBeUndefined();
+  });
+
+  it("is 'done' when isDone says so, even at the first step", async () => {
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: async () => llmText('one', { count: 1 }, 'done'),
+      execute: () => obs('x'),
+    });
+    await runtime.run(obs('start'), () => true);
+    expect(runtime.lastRunStop).toBe('done');
+  });
+
+  it("is 'invalidated' on §10.1's break, not 'max_steps'", async () => {
+    // The two stops that are neither completion must not be confused either: a
+    // run that broke on an invalid patch did not run out of budget.
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: async () => 'no fence at all',
+      execute: () => obs('x'),
+      maxValidationRetries: 0,
+    });
+    await runtime.run(obs('start'), () => false);
+    expect(runtime.lastRunStop).toBe('invalidated');
+  });
+
+  it("is 'max_steps' when isDone never fires — the case that reads as finished", async () => {
+    const { llm, calls } = counting();
+    const runtime = new SkillStateRuntime({ spec: SPEC, llm, execute: () => obs('x') });
+    const results = await runtime.run(obs('start'), () => false);
+    // It spent its whole budget and stopped, and `isDone` never fired once.
+    expect(calls()).toBeGreaterThan(1);
+    expect(results.length).toBe(calls());
+    expect(runtime.lastRunStop).toBe('max_steps');
+  });
+
+  it('respects a raised ceiling, which is how the 90-file run gets retried', async () => {
+    const { llm, calls } = counting();
+    const low = new SkillStateRuntime({ spec: SPEC, llm, execute: () => obs('x') });
+    await low.run(obs('start'), () => false);
+    const high = new SkillStateRuntime({ spec: SPEC, llm, execute: () => obs('x') });
+    // `maxSteps` is the third POSITIONAL parameter, not a `runOpts` field — a
+    // field of that name in `runOpts` is silently ignored, which is the same trap
+    // the `chars`/`bytes` unit mix was.
+    await high.run(obs('start'), () => false, 150);
+    expect(calls()).toBe(250);
+    expect(high.lastRunStop).toBe('max_steps');
+  });
+
+  it('describes the MOST RECENT run, never an earlier ending', async () => {
+    // Two runs on one runtime: the second finishes, and the getter must not keep
+    // reporting the first run's ceiling.
+    let n = 0;
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm: async () => {
+        n += 1;
+        return llmText(`step ${n}`, { count: n }, 'go on');
+      },
+      execute: () => obs('x'),
+    });
+    await runtime.run(obs('start'), () => false);
+    expect(runtime.lastRunStop).toBe('max_steps');
+    await runtime.run(obs('again'), () => true);
+    expect(runtime.lastRunStop).toBe('done');
+  });
+
+  it('emits run:exhausted only on the ceiling, with both numbers', async () => {
+    const seen: string[] = [];
+    const payloads: unknown[] = [];
+    const { llm } = counting();
+    const runtime = new SkillStateRuntime({
+      spec: SPEC,
+      llm,
+      execute: () => obs('x'),
+      events: { emit: (name: string, payload: unknown) => { seen.push(name); payloads.push(payload); } },
+    });
+    await runtime.run(obs('start'), () => false);
+    expect(seen.filter((e) => e === 'run:exhausted')).toHaveLength(1);
+    const payload = payloads.find((p) => (p as { maxSteps?: number }).maxSteps !== undefined) as {
+      steps: number;
+      maxSteps: number;
+    };
+    expect(payload.maxSteps).toBe(100);
+    expect(payload.steps).toBeGreaterThan(0);
+
+    const finished = new SkillStateRuntime({
+      spec: SPEC,
+      llm: async () => llmText('one', { count: 1 }, 'done'),
+      execute: () => obs('x'),
+      events: { emit: (name: string) => seen.push(name) },
+    });
+    await finished.run(obs('start'), () => true);
+    // A finished run does not report exhaustion. It is not exhausted.
+    expect(seen.filter((e) => e === 'run:exhausted')).toHaveLength(1);
+  });
+});

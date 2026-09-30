@@ -50,6 +50,16 @@ const TERMINAL_ACTIONS = new Set(['done', 'complete', 'completed', 'finished', '
  */
 export const DEFAULT_MAX_STEPS = 100;
 
+/**
+ * Why {@link RuntimeDriver.advance} declined to spend a step.
+ *
+ * `'terminal'` — the model emitted a terminal action: a real ending.
+ * `'max_steps'` — §10.1's ceiling arrived. NOT completion.
+ * `'no_action'` — the turn carried no action to advance on.
+ * `'host_refused'` — the host would not start a turn.
+ */
+export type StopReason = 'terminal' | 'max_steps' | 'no_action' | 'host_refused';
+
 /** What the loop driver needs from its host, injected so it is testable. */
 export interface RuntimeDriverOptions {
   /**
@@ -127,6 +137,8 @@ export class RuntimeDriver {
   readonly #decisions = new Map<string, 'retry' | 'advance'>();
   /** Every advancement made, for diagnostics and tests. */
   readonly advanced: RuntimeStep[] = [];
+  readonly #stops = new Map<string, { reason: StopReason; sessionID: string; steps: number }>();
+  #lastStoppedSession = '';
   /** Every step that exhausted its attempts, for diagnostics and tests. */
   readonly invalidated: string[] = [];
 
@@ -197,6 +209,36 @@ export class RuntimeDriver {
   }
 
   /**
+   * Why {@link RuntimeDriver.advance} last declined to spend a step.
+   *
+   * Four ways `advance` returns `null` and the caller cannot tell them from the
+   * return value: the model emitted a terminal action (a real ending), the host
+   * would not start a turn, the turn had no action at all, or the ceiling
+   * arrived. The last is the one that lies — a loop stopped at `maxSteps` is
+   * indistinguishable from a loop that ran its course.
+   *
+   * A 90-file run was read as "the model lost track of its running sum at file
+   * 78" when the ceiling had arrived at step 100, mid-file-79, with the work
+   * still going. Nothing in this driver said so, and the caller discards
+   * `advance`'s return value entirely. The honest fix is to make the reason
+   * readable, not to guess it back out of a transcript.
+   */
+  get lastStop(): { reason: StopReason; sessionID: string; steps: number } | undefined {
+    return this.#stops.get(this.#lastStoppedSession);
+  }
+
+  #stop(reason: StopReason, sessionID: string, steps?: number): null {
+    const entry = {
+      reason,
+      sessionID,
+      steps: steps ?? this.#steps.get(sessionID) ?? 0,
+    };
+    this.#stops.set(sessionID, entry);
+    this.#lastStoppedSession = sessionID;
+    return null;
+  }
+
+  /**
    * Advance the loop for one applied patch.
    *
    * Returns the step it took, or `null` when it deliberately did not — a
@@ -206,8 +248,8 @@ export class RuntimeDriver {
    * provider.
    */
   async advance(sessionID: string, action: string | undefined): Promise<RuntimeStep | null> {
-    if (action === undefined) return null;
-    if (RuntimeDriver.isTerminal(action)) return null;
+    if (action === undefined) return this.#stop('no_action', sessionID);
+    if (RuntimeDriver.isTerminal(action)) return this.#stop('terminal', sessionID);
 
     // A retry re-asks within the CURRENT step and must not spend another one.
     // §5.1 counts attempts inside a step, not steps: the whole point of the
@@ -218,7 +260,7 @@ export class RuntimeDriver {
     this.#decisions.delete(sessionID);
     const isRetry = decision === 'retry';
     const step = isRetry ? (this.#steps.get(sessionID) ?? 0) : (this.#steps.get(sessionID) ?? 0) + 1;
-    if (step > this.#maxSteps) return null;
+    if (step > this.#maxSteps) return this.#stop('max_steps', sessionID, step - 1);
 
     // The action is remembered BEFORE the host is asked, because the context
     // hook that follows reads it, and a host that starts the turn quickly must
@@ -230,7 +272,7 @@ export class RuntimeDriver {
     const asked = await this.#prompt(sessionID, action);
     if (!asked) {
       this.#pending.delete(sessionID);
-      return null;
+      return this.#stop('host_refused', sessionID);
     }
 
     this.#steps.set(sessionID, step);

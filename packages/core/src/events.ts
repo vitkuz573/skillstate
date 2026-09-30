@@ -10,7 +10,9 @@
  * - `step:error` — validation-exhausted or transport-thrown steps
  *   (`{ step, error }`);
  * - `budget:exceeded` — `run()` char-budget trip
- *   (`{ step, totalChars, maxChars }`).
+ *   (`{ step, totalChars, maxChars }`);
+ * - `run:exhausted` — `run()` left its loop by running out of steps rather
+ *   than by `isDone` (`{ steps, maxSteps }`).
  *
  * Zero dependencies, Node >= 20, ESM. Deliberately NOT `node:events`:
  * a 30-line typed emitter keeps payloads type-safe without any import.
@@ -22,7 +24,8 @@ export type RuntimeEventName =
   | 'step:start'
   | 'step:end'
   | 'step:error'
-  | 'budget:exceeded';
+  | 'budget:exceeded'
+  | 'run:exhausted';
 
 /** @non-paper payloads per runtime event. */
 export interface RuntimeEventPayloads {
@@ -30,6 +33,7 @@ export interface RuntimeEventPayloads {
   'step:end': { step: number; action: string; invalidated: boolean };
   'step:error': { step: number; error: string };
   'budget:exceeded': { step: number; totalChars: number; maxChars: number };
+  'run:exhausted': { steps: number; maxSteps: number };
 }
 
 /** @non-paper listener for one runtime event. */

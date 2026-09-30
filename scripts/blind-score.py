@@ -11,6 +11,16 @@ is the finding:
 
   `answer_ok` the model also said the right number. A sentence is not a result.
 
+A third, non-verdict, gates how the other two may be read:
+
+  `stopped_by_ceiling`  true: the run did not finish, because it ran out of
+              steps, and a cost number from it is not a saving -- it is a run
+              that stopped. false: the run finished. null: the run predates the
+              record and nothing is known, which is a different answer from
+              `false` and must not be collapsed into it. Measured: a 90-file run
+              stopped at step 100 of a 100-step ceiling, mid-file-79, and read
+              as a model that had lost track of its sum at file 78.
+
 A run can pass one and fail the other in either direction, and both directions
 have been observed. Under the fixture this replaced — which named the expected
 total in the task text — every run passed both, because the model was told the
@@ -248,10 +258,37 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
         except (OSError, ValueError):
             build = None
 
+    # Why the loop stopped, and under which ceiling. A run stopped at the step
+    # ceiling leaves a transcript indistinguishable from a run that finished, and
+    # that is measured: a 90-file run stopped at step 100 mid-file-79 and was read
+    # as a model that lost track of its running sum at file 78. The plugin now
+    # writes this; a run without it predates the record and says nothing.
+    run: dict[str, Any] | None = None
+    run_path = os.path.join(directory, ".skillstate", ".run.json")
+    if os.path.exists(run_path):
+        try:
+            with open(run_path) as handle:
+                run = json.load(handle)
+        except (OSError, ValueError):
+            run = None
+    # Tri-state on purpose. `False` from a run with no record would be a false
+    # negative on the one signal that decides whether a cost number means
+    # anything -- the same defect `plugin_live` had once already, in the opposite
+    # direction. Absence is absence: null means the run predates the record, and
+    # "we do not know" is the only honest reading of it.
+    stopped_by_ceiling: bool | None = None
+    if run is not None:
+        stopped_by_ceiling = (run.get("stop") or {}).get("reason") == "max_steps"
+
     return {
         "record_id": record_id,
         "arm": arm,
         "build": build,
+        "run": run,
+        # Not a verdict on the model. True means the run did not finish, so a cost
+        # number from it is not a saving -- this project's own criterion: a cost
+        # win with no task completion is worth nothing.
+        "stopped_by_ceiling": stopped_by_ceiling,
         "plugin_live": engaged,
         "engagement": {
             "patch_in_text": paper_engaged,

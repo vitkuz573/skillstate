@@ -396,3 +396,92 @@ describe('a trimmed history does not lose counts', () => {
     expect(d.noteExecutions('s', [tools('m1', 1), tools('m2', 1)])).toBe(1);
   });
 });
+
+describe('why advance declined', () => {
+  // `advance` returns `null` for four different endings and the caller cannot
+  // tell them from the return value. `max_steps` is the one that lies: a loop
+  // stopped at §10.1's ceiling is indistinguishable from a loop that ran its
+  // course, and a 90-file run was read as a model that lost track of its running
+  // sum at file 78 when the ceiling had arrived at step 100, mid-file-79, with
+  // the work still going. The correction came from counting patches by hand.
+  const ok = async (): Promise<boolean> => true;
+
+  it('says terminal when the model ended the run', async () => {
+    const driver = new RuntimeDriver({ prompt: ok });
+    expect(await driver.advance('ses_1', 'done')).toBeNull();
+    expect(driver.lastStop).toEqual({ reason: 'terminal', sessionID: 'ses_1', steps: 0 });
+  });
+
+  it('says no_action when the turn carried nothing to advance on', async () => {
+    const driver = new RuntimeDriver({ prompt: ok });
+    expect(await driver.advance('ses_1', undefined)).toBeNull();
+    expect(driver.lastStop?.reason).toBe('no_action');
+  });
+
+  it('says host_refused when the host would not start a turn', async () => {
+    const driver = new RuntimeDriver({ prompt: async () => false });
+    expect(await driver.advance('ses_1', 'read the next file')).toBeNull();
+    expect(driver.lastStop).toEqual({ reason: 'host_refused', sessionID: 'ses_1', steps: 0 });
+  });
+
+  it('says max_steps, and reports the step it stopped AT rather than the one it refused', async () => {
+    // The useful number is how far the run got. Reporting `step` — the step it
+    // would have taken, one past the ceiling — would put every exhausted run one
+    // too high, and a run that stopped at exactly the budget is the case where
+    // that off-by-one is the whole question.
+    const driver = new RuntimeDriver({ prompt: ok, maxSteps: 2 });
+    expect(await driver.advance('ses_1', 'a')).not.toBeNull();
+    expect(await driver.advance('ses_1', 'b')).not.toBeNull();
+    expect(await driver.advance('ses_1', 'c')).toBeNull();
+    expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 2 });
+  });
+
+  it('a retry does not spend a step, so corrections cannot burn the ceiling', async () => {
+    // 5.1 counts attempts INSIDE a step. A retry that consumed a step would be
+    // indistinguishable from a step, and a run could be stopped by the ceiling
+    // having spent its budget on corrections rather than on work.
+    //
+    // The step is numbered when its patch LANDS, not when the first attempt was
+    // made -- so a run that has produced nothing yet sits at step 0 however many
+    // attempts it has spent, and the ceiling measures work, not attempts.
+    const driver = new RuntimeDriver({ prompt: ok, maxSteps: 1, retries: 8 });
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      expect(driver.record('ses_1', false)).toEqual({ action: 'retry', attempt, step: 0, result: null });
+      const step = await driver.advance('ses_1', 'read the next file');
+      expect(step).not.toBeNull();
+      expect(step?.retry).toBe(true);
+      // The step has no number until its patch lands. Eight attempts have been
+      // spent and none of them spent a step.
+      expect(step?.step).toBe(0);
+    }
+    // Eight attempts, zero steps, ceiling untouched.
+    expect(driver.lastStop).toBeUndefined();
+
+    // The patch lands, and THAT is step 1 -- which a ceiling of 1 still allows.
+    expect(driver.record('ses_1', true)).toEqual({ action: 'advance', attempt: 0, step: 1, result: null });
+    const committed = await driver.advance('ses_1', 'read the next file');
+    expect(committed?.step).toBe(1);
+    expect(committed?.retry).toBe(false);
+    expect(driver.lastStop).toBeUndefined();
+
+    // And the next step is the one the ceiling refuses.
+    expect(await driver.advance('ses_1', 'read the next file')).toBeNull();
+    expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 1 });
+  });
+
+  it('reports the most recent stop, and per session', async () => {
+    const driver = new RuntimeDriver({ prompt: ok, maxSteps: 1 });
+    await driver.advance('ses_1', 'a');
+    expect(await driver.advance('ses_1', 'b')).toBeNull();
+    expect(driver.lastStop).toEqual({ reason: 'max_steps', sessionID: 'ses_1', steps: 1 });
+
+    // A second session's ending is the one that is current, and the first
+    // session's own record is still there to ask about.
+    await driver.advance('ses_2', 'done');
+    expect(driver.lastStop).toEqual({ reason: 'terminal', sessionID: 'ses_2', steps: 0 });
+  });
+
+  it('is undefined when nothing has stopped yet', () => {
+    expect(new RuntimeDriver({ prompt: ok }).lastStop).toBeUndefined();
+  });
+});

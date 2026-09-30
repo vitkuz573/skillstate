@@ -95,7 +95,7 @@ import { FeedbackQueue } from './feedback.js';
 import { PaperStateSink, isTextEnded } from './response-sink.js';
 import { SessionRegistry, stateScopeFor } from './session-registry.js';
 import { SpecResolver } from './spec-loader.js';
-import { INVALID_PATCH, RuntimeDriver } from './runtime.js';
+import { DEFAULT_MAX_STEPS, INVALID_PATCH, RuntimeDriver } from './runtime.js';
 import { StepBoundary } from './step-boundary.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
@@ -197,6 +197,40 @@ function writeBuildStamp(directory: string): void {
     );
   } catch {
     // A diagnostic that cannot be written is not a reason to refuse to run.
+  }
+}
+
+/**
+ * Write `.skillstate/.run.json`: why the paper-mode loop last declined to spend
+ * a step, and the ceiling it was running under.
+ *
+ * The loop's end is otherwise invisible. `advance` returns `null` for a terminal
+ * action, a host refusal, a turn with no action, and the ceiling, and the
+ * caller cannot tell them from the return value — so a run stopped at the
+ * ceiling leaves a transcript that looks exactly like a run that finished. That
+ * is measured, not hypothetical: a 90-file run stopped at step 100 mid-file-79
+ * and was read as a model that lost track of its running sum at file 78.
+ *
+ * Same rules as the build stamp: only into an existing `.skillstate/`, and never
+ * allowed to throw. A run record that cannot be written is a missing diagnostic,
+ * not a reason to take the session down.
+ */
+function writeRunRecord(
+  directory: string,
+  stop: { reason: string; sessionID: string; steps: number },
+  maxSteps: number,
+): void {
+  try {
+    const dir = path.join(directory, '.skillstate');
+    if (!fs.existsSync(dir)) return;
+    fs.writeFileSync(
+      path.join(dir, '.run.json'),
+      `${JSON.stringify({ stop, maxSteps }, null, 2)}\n`,
+    );
+  } catch {
+    // A diagnostic that cannot be written is not a reason to refuse to run. A
+    // `.skillstate` that is a FILE rather than a directory passes the
+    // `existsSync` above and fails the write here, and a run must survive that.
   }
 }
 
@@ -570,6 +604,7 @@ export const SkillStatePlugin = Plugin.define({
             maxSteps: maxStepsFromEnv(),
           })
         : undefined;
+    const maxSteps = runtime === undefined ? undefined : (maxStepsFromEnv() ?? DEFAULT_MAX_STEPS);
 
     // Paper mode registers NO skillstate tools, and the reason is measured
     // rather than doctrinal.
@@ -697,7 +732,28 @@ export const SkillStatePlugin = Plugin.define({
                 // turn from inside the handler reporting that turn is re-entrant,
                 // and the request is dropped.
                 setTimeout(() => {
-                  void runtime?.advance(sessionID, last ?? CONTINUE_ACTION);
+                  void runtime
+                    ?.advance(sessionID, last ?? CONTINUE_ACTION)
+                    .then((step) => {
+                      // A `null` here is the loop ending, and four different
+                      // things end it. `max_steps` is the one that lies — a loop
+                      // stopped at the ceiling looks exactly like a loop that ran
+                      // its course, and that is how a 90-file run got read as a
+                      // model that lost track of its sum at file 78 when the
+                      // ceiling had arrived mid-file-79. Written next to the
+                      // build stamp so a scorer never has to guess it from a
+                      // transcript.
+                      const stop = runtime?.lastStop;
+                      // Both arguments are non-optional, and that is deliberate:
+                      // this is only reached when `advance` returned null, which
+                      // is only reached when a runtime exists, so `lastStop` is
+                      // always set and the ceiling was resolved when the runtime
+                      // was built. The `?.` and the `| undefined` were branches
+                      // nothing could take.
+                      if (step === null && stop !== undefined && maxSteps !== undefined) {
+                        writeRunRecord(directory, stop, maxSteps);
+                      }
+                    });
                 }, 0);
               }
               // What the loop did, step by step. Read BEFORE the action is

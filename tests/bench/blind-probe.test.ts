@@ -348,3 +348,68 @@ group('engagement means a PATCH, not a fence', () => {
     expect((score(dir).engagement as Record<string, boolean>).patch_in_text).toBe(true);
   });
 });
+
+group('a run records why its loop stopped', () => {
+  // `advance` returns null for a terminal action, a host refusal, a turn with no
+  // action, and the step ceiling, and the caller cannot tell them from the return
+  // value. So a run stopped at maxSteps leaves a transcript indistinguishable
+  // from a run that finished — and a 90-file run was read as a model that lost
+  // track of its running sum at file 78 when the ceiling had arrived at step 100,
+  // mid-file-79. The plugin now writes `.skillstate/.run.json`; the scorer reads it.
+  //
+  // The check is a GATE, not a verdict: a cost number from a run that did not
+  // finish is not a saving, it is a run that stopped.
+  const score = (dir: string): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync('python3', [SCORER, dir, 'arm', 'id'], {
+        encoding: 'utf8',
+        env: { ...process.env, BLIND_TRUTH: '1523', BLIND_FILES: '1' },
+      }),
+    ) as Record<string, unknown>;
+
+  const runDir = (record: unknown): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), '');
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: { total: 0, done: [] } }));
+    if (record !== undefined) {
+      fs.writeFileSync(path.join(dir, '.skillstate', '.run.json'), JSON.stringify(record));
+    }
+    return dir;
+  };
+
+  it('is null on a run with no record, NOT false', () => {
+    // The false-negative direction is the dangerous one: `false` would read as
+    // "this run finished" for a run whose ending was never recorded. `plugin_live`
+    // already had that defect once, in the other direction, and a run that wrote
+    // nothing was reported live.
+    const value = score(runDir(undefined)).stopped_by_ceiling;
+    expect(value).toBeNull();
+    expect(value).not.toBe(false);
+  });
+
+  it('is true when the record says the ceiling took the run', () => {
+    const dir = runDir({ stop: { reason: 'max_steps', sessionID: 'ses_1', steps: 100 }, maxSteps: 100 });
+    expect(score(dir).stopped_by_ceiling).toBe(true);
+    expect((score(dir).run as Record<string, number>).maxSteps).toBe(100);
+  });
+
+  it('is false for a terminal ending — a real finish is not a stop', () => {
+    expect(score(runDir({ stop: { reason: 'terminal', sessionID: 'ses_1', steps: 40 } })).stopped_by_ceiling).toBe(false);
+  });
+
+  it('does not fail on a corrupt record', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-bad-'));
+    fs.writeFileSync(path.join(dir, 'out.json'), '');
+    fs.mkdirSync(path.join(dir, '.skillstate'));
+    fs.writeFileSync(path.join(dir, '.skillstate', 'skillstate.json'), JSON.stringify({ version: 1, state: { total: 0, done: [] } }));
+    fs.writeFileSync(path.join(dir, '.skillstate', '.run.json'), 'not json');
+    expect(score(dir).stopped_by_ceiling).toBeNull();
+  });
+
+  it('is false for a run that reports no stop at all, with a ceiling recorded', () => {
+    // A run that wrote `.run.json` with only the ceiling: the loop is still going,
+    // or it ended without a decline. Either way it is not a ceiling stop.
+    expect(score(runDir({ maxSteps: 100 })).stopped_by_ceiling).toBe(false);
+  });
+});

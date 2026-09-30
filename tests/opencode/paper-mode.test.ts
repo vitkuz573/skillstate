@@ -2054,3 +2054,153 @@ describe('Oₜ carries the environment reply, never the model\'s own action', ()
     expect(prompt).toContain('read src/cfg2.ts');
   });
 });
+
+
+describe('the run record', () => {
+  // The paper-mode loop's end is invisible without it. `advance` returns null for
+  // a terminal action, a host refusal, a turn with no action, and the step
+  // ceiling, and the caller cannot tell them from the return value -- so a run
+  // stopped at the ceiling leaves a transcript indistinguishable from a run that
+  // finished. Measured: a 90-file run stopped at step 100, mid-file-79, and was
+  // read as a model that had lost track of its running sum at file 78.
+  const patchEvent = (action: string): unknown[] => [
+    {
+      type: 'session.text.ended',
+      data: {
+        sessionID: 'ses_root',
+        assistantMessageID: 'msg_1',
+        ordinal: 0,
+        text: '```json\n{"state_patch":{"step":1},"action":"' + action + '"}\n```',
+      },
+    },
+    { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
+  ];
+
+  // Written from a deferred `advance(...).then(...)`, which is a macrotask
+  // boundary past the event handler -- so the file is not there when the handler
+  // returns, and a test that asserts at once is testing a race it won.
+  async function awaitRun(dir: string): Promise<Record<string, unknown>> {
+    const file = path.join(dir, '.skillstate', '.run.json');
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (fs.existsSync(file)) {
+        return JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error('timed out waiting for the run record');
+  }
+
+  it('says terminal when the model ended the run -- a real finish', async () => {
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({ projectDir, events: patchEvent('done') });
+    cleanups.push(await harness.start());
+    const record = await awaitRun(projectDir);
+    expect((record['stop'] as Record<string, unknown>)['reason']).toBe('terminal');
+  });
+
+  it('says host_refused when the host would not start another turn', async () => {
+    // Same `null`, a completely different ending: the loop wanted another step
+    // and the session had ended. Nothing in the return value says so.
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({
+      projectDir,
+      promptRefuses: true,
+      events: patchEvent('read src/cfg2.ts'),
+    });
+    cleanups.push(await harness.start());
+    const record = await awaitRun(projectDir);
+    expect((record['stop'] as Record<string, unknown>)['reason']).toBe('host_refused');
+  });
+
+  it('writes nothing, and creates nothing, when there is no .skillstate at all', async () => {
+    // The other half of the guard. The plugin is inert for a project that never
+    // ran `skillstate init` and treats that directory's presence as the
+    // definition of "initialised" -- so a diagnostic that created it would
+    // initialise every project the plugin is installed into. Paper mode is
+    // selected by the root `skillstate.json`, so the loop runs here with no state
+    // directory at all and the record must decline to create one.
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'run-no-state-')));
+    fs.writeFileSync(path.join(projectDir, 'skillstate.json'), JSON.stringify({ mode: 'paper' }));
+    fs.writeFileSync(path.join(projectDir, 'skill-spec.json'), JSON.stringify(SPEC));
+
+    // A turn that produces NO patch, so nothing is written and the state
+    // directory is never created. A turn that did patch would create the
+    // directory as a side effect of the patch, and the guard below would never
+    // be reached -- the first version of this test did exactly that and passed
+    // while proving nothing about the guard.
+    const harness = createPluginHarness({
+      projectDir,
+      promptRefuses: true,
+      events: [
+        {
+          type: 'session.text.ended',
+          data: {
+            sessionID: 'ses_root',
+            assistantMessageID: 'msg_1',
+            ordinal: 0,
+            text: 'I will read the next file.',
+          },
+        },
+        { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
+      ],
+    });
+    cleanups.push(await harness.start());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The directory is the whole point: the plugin treats its presence as the
+    // definition of an initialised project, so creating it here would initialise
+    // every project the plugin is installed into.
+    expect(fs.existsSync(path.join(projectDir, '.skillstate'))).toBe(false);
+    expect(fs.readdirSync(projectDir)).not.toContain('.skillstate');
+  });
+
+  it('survives a .skillstate that is a FILE, and writes nothing', async () => {
+    // `existsSync` passes on a file, so the guard above it does not help and the
+    // write fails. A throw here would become an unhandled rejection inside a
+    // `.then()` -- which under Node's default policy ends the PROCESS, not just
+    // the session.
+    //
+    // `promptRefuses` is load-bearing, and its absence is why this test proved
+    // nothing at first: without it the loop simply takes the next step, `advance`
+    // returns a step rather than null, and `writeRunRecord` is never reached. The
+    // test passed either way, which is exactly the shape of a test that cannot
+    // fail -- the same defect as the plugin liveness check, one layer in.
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'run-as-file-')));
+    fs.writeFileSync(path.join(projectDir, 'skillstate.json'), JSON.stringify({ mode: 'paper' }));
+    fs.writeFileSync(path.join(projectDir, 'skill-spec.json'), JSON.stringify(SPEC));
+    fs.writeFileSync(path.join(projectDir, '.skillstate'), 'not a directory');
+
+    const harness = createPluginHarness({
+      projectDir,
+      promptRefuses: true,
+      events: patchEvent('read src/cfg2.ts'),
+    });
+    cleanups.push(await harness.start());
+    // Give the deferred write time to fail, then confirm the session is intact.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(harness.streamEnded()).toBe(false);
+    expect(fs.readFileSync(path.join(projectDir, '.skillstate'), 'utf-8')).toBe('not a directory');
+  });
+
+  it('names the ceiling, and counts steps TAKEN rather than work done', async () => {
+    // The ceiling is the only second number that makes the step count readable:
+    // `max_steps: 100` with `steps: 100` is a run that finished its budget, and
+    // `max_steps: 100` with `steps: 40` stopped early for some other reason.
+    //
+    // `steps` is 0 here and that is correct, not a bug: the model applied a patch
+    // and ended on the SAME turn, so the loop was never asked for a step and took
+    // none. A budget counts steps the loop spent, not work the model did -- and a
+    // record reporting 1 would be counting something the loop never did.
+    const projectDir = paperProjectWithSpec({ step: 0 });
+    const harness = createPluginHarness({ projectDir, events: patchEvent('done') });
+    cleanups.push(await harness.start());
+    const record = await awaitRun(projectDir);
+    expect(record['maxSteps']).toBe(100);
+    expect((record['stop'] as Record<string, number>)['steps']).toBe(0);
+    // And the work really did happen -- the state moved -- so the two numbers are
+    // independent on purpose.
+    const state = JSON.parse(
+      fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8'),
+    ) as { state: Record<string, unknown> };
+    expect(state.state['step']).toBe(1);
+  });
+});

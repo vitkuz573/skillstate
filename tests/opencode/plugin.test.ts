@@ -349,3 +349,31 @@ describe('the stamp never creates a project', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('the run record', () => {
+  // The paper-mode loop's end is otherwise invisible: `advance` returns null for
+  // a terminal action, a host refusal, a turn with no action, and the step
+  // ceiling, and the caller cannot tell them from the return value. A run stopped
+  // at the ceiling then leaves a transcript indistinguishable from a run that
+  // finished — measured, not hypothetical.
+  //
+  // Same rules as the build stamp: existing `.skillstate/` only, never throws.
+  it('writes nothing into a project that was never initialised', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'run-absent-')));
+    const harness = createPluginHarness({ projectDir: dir });
+    const cleanup = await harness.start();
+    expect(fs.readdirSync(dir)).toEqual([]);
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('survives a state directory it cannot write to', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'run-ro-')));
+    fs.writeFileSync(path.join(dir, '.skillstate'), 'not a directory');
+    const harness = createPluginHarness({ projectDir: dir });
+    const cleanup = await harness.start();
+    expect(harness.streamEnded()).toBe(false);
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});

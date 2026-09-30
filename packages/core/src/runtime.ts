@@ -151,6 +151,15 @@ export class BudgetExceededError extends Error {
 }
 
 /** Result of a single Algorithm 1 step. */
+/**
+ * How a {@link SkillStateRuntime.run} ended.
+ *
+ * Three exits, one return value — the paper's pseudocode returns `StepResult[]`
+ * from all of them, so the caller cannot tell a finished run from a stopped one.
+ * Only the first is completion.
+ */
+export type RunStop = 'done' | 'invalidated' | 'max_steps';
+
 export interface StepResult {
   step: number;
   observation: Observation;
@@ -240,6 +249,7 @@ export class SkillStateRuntime {
   private readonly transformer = new PromptTransformer();
   private currentState: SkillState;
   private stepCounter = 0;
+  #lastRunStop: RunStop | undefined;
 
   constructor(options: RuntimeOptions) {
     this.spec = options.spec;
@@ -579,15 +589,53 @@ export class SkillStateRuntime {
       }
       results.push(result);
       if (result.invalidated && !continueOnInvalidated) {
+        this.#lastRunStop = 'invalidated';
         break;
       }
       if (isDone(result)) {
+        this.#lastRunStop = 'done';
         break;
       }
       observation = result.newObservation;
     }
 
+    // Three exits, one return value. `break` on `isDone`, `break` on an
+    // invalidated step, and falling out of the `for` are indistinguishable to the
+    // caller, and the third is the one that lies: a run that stopped at
+    // `maxSteps` looks exactly like a run that finished.
+    //
+    // That is not hypothetical. A 90-file measurement was read as "the model
+    // lost track of its running sum at file 78" when the truth was that
+    // §10.1's default ceiling of 100 steps arrived first, at ~1.67 patches per
+    // file, and the transcript ended mid-file-79 with the work still going. The
+    // correction came from counting patches by hand, not from anything the
+    // library said.
+    //
+    // §10.1's pseudocode is `for step in range(maxSteps)`, so it too just stops
+    // — the paper does not specify a report, and this is not a rule from the
+    // paper. It is the same report the budget trip already makes: `run()` says
+    // it stopped, and by what.
+    if (this.#lastRunStop === undefined) {
+      this.#lastRunStop = 'max_steps';
+      this.events?.emit('run:exhausted', { steps: results.length, maxSteps });
+      this.logger?.warn('run:exhausted', { steps: results.length, maxSteps });
+    }
+
     return results;
+  }
+
+  /**
+   * Why the last {@link SkillStateRuntime.run} stopped.
+   *
+   * `'done'` — `isDone` returned true. `'invalidated'` — §10.1's `break` on a
+   * step whose patch was rejected after every attempt. `'max_steps'` — the loop
+   * ran out of budget, which is NOT completion.
+   *
+   * `undefined` before the first `run()`. Reset by every `run()` call, so it
+   * always describes the most recent one and never a previous run's ending.
+   */
+  get lastRunStop(): RunStop | undefined {
+    return this.#lastRunStop;
   }
 }
 
