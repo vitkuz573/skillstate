@@ -452,3 +452,35 @@ describe('the model is told what §3.1 tells the operator', () => {
     expect(text).not.toMatch(/repeat the (whole|entire) state/i);
   });
 });
+
+describe('the merge operator has no append, and the model is told so', () => {
+  // §3.1, rule 1 and the closing clause: "treats any non-object value
+  // (including arrays) as an atomic replacement target". So a growing list in the
+  // state has to be sent complete on every step that touches it. There is no
+  // shorter way, and no partial update, because the operator has no primitive
+  // for one.
+  //
+  // That makes a set O(n) per step and makes its failure a mistyped rewrite.
+  // Measured at 90 files: the list grew cleanly to eleven entries, one patch
+  // wrote it as a single entry, and everything after rebuilt from one.
+  //
+  // A.4 says "<dict: your state updates>" and nothing about arrays, so this too
+  // is a property only the operator was told.
+  it('states that an array is replaced whole', () => {
+    const flat = GENERIC_PROCEDURE_SPEC.instructions.replace(/\s+/g, ' ');
+    expect(flat).toMatch(/array is replaced whole rather than appended to/i);
+  });
+
+  it('keeps the two rules adjacent, because they are one instruction', () => {
+    // "Sparse" alone invites the opposite error: send nothing, append nothing.
+    // The model needs both halves to do the arithmetic of one step — this field
+    // changes, everything else carries over, and the changed one goes whole.
+    const flat = GENERIC_PROCEDURE_SPEC.instructions.replace(/\s+/g, ' ');
+    const sparse = flat.search(/patch is sparse/i);
+    const array = flat.search(/replaced whole rather than appended to/i);
+    expect(sparse).toBeGreaterThan(-1);
+    expect(array).toBeGreaterThan(-1);
+    // Within the same paragraph, not scattered through the block.
+    expect(array - sparse).toBeLessThan(320);
+  });
+});
