@@ -308,3 +308,76 @@ describe('the run-shape counters', () => {
     expect(row[5]).toBe('1'); // and it lagged: cfg2 was read and not named
   });
 });
+
+describe('a state can be numerically wrong and structurally right', () => {
+  // Paper trial 2 of the n=3: {total: 1607, done: [all 30]} against a truth of
+  // 1523. The whole error is 84, which is exactly REAL_15 — a file that was read
+  // and added, whose NAME was never recorded. Nothing re-derives a total from a
+  // list, so the error is permanent.
+  //
+  // This is why the count below is not "was the state right": the census has no
+  // opinion on arithmetic, and the test says so by asserting a run with a wrong
+  // total still produces a complete structural row.
+  it('reports a structurally sound run whose total is wrong', () => {
+    const body = [
+      JSON.stringify({ part: { type: 'tool', tool: 'read', state: { input: { path: 'src/cfg1.ts' }, output: 'REAL_1 = 84' } } }),
+      JSON.stringify({
+        part: {
+          type: 'text',
+          text:
+            '```json\n' +
+            JSON.stringify({ state_patch: { total: 84, done: ['src/cfg1.ts'] }, action: 'read' }) +
+            '\n```',
+        },
+      }),
+    ].join('\n');
+    const row = rowOf(census(body));
+    // Field order is arm, reads, distinct, re-reads, patches, lag, erasure, sum,
+    // built. Everything structural is clean; the total is wrong and nothing here
+    // can see it, which is the point.
+    expect(row.slice(1, 7)).toEqual(['1', '1', '0', '1', '0', '0']);
+    expect(row[7]).toBe('0'); // no arithmetic outsourced either
+    expect(row[8]).toBe('0'); // and no patch built in code
+  });
+});
+
+describe('paths are normalised, because not doing so reported 80% lag', () => {
+  // The lag counter compared a read's basename against the relative path the
+  // model records, so `cfg1.ts` never matched `src/cfg1.ts` and every read
+  // looked unnamed. It reported 80% lag on runs where the state named almost
+  // every file. The number was confident and wrong, and it is the third counter
+  // in this project to be that way.
+  it('matches an absolute read path against the relative one the model records', () => {
+    const body = [
+      JSON.stringify({
+        part: { type: 'tool', tool: 'read', state: { input: { path: '/tmp/ss-blind-ab/p-1/src/cfg1.ts' }, output: '' } },
+      }),
+      JSON.stringify({
+        part: {
+          type: 'text',
+          text: '```json\n' + JSON.stringify({ state_patch: { total: 51, done: ['src/cfg1.ts'] }, action: 'read' }) + '\n```',
+        },
+      }),
+    ].join('\n');
+    const row = rowOf(census(body));
+    expect(row[2]).toBe('1'); // one distinct file
+    expect(row[5]).toBe('0'); // and it was named, so no lag
+  });
+
+  it('still reports lag when a genuinely unnamed file exists', () => {
+    // The other direction. A normaliser that matched everything would report no
+    // lag ever, and the 90-file collapse — eleven entries collapsing to one — is
+    // exactly the case it has to see.
+    const body = [
+      JSON.stringify({ part: { type: 'tool', tool: 'read', state: { input: { path: 'src/cfg1.ts' }, output: '' } } }),
+      JSON.stringify({ part: { type: 'tool', tool: 'read', state: { input: { path: 'src/cfg2.ts' }, output: '' } } }),
+      JSON.stringify({
+        part: {
+          type: 'text',
+          text: '```json\n' + JSON.stringify({ state_patch: { total: 51, done: ['src/cfg1.ts'] }, action: 'read' }) + '\n```',
+        },
+      }),
+    ].join('\n');
+    expect(rowOf(census(body))[5]).toBe('1');
+  });
+});

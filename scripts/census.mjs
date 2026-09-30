@@ -107,8 +107,16 @@ function scan(file) {
     census.set(tool, (census.get(tool) ?? 0) + 1);
     if (tool === 'read') {
       reads += 1;
-      const p = String(part.state?.input?.path ?? '');
-      sequence.push({ kind: 'read', file: p.split('/').pop() ?? p });
+      // Normalise to the trailing `dir/file.ext`, which is the form both sides
+      // actually use: a read is issued with an absolute path by the host, and
+      // the model records the path relative to the workdir. Comparing a basename
+      // against a relative path matches nothing, and it reported 80% lag on a run
+      // where every read had been recorded — which is how a number can be
+      // confidently wrong for a day.
+      const raw = String(part.state?.input?.path ?? '');
+      const parts = raw.split('/').filter(Boolean);
+      const tail = parts.slice(-2).join('/');
+      sequence.push({ kind: 'read', file: tail || raw });
     }
     const input = JSON.stringify(part.state?.input ?? {});
     if (!TOOLS_THAT_RUN_CODE.has(tool)) continue;

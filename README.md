@@ -88,9 +88,9 @@ files:
 | arm | reads | distinct | re-reads | patches | lag | erasure | sum-outsourced |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | notes | 31 | 30 | 1 (3%) | 0 | — | 0 | **0** |
-| paper | 46 | 29 | 17 (37%) | 45 | 36 (80%) | 0 | 3 |
-| paper | 37 | 29 | 8 (22%) | 43 | 36 (84%) | 0 | 3 |
-| `values` | 87 | 30 | 57 (66%) | 112 | 70 (63%) | 1 | 6 |
+| paper | 46 | 29 | 17 (37%) | 45 | 1 (2%) | 0 | 3 |
+| paper | 37 | 29 | 8 (22%) | 43 | 2 (5%) | 0 | 3 |
+| `values` | 87 | 30 | 57 (66%) | 112 | 4 (4%) | 1 | 6 |
 
 Lag is not only wasted reads — it silently corrupts. One n=3 trial ended
 `{total: 1607, done: [all 30]}` against a truth of 1523, and the whole 84 is
@@ -113,13 +113,23 @@ fixture, and the fixture is what the state is being scored on. `state_ok` caught
 this trial as a **failure** — the two verdicts are separate for a reason — but the
 failure is the whole 84, and nothing in the mechanism points at which file.
 
-**Lag** is a patch naming fewer files than have been read. It happens on four
-fifths of the paper arm's steps, so the state trails the work and 37% of its reads
-are re-reads going back for what it lost. §5.1 has the runtime choose the action
-and execute it, one per step, so Σ cannot trail by construction — this host's
-plugin has no execute capability and the agent loop batches, so a model can read
-three files in a turn and name one. Three prompt-level fixes for it have been
-tried and measured; all three reached the model and all three were declined.
+**Lag is not the explanation, and I had it at 80% for a day because the counter
+compared a read's basename against the relative path the model records** — so
+`cfg1.ts` never matched `src/cfg1.ts` and every read looked unnamed. The real rate
+is 2–5%.
+
+So what does cause 37% of reads to be repeats? Not a state trailing the work — the
+state names the file. The transcripts show the same two files going back and
+forth: `cfg7, cfg7, cfg8, cfg7, cfg8, cfg7`, before it moves on. The model
+re-reads a file it has already *recorded*, because it does not fully trust a
+value it has already accumulated and the transcript is where it resolves the
+doubt. Re-reads and the arithmetic drift are the same behaviour.
+
+That is the structural half: §5.1 has the runtime choose the action and execute
+it, one per step, so the model is never asked whether it believes its own state.
+This host's plugin has no execute capability and the agent loop batches, so it is
+asked every turn. Three prompt-level fixes have been tried and measured; all three
+reached the model and all three were declined.
 
 There is a structural reason this is the interesting failure, and it is a point
 about §4.1 rather than about this model. An *absolute* value is idempotent —
@@ -1105,7 +1115,7 @@ argument:
 | `SKILLSTATE_MAX_STEPS=<n>` | 100 | the runtime-driven step ceiling, per §10.1's `Run(... maxSteps = 100)`. A malformed value is ignored rather than clamped, so a typo leaves the ceiling where the code says it is |
 | `SKILLSTATE_DRIVE=0` | driving on | paper's context replacement with **no step loop**. Cheapest paper configuration on the eight-file task (17 calls, complete 8/8, 319,366 tokens) and **no answer at all** on the thirty-file task (101,616 tokens, state 1/30) — a run that ends on a turn that only narrated, because nothing re-prompts. Keep it for measurement; it is not a deployment option. |
 | `SKILLSTATE_CONTINUATION=1` | off | put the model's previous action into Oₜ as an order. §2 forbids it — "the agent receives only Oₜ, never prior observations or actions" — and with it on the model obeys its own stored order instead of choosing: 54 reads for thirty files, one grep as a side errand. Exists so that cost stays measurable. |
-| `SKILLSTATE_STEP_BOUNDARY=1` | off | withhold tools until the state has moved, which is §5.1's one-action-per-step enforced in code. The state cannot lag the work with it on — four fifths of patches do lag with it off, and 37% of reads are re-reads as a result. It is off because the measured result is worse: a model given a turn with nothing to call answers in **prose** instead of a patch — *"the saved execution state is still {total:0, files:0} … I will restart from src/cfg1.ts"* — and the run stops at file one. Correct and tested; a claim to be measured, not a setting to leave flipped. |
+| `SKILLSTATE_STEP_BOUNDARY=1` | off | withhold tools until the state has moved, which is §5.1's one-action-per-step enforced in code. It is off because the measured result is worse: a model given a turn with nothing to call answers in **prose** instead of a patch — *"the saved execution state is still {total:0, files:0} … I will restart from src/cfg1.ts"* — and the run stops at file one. Correct and tested; a claim to be measured, not a setting to leave flipped. |
 
 Note the direction. Driving the loop is the paper's mechanism and is the
 default: §5.1 line 12 has the runtime own execution. `SKILLSTATE_DRIVE=0` is the

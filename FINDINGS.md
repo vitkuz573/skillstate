@@ -110,7 +110,7 @@ blind probe's correctness column was one. This was another.
 
 ---
 
-## 1c. The dominant effect, which is not erasure
+## 1c. The re-reads, and a counter that was wrong about why
 
 `scripts/census.mjs` counts four things per run. Same model, same 30 files, same
 truth:
@@ -118,45 +118,50 @@ truth:
 | arm | reads | distinct | re-reads | patches | lag | erasure | sum-outsourced |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | notes | 31 | 30 | 1 (3%) | 0 | — | 0 | **0** |
-| paper | 46 | 29 | 17 (37%) | 45 | 36 (80%) | 0 | 3 |
-| paper | 37 | 29 | 8 (22%) | 43 | 36 (84%) | 0 | 3 |
-| `values` | 87 | 30 | 57 (66%) | 112 | 70 (63%) | 1 | 6 |
+| paper | 46 | 29 | 17 (37%) | 45 | 1 (2%) | 0 | 3 |
+| paper | 37 | 29 | 8 (22%) | 43 | 2 (5%) | 0 | 3 |
+| `values` | 87 | 30 | 57 (66%) | 112 | 4 (4%) | 1 | 6 |
 
-**Lag** is a patch that names fewer files than have been read. It happens on four
-fifths of the paper arm's steps. The state therefore trails the work, and the
-model goes back for what it missed — 37% of its reads are re-reads, against 3%
-for the control. The sequence is visible in the transcript:
+**Lag is not the explanation.** A patch naming fewer files than have been read
+happens on 2–5% of the paper arm's patches. I reported it at 80% for most of a
+day, and the cause was in the counter: it compared a read's **basename** against
+the **relative path** the model records, so `cfg1.ts` never matched `src/cfg1.ts`
+and every read looked unnamed. The number was confident, plausible, produced by a
+script, and wrong — which is the same failure as the blind probe's correctness
+column and as the erasure count in `1b`. Three of this document's numbers came
+from counters nobody compared against a second opinion.
 
-```
-read cfg1.ts
-read cfg2.ts
-patch  total=88  done=1        <- two files read, one named
-read cfg1.ts                   <- back for the one it lost
-patch  total=139 done=2        <- now it is right
-```
+**So what causes 37% of reads to be repeats?** Not the state trailing the work.
+The state names the file. The re-reads come from the model re-reading a file it
+*has already recorded*, and looking at the transcripts the pattern is
+consecutive: `cfg7, cfg7, cfg8, cfg7, cfg8, cfg7` — the same two files, back and
+forth, before it moves on. It is not losing track of progress; it is not
+confident in a value it has already accumulated, and it goes back to check.
 
-**The cause is the adapter's, not the method's.** §5.1 has the runtime choose
-`aₜ` and execute it — `O_{t+1} ← execute(aₜ, Σ_{t+1})` — so one step is one
-action and Σ cannot trail by construction. The plugin has no execute capability
-(`ctx.tool` registers, `ctx.shell` hooks, `ctx.session` prompts) and the host's
-agent loop batches, so a model can read three files in one turn and name one.
+That is the arithmetic finding of §3 showing up as reads. The model reads
+`cfg15`, adds 84, never records the name, and later re-reads to recover the
+value it never wrote down. Re-reads and drift are the same behaviour: the model
+does not fully trust its own state, and the transcript is where it goes to
+resolve the doubt.
 
-The obvious fix is to say so. It has been tried three times in this project and
-measured each time: the host action note, the order marker, and the drift notice.
-All three were delivered — the system-slot probe proved a marker planted in the
-state file reaches the model verbatim — and all three were declined. The step
-boundary (`SKILLSTATE_STEP_BOUNDARY=1`) does enforce alternation by withholding
-tools, and it is off by default because the measured result was that a tool-less
-turn is answered with prose rather than a patch: *"the saved execution state is
-still {total:0, files:0} … I will restart from src/cfg1.ts"*. It stops at file
-one.
+**Why the environment cannot fix it by telling the model.** Three attempts have
+been made and measured: the host action note, the order marker, the drift notice.
+All three were delivered — a marker planted in the state file and quoted back
+comes back verbatim — and all three were declined. The step boundary
+(`SKILLSTATE_STEP_BOUNDARY=1`) enforces alternation in code by withholding tools
+until the state moves, and is off by default because a tool-less turn is answered
+with prose rather than a patch: *"the saved execution state is still {total:0,
+files:0} … I will restart from src/cfg1.ts"*. It stops at file one.
 
-So the lag stands, and it is written down rather than fixed with a fourth prompt.
-`values` was the schema-level attempt and it made every number worse: lag 63%,
-re-reads 66%, six sum-outsourcing attempts, and the `done` list built in a
-JavaScript loop.
+So this is written down rather than fixed with a fourth prompt. What is left is
+the structural half: §5.1 has the runtime choose `aₜ` and execute it — one action
+per step — so the model is never asked to decide whether it believes its own
+state. The plugin has no execute capability (`ctx.tool` registers, `ctx.shell`
+hooks, `ctx.session` prompts) and the host's agent loop batches, so it is asked
+every turn.
 
-
+`values` was the schema-level attempt and every number got worse: re-reads 66%,
+six sum-outsourcing attempts, and the `done` list built in a JavaScript loop.
 
 ---
 
