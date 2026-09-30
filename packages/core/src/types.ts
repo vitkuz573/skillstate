@@ -42,9 +42,19 @@ export interface StateTransition {
 }
 
 // Validation result
+/**
+ * §6.2: "`validatePatch` returns `{ valid: true }` or
+ * `{ valid: false, error, field }`."
+ *
+ * `field` is NOT optional. Every reason the paper names — unknown key, type
+ * mismatch — is about one named key, and every constructor in this package sets
+ * it. Making it optional bought a `field === undefined` branch in every caller
+ * that no test could reach, which is a branch nobody will ever exercise and
+ * therefore one that will quietly rot.
+ */
 export type ValidationResult =
   | { valid: true }
-  | { valid: false; error: string; field?: string };
+  | { valid: false; error: string; field: string };
 
 // Execution step record. All sizes are raw string CHARS per paper §4.3
 // (Average Prompt Size = mean char length per call) — never tokenizer

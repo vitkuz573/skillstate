@@ -13,6 +13,7 @@ import {
 import type {
   MergeValue,
   ReadValue,
+  StateSchema,
   ToolError,
   ToolResult,
   UpdateValue,
@@ -45,7 +46,7 @@ afterEach(() => {
 });
 
 /** Build an editor wired to a real store over a temp project. */
-function harness() {
+function harness(schema?: StateSchema) {
   const dir = makeProject();
   const store = new ProjectStateStore({ directory: dir, home: makeHome() });
   const sessions = new SessionRegistry();
@@ -54,6 +55,7 @@ function harness() {
     store,
     sessions,
     scopeFor: (sessionID: string) => stateScopeFor(sessions, sessionID),
+    ...(schema === undefined ? {} : { schema }),
   });
   return { dir, store, sessions, editor };
 }
@@ -490,5 +492,119 @@ describe('paper mode has no second write path into Σ', () => {
     const names = await namesFor('notes');
     expect(names).toContain('skillstate_read');
     expect(names).toContain('skillstate_update');
+  });
+});
+
+describe('§6.2 and §9.3 — the notes write path validates too, when there is a schema', () => {
+  // Measured on a live n=3 notes trial: the model called skillstate_update
+  // thirty-one times from inside the host's `execute` sandbox, and the state
+  // file ended with a `last` key the schema does not declare. Accepted, `ok:
+  // true`. `FileStore.patch` calls `mergePatch` and nothing else, so this is an
+  // unvalidated second writer into the same document the paper's Σ lives in —
+  // the exact gap that got paper mode's tools unregistered, left open on the
+  // notes side.
+  //
+  // §9.3: "A conforming writer must never emit a `state` containing a key absent
+  // from the schema."
+  const SCHEMA: StateSchema = {
+    total: { type: 'number', default: 0, description: 'running sum' },
+    done: { type: 'array', default: [], description: 'filenames read' },
+  };
+
+  it('refuses an undeclared key and names it', async () => {
+    const { editor, store } = harness(SCHEMA);
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: { total: 51, last: 'cfg1.ts' } },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    const error = errorOf<UpdateValue>(result);
+    expect(error).toMatch(/unknown key/i);
+    expect(error).toContain('last');
+    // And nothing was written: §6.4's rollback is that a rejected patch leaves
+    // Σ exactly as it was. The store does not seed schema defaults — it is not
+    // schema-aware — so a fresh project's state is `{}` and stays `{}`.
+    expect(store.read('')).toEqual({});
+  });
+
+  it('refuses a type mismatch, and the state keeps the declared type', async () => {
+    const { editor, store } = harness(SCHEMA);
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: { total: '1523' } },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    expect(errorOf<UpdateValue>(result)).toMatch(/total/);
+    expect(store.read('')).toEqual({});
+  });
+
+  it('accepts null, because §6.2 says null is always legal — it deletes', async () => {
+    const { editor, store } = harness(SCHEMA);
+    // Both fields first, so the deletion is observed against a state that has
+    // something else in it.
+    await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { total: 7, done: ['a'] } }, fakeToolContext({ sessionID: 'ses_root' }));
+    const result = await editor.tools
+      .get('skillstate_update')!
+      .execute({ patch: { total: null } }, fakeToolContext({ sessionID: 'ses_root' }));
+    // The key is GONE rather than set to anything, and `done` survived the patch
+    // that did not mention it — which is §3.1's sparse patch and §4.2's
+    // "a key that was deleted simply does not exist", in one assertion.
+    expect(outputOf<UpdateValue>(result).state).toEqual({ done: ['a'] });
+    expect('total' in store.read('')).toBe(false);
+  });
+
+  it('leaves a project with no shipped schema unvalidated', async () => {
+    // §6.2 validates against P.schema. A project that declared no P has no
+    // schema, and inventing one would reject notes that are entirely
+    // reasonable — which is why the plugin passes our own fallback nowhere.
+    const { editor } = harness();
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: { anything: 'at all', count: 3 } },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    expect(outputOf<UpdateValue>(result).state).toEqual({ anything: 'at all', count: 3 });
+  });
+
+  it('names the offending field in a way the model can act on', async () => {
+    // A refusal the model cannot use is a refusal that gets retried identically.
+    const { editor } = harness(SCHEMA);
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: { done: ['a'], mystery: 1 } },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    const error = errorOf<UpdateValue>(result);
+    expect(error).toContain('mystery');
+    expect(error).toContain('total'); // the fields that do exist
+    expect(error).toContain('done');
+  });
+});
+
+describe('a schema that declares nothing is still a schema', () => {
+  // §4.1 makes the schema the author's declaration, and a project can declare
+  // an empty one — a state with nothing in it is a legal specification. The
+  // refusal then has to say so in words rather than print an empty list, because
+  // "This project declares: ." tells a model nothing it can act on, and §6.4
+  // guarantees it will be re-asked with the same state.
+  it('says "no fields" rather than naming nothing', async () => {
+    const { editor } = harness({});
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: { anything: 1 } },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    const error = errorOf<UpdateValue>(result);
+    expect(error).toMatch(/unknown key/i);
+    expect(error).toContain('anything');
+    expect(error).toContain('no fields');
+  });
+
+  it('and a patch that is empty is still accepted', async () => {
+    // A sparse patch with no keys touches nothing, and §6.2 has nothing to
+    // reject: every key in it is declared, vacuously.
+    const { editor } = harness({});
+    const result = await editor.tools.get('skillstate_update')!.execute(
+      { patch: {} },
+      fakeToolContext({ sessionID: 'ses_root' }),
+    );
+    expect(outputOf<UpdateValue>(result).state).toEqual({});
   });
 });

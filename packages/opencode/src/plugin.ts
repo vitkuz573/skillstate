@@ -511,7 +511,20 @@ export const SkillStatePlugin = Plugin.define({
     // model does not need the tool to read: paper mode puts Sigma in the
     // prompt by construction, which is the whole of eq. 1.
     await ctx.tool.transform((editor) => {
-      if (mode !== 'paper') registerTools(editor, { store, sessions, scopeFor });
+      // Notes mode gets the schema when the project SHIPPED one, so the tool
+      // that writes this file validates against the same §6.2 the paper's
+      // runtime uses. Only `source === 'file'` counts: a builtin spec is our own
+      // fallback, and holding a project's notes to it would reject notes that
+      // are fine. This is the same gate as `declaredFields`, for the same
+      // reason — a default is not a declaration.
+      if (mode !== 'paper') {
+        registerTools(editor, {
+          store,
+          sessions,
+          scopeFor,
+          ...(resolution.source === 'file' && spec !== undefined ? { schema: spec.schema } : {}),
+        });
+      }
     });
 
     // ── Session tree and the paper-mode state sink ───────────────────────

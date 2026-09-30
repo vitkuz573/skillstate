@@ -38,7 +38,8 @@
  */
 
 import type { ToolContext, ToolEditor } from '@opencode/plugin/promise/tool';
-import type { StatePatch } from '@skillstate/core';
+import { validatePatch } from '@skillstate/core';
+import type { SkillState, StatePatch, StateSchema } from '@skillstate/core';
 import type { SessionRegistry } from './session-registry.js';
 import { stateScopeFor } from './session-registry.js';
 import type { ProjectStateStore, StateChanges } from './state-store.js';
@@ -95,6 +96,25 @@ export interface ToolDeps {
   readonly sessions: SessionRegistry;
   /** Resolve a session id to its state scope; `''` is the root session. */
   scopeFor: (sessionID: string) => string;
+  /**
+   * The project's declared schema, when it SHIPPED one.
+   *
+   * `undefined` is the normal case and the correct one: §6.2 validates
+   * `ΔΣ_t` against `P.schema`, so there is nothing to check a patch against
+   * for a project that has not declared a schema, and inventing a default here
+   * would reject notes that are perfectly reasonable.
+   *
+   * It is passed because this tool is the same file the paper's Σ lives in, and
+   * §9.3 says "a conforming writer must never emit a `state` containing a key
+   * absent from the schema". Measured: a notes-mode run called this tool
+   * thirty-one times from inside the host's `execute` sandbox, and the state
+   * file ended with a `last` key that the schema does not declare — accepted,
+   * `ok: true`, and written by an unvalidated second writer into the same
+   * document the paper's runtime owns. Only a spec the project SHIPPED is used,
+   * for the same reason `declaredFields` is gated on the source: announcing our
+   * own fallback schema as the project's would be a false claim.
+   */
+  readonly schema?: StateSchema;
 }
 
 /* ------------------------------------------------------------------ */
@@ -380,6 +400,24 @@ export function registerTools(editor: ToolEditor, deps: ToolDeps): void {
     async execute(input: unknown, context: ToolContext) {
       const checked = normalizePatch(readUpdateInput(input).patch);
       if (!checked.ok) return render<UpdateValue>(refuse(checked.reason));
+      // §6.2, when there is a P to validate against. Deterministic, runtime-side,
+      // and it never sees the model: a refused patch leaves Σ exactly as it was.
+      if (deps.schema !== undefined) {
+        const verdict = validatePatch(deps.schema, checked.patch as SkillState);
+        if (!verdict.valid) {
+          // The declared fields go in the refusal. §6.4's rollback is that a
+          // rejected patch has no path into Σ, which means the model gets one
+          // more turn with nothing changed — so the refusal has to say what the
+          // alternative is, or the model retries the identical patch. Naming the
+          // offending key alone is a dead end it cannot act on.
+          return render<UpdateValue>(
+            refuse(
+              `${verdict.error} (field: ${verdict.field}). ` +
+                `This project declares: ${Object.keys(deps.schema).join(', ') || 'no fields'}.`,
+            ),
+          );
+        }
+      }
       const scope = resolveScope(undefined, context, deps);
       try {
         const { state, changes } = await deps.store.patch(scope, checked.patch);
