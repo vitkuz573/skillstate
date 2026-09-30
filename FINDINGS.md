@@ -449,25 +449,36 @@ gives no way to know that in advance.
 ## 8. The result that argues for the mechanism
 
 Same task, same model, same fixture, one variable: whether the model could see
-its own transcript.
+its own transcript. Three trials per arm.
 
-| arm | reads | state | answer |
+| arm | state | answer | of which wrote a state at all |
 | --- | --- | --- | --- |
-| paper — bounded context | 46 | **30/30, total 1523** | 1523 |
-| notes — transcript in context | 31 | **0 files, total 0** | 1523 |
+| paper — bounded context | 2/3 correct | 2/3 | 3/3 |
+| notes — transcript in context | 1/3 correct | **3/3** | 1/3 |
 
-Both arms answered correctly. Only one of them has a state.
+The shape from trial 1 is the striking one. The notes arm computed 1523 and wrote
+**nothing** — not a partial state, not a wrong one. `done` empty, `total` 0,
+confirmed from the state file without looking at the answer. With the transcript
+in front of it the model had no reason to keep a record, because the record was
+already on screen.
 
-The notes arm computed 1523 and wrote nothing. Not a partial state, not a wrong
-one — `done` empty, `total` 0, and the scorer confirmed it from the state file
-without looking at the answer. With the transcript in front of it the model had
-no reason to maintain a record, because the record was already on screen. Remove
-the transcript and the same model maintains it perfectly.
+But it is 1 of 3, not 3 of 3. Trials 2 and 3 of the control *did* maintain state
+(30/30, total 1523), and trial 2 built the `done` list fifteen times in a
+JavaScript sandbox and wrote it in. So the honest reading is narrower than "the
+transcript removes the need for a state":
 
-That is the paper's thesis, observed rather than argued: the state is worth
-something only where the transcript is not available. It is also the first
-measurement in this project where the state and the mechanism are separated from
-everything else — same model, same fixture, same task, one switch.
+- **The state is never useless in bounded context** — 3/3 paper trials wrote one.
+- **The transcript makes maintaining it optional** — 2/3 control trials did
+  anyway, which means the model treats the state as a task artifact when it is
+  asked for, rather than as a substitute for the transcript.
+- **The paper arm is not more accurate.** 2/3 against 3/3, with the control ahead
+  on answers. Both arms fail by the same mechanism: a value read from a file and
+  never written down (§3).
+
+So this is not evidence that the mechanism improves accuracy, and at n=3 it is not
+evidence of anything about accuracy in either direction. What it does establish is
+the mechanism's *purpose*: the state is the only record available when the
+transcript is not, and in every bounded trial the model used it.
 
 **What it does not show.** It does not show the mechanism saving tokens, which is
 finding 9.

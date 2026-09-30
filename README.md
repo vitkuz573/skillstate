@@ -193,14 +193,28 @@ it was given back. Plus where the two agree.
 The one measurement that argues *for* the mechanism, with every other variable
 held fixed — same model, same fixture, one switch:
 
-| arm | reads | state | answer |
+| arm | state | answer | wrote a state at all |
 | --- | --- | --- | --- |
-| paper — bounded context | 46 | **30/30, total 1523** | 1523 |
-| notes — transcript in context | 31 | **0 files, total 0** | 1523 |
+| paper — bounded context | 2/3 | 2/3 | **3/3** |
+| notes — transcript in context | 1/3 | **3/3** | 1/3 |
 
-Both answered correctly. Only one has a state. With the transcript on screen the
-model has no reason to keep a record; take the transcript away and the same
-model keeps it perfectly. That is the thesis, observed rather than argued.
+Trial 1 is the shape worth looking at: the control computed 1523 and wrote
+**nothing** — `done` empty, `total` 0, read from the state file rather than the
+answer. With the transcript on screen there is no reason to keep a record.
+
+But it is 1 of 3, not 3 of 3, and the earlier claim of "only one has a state" does
+not survive the other two trials. What the three trials support is narrower:
+
+- every bounded trial wrote a state (3/3), so the mechanism is never inert;
+- the transcript makes maintaining one **optional** rather than useless — 2 of 3
+  control trials did it anyway, one of them building the `done` list in a
+  JavaScript sandbox and writing it in;
+- the paper arm is **not** more accurate: 2/3 against 3/3, control ahead on
+  answers, both failing the same way — a value read and never written down.
+
+So there is no accuracy claim here in either direction at n=3. What the trials
+establish is the mechanism's purpose: the state is the only record there is when
+the transcript is not, and the model uses it whenever it is the only record.
 
 And the one that bounds it. Priced in §4.3's unit — raw string chars, not wall
 tokens, which include the host's own per-call context — the paper arm sends
