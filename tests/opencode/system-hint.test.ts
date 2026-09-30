@@ -16,13 +16,19 @@ describe('renderStateForHint', () => {
     const state = { blob: 'x'.repeat(MAX_INLINE_STATE_CHARS), other: 1 };
     const rendered = JSON.parse(renderStateForHint(state)) as {
       _truncated: boolean;
-      bytes: number;
+      chars: number;
       keys: string[];
       hint: string;
     };
     expect(rendered._truncated).toBe(true);
     expect(rendered.keys).toEqual(['blob', 'other']);
-    expect(rendered.bytes).toBeGreaterThan(MAX_INLINE_STATE_CHARS);
+    // In the SAME UNIT as the limit, which is chars — §4.3 is explicit that sizes
+    // here are raw string CHARS. The first version reported bytes next to a
+    // char limit, so a state of 4,003 Cyrillic characters was 3,003 over the
+    // limit and 7,993 "bytes", and the model was handed two units and a limit in
+    // a third.
+    expect(rendered.chars).toBeGreaterThan(MAX_INLINE_STATE_CHARS);
+    expect(rendered.chars).toBe(JSON.stringify(state, null, 2).length);
     expect(rendered.hint).toContain('skillstate_read');
   });
 
@@ -282,5 +288,22 @@ describe('a shipped schema, and a state that ignores it', () => {
       declaredFields: [],
     });
     expect(hint).not.toContain('skill-spec.json');
+  });
+});
+
+describe('the summary reports the limit it was measured against', () => {
+  // A state just over the limit in characters is twice over it in bytes. The
+  // summary's number and the limit it is compared against have to be one unit,
+  // or the model reading the system prompt is handed two numbers in two units
+  // and a limit in a third.
+  it('reports chars for a non-ASCII state, not bytes', () => {
+    const state = { k: 'я'.repeat(MAX_INLINE_STATE_CHARS) };
+    const json = JSON.stringify(state, null, 2);
+    expect(json.length).toBeGreaterThan(MAX_INLINE_STATE_CHARS);
+    // Over the limit in chars by a little, and in bytes by a lot.
+    expect(Buffer.byteLength(json, 'utf-8')).toBeGreaterThan(json.length * 1.5);
+
+    const rendered = JSON.parse(renderStateForHint(state)) as { chars: number };
+    expect(rendered.chars).toBe(json.length);
   });
 });

@@ -41,19 +41,25 @@ export const ADVERTISED_TOOLS = [
  *
  * Small documents are inlined verbatim (the model sees what is already
  * saved without a tool round-trip). Documents past
- * {@link MAX_INLINE_STATE_CHARS} are summarized as a key list plus a byte
- * count and a pointer to `skillstate_read` — an unbounded state file must
- * not be able to grow the system prompt without limit.
+ * {@link MAX_INLINE_STATE_CHARS} are summarized as a key list plus a count and
+ * a pointer to `skillstate_read` — an unbounded state file must not be able to
+ * grow the system prompt without limit.
+ *
+ * The reported count is in the SAME UNIT as the limit, and it is labelled with
+ * that unit's name. The first version reported `bytes` next to a limit expressed
+ * in characters, which is this project's whole recurring mistake in one line: a
+ * state of 4,003 Cyrillic characters is 3,003 over the limit and 7,993 bytes, so
+ * the model reading the summary was handed two numbers in two units and a limit
+ * in a third. §4.3 is explicit that sizes here are raw string CHARS.
  */
 export function renderStateForHint(state: Record<string, unknown>): string {
   const json = JSON.stringify(state, null, 2);
   if (json.length <= MAX_INLINE_STATE_CHARS) return json;
   const keys = Object.keys(state).sort();
-  const bytes = Buffer.byteLength(json, 'utf-8');
   return `${JSON.stringify(
     {
       _truncated: true,
-      bytes,
+      chars: json.length,
       keys,
       hint: 'Saved state is large — call skillstate_read to load it.',
     },
