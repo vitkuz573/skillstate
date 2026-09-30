@@ -75,6 +75,60 @@ would pass against the wrong implementation, which is the natural one.
   assuming one, because assuming one is how this project produced three
   headline numbers that were constants in place of measurements.
 
+**Fixed: `validatePatch` accepted numbers JSON cannot carry.**
+
+`typeof NaN === 'number'`, so `{total: NaN}` passed §6.2, merged, and the state
+file was written as `{"total": null}` — a number field silently turned into a
+deletion, which breaks §4.2's "a key that exists holds a value of its declared
+type" using a patch §6.2 accepted.
+
+§4.2 gives the reason it matters and it is the reason the fix is right rather
+than merely strict: types are limited to a closed set "so that a conforming
+validator in any language can check patches identically". JSON has no NaN and no
+Infinity, so a validator in another language reading the same patch cannot see
+one and would read the model's number as a deletion. `validatePatchDeep` already
+rejected them; the shallow one — the one §6.2 names, and the one the sink and the
+notes tool both use — did not.
+
+**Fixed: the notes write path validated nothing.**
+
+A notes-mode trial called `skillstate_update` thirty-one times from inside the
+host's `execute` sandbox and wrote a key the schema does not declare. Accepted,
+`ok: true`, and on disk: §9.3 says "a conforming writer must never emit a `state`
+containing a key absent from the schema". `FileStore.patch` calls `mergePatch` and
+nothing else, so this was an unvalidated second writer into the same document the
+paper's Σ lives in — the gap that got paper mode's tools unregistered, left open
+on the notes side and invisible because notes mode has no conformance suite to
+fail.
+
+`skillstate_update` now validates against `P.schema` when the project shipped one.
+A project with no schema has nothing to validate against and is left alone; our
+own fallback is never passed, for the same reason `declaredFields` is gated on
+`source === 'file'`. The refusal names the declared fields, not only the
+offending one, because §6.4 re-asks the model with the same state and a refusal it
+cannot act on is one it retries identically.
+
+**Added: the 90-file measurement, the length axis the paper's claim turns on.**
+
+| | paper — bounded | notes — transcript |
+| --- | --- | --- |
+| tool calls | 128 | 192 |
+| Σ\|Aₜ\| | 371,747 chars | — |
+| control's prefix-sum context | — | 17,437,234 chars |
+| eq. 8 | 65.50x (theoretical 65.50) | — |
+| state | 78/90, total 4314 | 90/90, total 4559 |
+| answer | 3804 | 4559 |
+
+The host truncates reads at roughly 3.8k chars, so every earlier "long
+transcript" was shorter than it looked; this is the first fixture that is
+actually longer. The cost claim holds and strengthens — the bounded arm made
+*fewer* calls than the control, so the ceiling on the host's per-call overhead
+stops binding at all. The accuracy claim does not hold: 78/90, a total 245 low,
+and an answer below its own state. §7's arithmetic is about `SUM |Aₜ|` and is
+exactly right; §1–§10 say nothing about a model holding 78 filenames' running sum
+with no transcript to check it against. Those are two claims and only one of them
+is made.
+
 **Corrected: a rate that was wrong in the direction that flattered the finding.**
 
 `9 erasures in 45 patches` was a counter firing on patches that merely *omitted*
