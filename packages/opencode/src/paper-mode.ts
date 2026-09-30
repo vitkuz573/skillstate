@@ -488,9 +488,17 @@ export function buildPaperPrompt(options: PaperPromptOptions): PaperPrompt {
  * ratio set the pace of the whole run: 2.9 steps per file, which is what put a
  * thirty-file task over a sixty-four step ceiling.
  *
- * The imperative is here to collapse the acknowledgement into the action. If a
- * later run shows the narration back, this string is the first thing to change
- * again, and the step trace is what will say so.
+ * IT DID NOT WORK, and the way it failed is what §2 forbids. The imperative was
+ * meant to collapse the acknowledgement into the action. Instead the model
+ * accepted the directive and complied with it, turn after turn: "I'll read
+ * cfg3.ts next, as directed by the observation", and then read cfg3.ts. Fifty-four
+ * reads for thirty files, one grep used three times as a side errand. The order
+ * was the model's own past action, so it never looked for a better way than the
+ * one already written down.
+ *
+ * The string survives behind SKILLSTATE_CONTINUATION=1 because a dead fix whose
+ * cost is measured is worth more than a fix nobody can price. The default is
+ * REPORT_MARKER.
  */
 export const REPORT_MARKER = '[runtime]';
 
