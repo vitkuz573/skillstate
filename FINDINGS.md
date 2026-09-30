@@ -523,6 +523,49 @@ section 14.
 
 ---
 
+## 13a. At ninety files the mechanism wins the content and loses the answer
+
+Three times the files, with both spec fixes in place, the first fixture that is
+actually longer and not truncated by the host. Truth 4559.
+
+| | paper — bounded | notes — transcript |
+| --- | --- | --- |
+| reads | 96 | 95 |
+| tool calls | **128** | 192 |
+| state | 78/90, total 4314 | **90/90, total 4559** |
+| answer | 3804 | **4559** |
+| Σ\|Aₜ\| | 371,747 chars | — |
+| control's prefix-sum context | — | 17,437,234 chars |
+| eq. 8 | **65.50x** | — |
+
+**On content the bounded arm wins by 46.9x** and it wins *unconditionally* — the
+ceiling is negative, because it made 128 calls against the control's 192, so it
+pays the host's per-call overhead less often as well as sending less content. The
+condition that bound every earlier measurement (`H < ~56,000 chars/call`) is gone
+at this length, and the sign has flipped for the right reason rather than a lucky
+one.
+
+**And it lost the task.** 78/90 and a total 245 too low, where the control got
+90/90 and the exact sum. The state is not merely short — it stopped at cfg78 and
+never recovered, and the answer it reported (3804) is *below its own state*
+(4314), so it distrusted what it had and went further wrong.
+
+**What the run is made of.** 96 reads for 90 files is almost efficient. 130
+patches, 10 sum-outsourcing attempts, 17 shell calls, and 1 patch built in code.
+The model spent its last third of the budget trying to add up 90 numbers it could
+not hold, and a state that lists 78 filenames is a 2.8k-character Aₜ that has to
+be re-read by a model with no transcript to check it against. The control read
+each file exactly once, wrote nothing until the end, and did the sum in one
+place.
+
+**What this says, precisely.** The paper's cost claim survives at 90 files and its
+accuracy claim does not — and they are different claims. §7's arithmetic is about
+`SUM |A_t|` and it is exactly right. §1–§10 say nothing about a model's ability to
+hold 78 filenames' worth of running sum in a context with no other copy of it, and
+this run is what that looks like when it runs out.
+
+---
+
 ## 14. Where the saving goes
 
 Two quantities were being compared as one. `scripts/replay-at.mjs` prices a

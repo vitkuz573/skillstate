@@ -244,25 +244,44 @@ That is the length axis, and it is the one that decides the question:
 | 90 files | 338k chars | 155,672 | 31.00x | 31.00 |
 
 Tripling the transcript grew the state's cost by 56%, against a baseline that
-grows quadratically. On *content*, the saving improves with length.
-
-On wall tokens it does not, and the reason is the request count:
+grows quadratically. On *content*, the saving improves with length. On wall tokens
+it depends on the request count, because the host re-sends its own context once
+per call:
 
 | fixture | paper calls | control calls | H ceiling |
 | --- | --- | --- | --- |
 | 30 files | 59 | 31 | ~60,000 chars/call |
 | 90 files | 60 | 31 | ~56,000 chars/call |
 
-The state is cheaper per step, the transcript is three times longer, and the arm
-is still making twice as many requests — so it pays the host's per-call overhead
-twice as often, and the ceiling does not move. Below that ceiling the bounded
-context is cheaper; above it, it is not. Nothing in §5.1 addresses request count,
-because §5.1 assumes the runtime owns the loop, which is exactly what this host
-cannot give it.
+Nothing in §5.1 addresses request count, because §5.1 assumes the runtime owns
+the loop, which is exactly what this host cannot give it.
 
-**No percentage is claimed.** A ratio built from those numbers would be a ratio
-of two things the model never paid, and a test fails if a `%` appears in the
-report.
+**And then the length made the request count work for the mechanism instead of
+against it.** At 90 files the control needed 192 tool calls and the bounded arm
+128 — so the bounded arm now pays the host's overhead *less* often as well as
+sending 46.9x less content, and the ceiling stops binding at all:
+
+| | paper — bounded | notes — transcript |
+| --- | --- | --- |
+| tool calls | **128** | 192 |
+| Σ\|Aₜ\| | 371,747 chars | — |
+| control's prefix-sum context | — | 17,437,234 chars |
+| eq. 8 | **65.50x** | — |
+| state | 78/90, total 4314 | **90/90, total 4559** |
+| answer | 3804 | **4559** |
+
+**So the cost claim survives at 90 files and the accuracy claim does not.** §7's
+arithmetic is about `SUM |Aₜ|` and it is exactly right — 65.50x, against a
+theoretical 65.50. §1–§10 say nothing about a model's ability to hold 78
+filenames' worth of running sum with no transcript to check it against, and that
+is what ran out: 10 attempts to outsource the sum, 17 shell calls, one patch
+built in code, and a final answer of 3804 — *below its own state's 4314*, so it
+distrusted what it had and went further wrong. The control read each file once,
+wrote nothing until the end, and got the sum right.
+
+Those are two different claims and only one of them holds. **No percentage is
+claimed** — a ratio built from these numbers would be a ratio of two things the
+model never paid, and a test fails if a `%` appears in the report.
 
 ## How it works
 
