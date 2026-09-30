@@ -567,6 +567,16 @@ group('a run killed by the harness clock says so', () => {
     expect(result.duration_s).toBeCloseTo(2394, 0);
   });
 
+  it('flags a run that used all but a sliver of its budget', () => {
+    // The dangerous false negative: a run that finished 29 seconds inside its own
+    // cap is not measurably different from one SIGTERM cut off, and calling it a
+    // success is the mistake that cost a day. The band is absolute for the same
+    // reason -- a fraction of the cap would be 47 minutes of slack at 2400 and 12
+    // seconds at 20, which is one number meaning two things.
+    expect(score(runDir(1371, { timeout_s: 2400 }, 'text')).at_timeout).toBe(false);
+    expect(score(runDir(1371, { timeout_s: 1400 }, 'text')).at_timeout).toBe(true);
+  });
+
   it('does not flag a run that finished early', () => {
     // The control arm at ninety files: 6.9 minutes against the same 2400. If this
     // reads as capped then the comparison is worthless.

@@ -21,6 +21,14 @@ A third, non-verdict, gates how the other two may be read:
               stopped at step 100 of a 100-step ceiling, mid-file-79, and read
               as a model that had lost track of its sum at file 78.
 
+  `at_timeout`  true: the run reached the wall-clock cap the stand gave it, so
+              SIGTERM ended it -- the harness decided, not the model and not the
+              mechanism. Measured: two 90-file runs, both at 39.9 minutes against
+              a `timeout 2400`, both of which read for a day as a network failure
+              and once before that as a step ceiling. null when there is no cap
+              to compare against, which is every run taken before the stand
+              recorded one.
+
 A run can pass one and fail the other in either direction, and both directions
 have been observed. Under the fixture this replaced — which named the expected
 total in the task text — every run passed both, because the model was told the
@@ -39,6 +47,12 @@ import sys
 from typing import Any
 
 ANSWER = re.compile(r"TOTAL=\s*(\d+)")
+
+# How close to its own wall-clock cap a run must finish before "finished" stops
+# being the honest reading. 30 seconds: long enough for SIGTERM to land and a
+# transcript to record its last event, short enough that a run which used more
+# than 99% of its budget is not quietly called a success.
+TIMEOUT_SLACK_S = 30
 
 
 def _assistant_texts(path: str) -> list[str]:
@@ -390,8 +404,15 @@ def score(directory: str, arm: str, record_id: str) -> dict[str, Any]:
     meta = _meta(directory)
     cap = meta.get("timeout_s")
     cap_s = cap if isinstance(cap, (int, float)) and cap > 0 else None
+    # An absolute band, not a fraction. A fraction scales with the cap, so 0.98
+    # means 47 minutes of slack at a 40-minute cap and 12 seconds at a 20-second
+    # one -- the same number standing for two different things. What is actually
+    # true is that `timeout` kills at the cap and SIGTERM takes a moment to land,
+    # so a killed run's last event sits a few seconds under it. Anything that
+    # finished within TIMEOUT_SLACK_S of the cap is genuinely indistinguishable
+    # from one that did not, and the safe side of that is to flag it.
     at_timeout = (
-        duration is not None and cap_s is not None and duration >= cap_s * 0.98
+        duration is not None and cap_s is not None and duration >= cap_s - TIMEOUT_SLACK_S
     )
 
     return {
