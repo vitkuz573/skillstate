@@ -8,6 +8,15 @@
  *
  * These are assertions about the fixture itself rather than about the runtime.
  * The runtime is already covered; what has no other guard is the instrument.
+ *
+ * Both halves were checked by putting the old bug back and watching these fail:
+ *
+ *   task text mutated to name TOTAL=1523     ->  2 of 6 fail
+ *   verdict mutated to read the answer       ->  1 of 6 fail
+ *
+ * A guard that has never been seen to fail is indistinguishable from a guard
+ * that does not work, and this one protects the single measurement in the
+ * project that was silently worthless.
  */
 
 import { describe as group, it, expect } from 'vitest';
