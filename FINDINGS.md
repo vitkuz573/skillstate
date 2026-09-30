@@ -585,6 +585,29 @@ writes both with the ceiling to `.skillstate/.run.json`, and the scorer surfaces
 would be a false negative on the one number that decides whether a cost figure
 means anything. Every run in this document predates the file and reads `null`.
 
+**The same mechanism, small enough to finish, as a control.** Six files, truth
+165, the same adapter and the same fixture shape:
+
+| | value |
+| --- | --- |
+| files | 6/6 |
+| state total | **165** |
+| `TOTAL=` in the answer | **165** |
+| steps taken | 11 of a ceiling of 12 |
+| why it stopped | `terminal` |
+| `Σ\|A\u209c\|` in the state | 6 patches applied, 18 emitted |
+
+It finished, it was right, and it says so — `reason: terminal`, not
+`max_steps`. A run that completed and a run that ran out of budget now produce
+different files, and the difference is checked rather than inferred from a
+transcript.
+
+**Eleven steps for six files is 1.83 per file**, against the 1.67 the ninety-file
+run worked out to. Those two numbers bracket what §10.1's default of 100 buys:
+roughly **60 files**, which is why the ninety-file fixture needed a raised ceiling
+at all. The estimate is arithmetic on two measured points, not a claim about
+where a model stops working.
+
 **What the number does still support:** `Σ|Aₜ|` is 371,747 chars against a
 control context of 17,437,234, and eq. 8 reproduces at 65.50 against a
 theoretical 65.50. Those are properties of the *content*, and a run that stops
