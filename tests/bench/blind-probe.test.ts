@@ -937,3 +937,86 @@ group('the crossover rows name the runs they came from', () => {
     }
   });
 });
+
+
+group("the truncation guard is about LINES, not files", () => {
+  // The host's read budget is 2000 chars PER LINE. Measured on this host by
+  // bisection, and named in the tool's own output: `... (line truncated to 2000
+  // chars)`. A 4,000-line file of 30,906 chars comes back WHOLE; a single 3,000
+  // char line comes back cut to ~2,071.
+  //
+  // The stand's guard said 3,800 chars per FILE, read out of two observations
+  // where a small file passed whole and a large one did not. It was wrong in both
+  // directions: it refused a 30k file of short lines, which is safe, and it
+  // ADMITTED a 3.7k file containing one 2.5k line, which is not. The admitted
+  // case is the one that corrupts a measurement — the value the task needs is
+  // past the cut, and the transcript looks perfectly fine.
+  const LINE_BUDGET = 2000;
+
+  // The exact expression the stand uses, so the rule is pinned where it is
+  // applied rather than only where it is explained.
+  const longestLine = (dir: string): number => {
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.ts'))
+      .map((f) => path.join(dir, f));
+    let longest = 0;
+    for (const file of files) {
+      for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+        longest = Math.max(longest, line.length);
+      }
+    }
+    return longest;
+  };
+
+  it('reads the per-line budget out of the stand, not a per-file one', () => {
+    expect(probe).toContain('READ_LINE_BUDGET_CHARS=2000');
+    // The old name must be gone from every line that RUNS. It stays in the
+    // comment that says what it was and why it was wrong, because a correction
+    // with the original text removed is a correction nobody can check — and
+    // demanding the string vanish would forbid writing that history down.
+    const used = probe
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#') && line.includes('READ_BUDGET_CHARS'));
+    expect(used, `the per-file constant is still used: ${used.join(' | ')}`).toEqual([]);
+    // And it is mentioned, so the mistake is findable.
+    expect(probe).toMatch(/READ_BUDGET_CHARS=3800/);
+  });
+
+  it('measures the longest line, not the longest file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-'));
+    // 30k of short lines: safe, and the old guard refused it.
+    fs.writeFileSync(
+      path.join(dir, 'many.ts'),
+      Array.from({ length: 2000 }, (_, i) => `export const C${i} = ${i};`).join('\n'),
+    );
+    expect(longestLine(dir)).toBeLessThan(LINE_BUDGET);
+    expect(fs.statSync(path.join(dir, 'many.ts')).size).toBeGreaterThan(20_000);
+
+    // 2.5k in one line, inside a file the old guard admitted.
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'lines2-'));
+    fs.writeFileSync(
+      path.join(other, 'one.ts'),
+      `// ${'x'.repeat(2500)}\nexport const REAL_1 = 10;\n`,
+    );
+    expect(fs.statSync(path.join(other, 'one.ts')).size).toBeLessThan(3800);
+    expect(longestLine(other)).toBeGreaterThan(LINE_BUDGET);
+  });
+
+  it('says per-line in the refusal it prints', () => {
+    // The message is what an operator reads at 2am. A refusal that says "past the
+    // read budget" for a LINE invites raising FILES, which changes the thing
+    // being measured and not the thing that was wrong.
+    expect(probe).toMatch(/PER-LINE read budget/);
+    expect(probe).toMatch(/This is a LINE budget, not a file budget/);
+  });
+
+  it('carries the measurements that produced the number', () => {
+    // A constant with no evidence next to it is a guess, and this one was a guess
+    // that survived a day. The comment has to be able to say "here is how this was
+    // measured" and be right.
+    expect(probe).toMatch(/30,906 chars total/);
+    expect(probe).toMatch(/line truncated to 2000 chars/);
+    expect(probe).toMatch(/bisection/);
+  });
+});
