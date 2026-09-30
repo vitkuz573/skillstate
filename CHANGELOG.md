@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Added: a run now says how it stopped, and the ceiling it stopped under.**
+
+§10.1's loop has three exits and one return value. `break` on `isDone`, `break`
+on an invalidated step, and falling out of `for step in range(maxSteps)` all
+return `StepResult[]`, and the third is the one that lies: a run stopped at the
+ceiling is indistinguishable from a run that finished.
+
+`run()` records which exit it took in `lastRunStop` — `done`, `invalidated`, or
+`max_steps` — and emits `run:exhausted` on the ceiling the way it already
+emitted `budget:exceeded` for a char budget. The host adapter's `advance()`
+returns `null` for four different endings (a terminal action, a host refusal, an
+empty turn, the ceiling) and the caller discarded it; it now records which in
+`lastStop`, and the plugin writes both plus the ceiling to
+`.skillstate/.run.json`. §10.1 specifies no report — the pseudocode returns the
+same value from all three — so this is a diagnostic, and it is symmetric with the
+one already there.
+
+`steps` counts steps the loop TOOK, not work the model did: a model that patches
+and ends on the same turn took zero steps. A record reporting 1 would be counting
+something the loop never did.
+
+**Added: `ended_on_error` — a host-dropped run is not a model result.**
+
+The stand runs the model under `|| true`, so a crashed, timed-out or
+quota-starved run and a run that finished cleanly leave the same files behind: an
+empty stderr, a plausible state file, and no exit code. (The exit code cannot
+help: a successful run returns 0, a CLI usage error returns 1, and a run that
+answered in prose and did nothing also returns 0.) The scorer now reads the
+transcript's last event and reports `ended_on_error` with the message.
+
+This is not theoretical. A 90-file run that stopped at 78 of 90 files was read
+first as a model losing track of its running sum and then as a step ceiling,
+before anyone read the last line of the transcript: a closed socket. It is the
+only one of eight runs with an error in it at all, and the only one that ends on
+one. The scorer also gained `stopped_by_ceiling`, three-valued — a run with no
+`.run.json` reads `null`, never `false`, because `false` would read as "this run
+finished" for a run whose ending was never recorded.
+
+**Fixed: the truncation summary reported bytes next to a character limit.**
+
+`renderStateForHint` summarised an over-budget state as a key list plus a count.
+The count was bytes; the limit is characters, and §4.3 is explicit that sizes here
+are raw string CHARS. A state of 4,003 Cyrillic characters is 3,003 over the limit
+and 7,993 "bytes", so the model reading the system prompt was handed two numbers in
+two units and a limit in a third. The field is now `chars`.
+
+**Fixed: the scorer's four transcript readers disagreed about what a transcript is.**
+
+A bare `[]` on a line took the whole scorer down with an AttributeError. Three of
+the four readers called `.get` on whatever `json.loads` returned; the guard existed
+only on the newest one, which is how three readers came to differ. All four now
+check, and there is a test that feeds them garbage.
+
 **Fixed: `Run` kept going after a step the paper says ends the run.**
 
 §10.1, verbatim:
