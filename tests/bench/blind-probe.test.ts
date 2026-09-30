@@ -817,7 +817,7 @@ group('the crossover rows name the runs they came from', () => {
   // of 37,917 against the one that kept 10. Both were true of the runs they name.
   //
   // The previous table quoted `60 against 31` at both lengths and re-derived from
-  // nothing — the same superseded fixture generation as the §14 Σ table. So the
+  // nothing — the same superseded generation as the Σ table in FINDINGS §14. So the
   // guard here is the same one: a row in a table has to name its run, or it is a
   // claim with no evidence behind it.
   // Tables, not rows. A run is named once per table, in a `run` row or in a

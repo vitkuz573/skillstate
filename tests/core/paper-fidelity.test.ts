@@ -578,7 +578,72 @@ group('a paper citation is a paper section', () => {
     // The file that started it. It must name its own sections as NOT paper
     // numbers, or the next reader inherits the ambiguity.
     const spec = fs.readFileSync('state.md', 'utf-8');
-    expect(spec).toMatch(/NOT paper section numbers/);
+    // Case-insensitive on purpose, and the reason is one line long: an earlier
+    // version of this assertion demanded the phrase in caps, the sentence in
+    // `state.md` was reworded into lower case during another edit, and the guard
+    // failed on a document that still said exactly the right thing. A guard that
+    // checks the casing of prose is a guard that will fail for nothing.
+    expect(spec).toMatch(/not paper section numbers/i);
     expect(spec).toMatch(/in the paper's numbering/);
+    // And the document table has to be labelled as this file's, so a bare `§6.1`
+    // is not read as a paper section that does not exist.
+    expect(spec).toMatch(/this file's §/);
+  });
+
+  it('resolves every paper citation against the table in state.md', () => {
+    // The table is the citation space, and this is the check that makes it one.
+    // `§7 (complexity)` was a DOCUMENT number wearing the word "sections" — a real
+    // section of the wrong content, so nothing about it looked wrong to a reader
+    // who did not already know. A test that requires every citation to resolve
+    // against a maintained list turns that class into a build failure.
+    // Two numbering schemes are legitimate here and the repository uses both: the
+    // PAPER's sections, and this spec file's own sections — the code quotes
+    // `state.md §6.1` and `§8.1` when it is talking about this document's
+    // prose. Both tables in `state.md` are read, and a citation resolves against
+    // either.
+    const spec = fs.readFileSync('state.md', 'utf-8');
+    const paper = new Set<string>();
+    const own = new Set<string>();
+    let inOwnTable = false;
+    for (const line of spec.split('\n')) {
+      if (/^\s*\|\s*this file's \u00a7/.test(line)) {
+        inOwnTable = true;
+        continue;
+      }
+      const m = /^\s*\|\s*§(\d+(?:\.\d+)*)\s*\|/.exec(line);
+      if (!m) continue;
+      // Split on the SECOND table's own header rather than on a row count. A
+      // count was the first attempt and it silently moved four rows across the
+      // boundary, which is the liveness lesson again: a boundary chosen by
+      // arithmetic rather than by a marker is a boundary nobody can see.
+      (inOwnTable ? own : paper).add(m[1]!);
+    }
+    // Sanity: the tables are really there and really parsed. A guard that silently
+    // matches nothing is the liveness check's lesson all over again.
+    expect(paper.size, 'the citation tables in state.md did not parse').toBeGreaterThan(20);
+    expect(paper.has('3.3')).toBe(true);
+    expect(paper.has('7')).toBe(true);
+    expect(own.has('6.1')).toBe(true);
+    expect(own.has('8.1')).toBe(true);
+
+    const known = new Set([...paper, ...own]);
+    // A citation to one of THIS repository's own documents resolves by its label,
+    // and the label has to be on the line. `FINDINGS §14` is a section of
+    // `FINDINGS.md`; a bare `§14` is a citation to nothing, which is how
+    // `§7 (complexity)` survived in a file that also said `§7 rollback-retry`.
+    const LABELLED = /paper|state\.md|FINDINGS|README|CHANGELOG|BENCHMARK|CONTRIBUTING/;
+    const unresolved: string[] = [];
+    for (const file of sources) {
+      const lines = fs.readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (LABELLED.test(line)) return;
+        for (const c of line.matchAll(/§(\d+(?:\.\d+)*)/g)) {
+          if (!known.has(c[1]!)) {
+            unresolved.push(`${file}:${i + 1}: §${c[1]} — ${line.trim().slice(0, 90)}`);
+          }
+        }
+      });
+    }
+    expect(unresolved, `citations that do not resolve:\n${unresolved.join('\n')}`).toEqual([]);
   });
 });

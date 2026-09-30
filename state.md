@@ -507,7 +507,72 @@ A minimal conformance harness checks, in this order:
 - **Specification version:** `1.0.0`.
 - **Normative sections, in the paper's numbering:** §2 (definitions), §3 (execution state, §3–§3.3), §4 (schema, §4.1–§4.3), §5 (Algorithm 1 + A.4), §6 (transition semantics), §7 (rollback-retry).
 - **Non-normative sections, in the paper's numbering:** §1 (motivation), §9 (interop patterns), §10 (reference code), §12 (adoption checklist).
-- **This document's own sections**, which are numbered 1–12 and are NOT paper section numbers. The mapping is at the head of each heading above: document 2 is paper §2, document 3 is paper §3, document 4 is paper §3.1, document 5 is paper §3.2, document 6 is paper §4, document 7 is paper §3.3, document 8 is paper §4.3, and so on.
+- **The paper's sections, for citation.** Machine-readable on purpose: a test
+  reads this table and requires every `§` citation in this repository's code and
+  tests to resolve against it, so a document number can never be cited as a paper
+  section again.
+
+  | paper § | content | normative |
+  | --- | --- | --- |
+  | §1 | motivation and scope | no |
+  | §2 | formal definitions | yes |
+  | §3 | execution state, and §3–§3.3 | yes |
+  | §3.1 | schema authoring | yes |
+  | §3.2 | Algorithm 1 | yes |
+  | §3.3 | complexity guarantees, eq. 5–eq. 8 | yes |
+  | §4 | schema, and §4.1–§4.3 | yes |
+  | §4.1 | schema is authored once, per domain | yes |
+  | §4.2 | the closed field-type set | yes |
+  | §4.3 | metrics, in raw string chars | yes |
+  | §5 | Algorithm 1 and A.4 | yes |
+  | §5.1 | the step: one action, one patch | yes |
+  | §5.2 | A.4, the prompt template | yes |
+  | §5.7 | failure taxonomy | yes |
+  | §6 | transition semantics and validation, and §6.2–§6.4 | yes |
+  | §6.2 | validation | yes |
+  | §6.3 | rollback | yes |
+  | §6.4 | the synthetic observation | yes |
+  | §7 | rollback-retry | yes |
+  | §9 | interop and adapters, and §9.2–§9.3 | no |
+  | §9.2 | the five primitives every adapter exposes | no |
+  | §9.3 | the on-disk format | no |
+  | §10 | reference implementation, and §10.1–§10.2 | no |
+  | §10.1 | `Run(P, Σ0, O0, llm, execute, isDone, maxSteps = 100)` | no |
+  | §10.2 | the conformance harness | no |
+  | §12 | adoption checklist | no |
+  | A.4 | the prompt template, byte-normative | yes |
+
+  **§7 is rollback-retry and §3.3 is the cost analysis.** They are the two most
+  often confused in this repository, and they were confused in the source of the
+  confusion: an earlier version of this file listed `§7 (complexity)` under the
+  label "sections", one line below the line above, and every citation that reached
+  for the cost claim found rollback-retry instead.
+
+- **This document's own sections** are numbered 1–12, and they are **not paper section numbers**.
+  Quoting one is legitimate — the code quotes this spec — but it must say which
+  document, as `state.md §6.1`, because a bare `§6.1` reads as a paper section that
+  does not exist. The same goes for this repository's own prose: `FINDINGS §14` is a
+  section of `FINDINGS.md`, and a bare `§14` is a citation to nothing at all.
+
+  | this file's § | content | paper § |
+  | --- | --- | --- |
+  | §1 | motivation and scope | §1 |
+  | §2 | formal definitions | §2 |
+  | §3 | the ⊕ merge operator | §3 |
+  | §4 | schema authoring | §3.1 |
+  | §5 | Algorithm 1 | §3.2 |
+  | §6 | transition semantics and validation | §6 |
+  | §6.1 | reasoning is discarded | §6.1 |
+  | §6.2 | validation | §6.2 |
+  | §6.3 | rollback | §6.3 |
+  | §6.4 | the synthetic observation | §6.4 |
+  | §7 | complexity guarantees, eq. 5–eq. 8 | §3.3 |
+  | §8 | metrics | §4.3 |
+  | §8.1 | `promptChars[t]` is `|A_t|` | §4.3 |
+  | §9 | interop and adapters | §9 |
+  | §10 | reference implementation | §10 |
+  | §11 | anchors | — |
+  | §12 | adoption checklist | §12 | The mapping is at the head of each heading above: document 2 is paper §2, document 3 is paper §3, document 4 is paper §3.1, document 5 is paper §3.2, document 6 is paper §4, document 7 is paper §3.3, document 8 is paper §4.3, and so on.
 
   A previous version of this file listed the normative sections in the DOCUMENT
   numbering under the label "sections" — `§7 (complexity), §8 (metrics)` — one line
