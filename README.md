@@ -230,8 +230,9 @@ Trial 1 is the shape worth looking at: the control computed 1523 and wrote
 **nothing** — `done` empty, `total` 0, read from the state file rather than the
 answer. With the transcript on screen there is no reason to keep a record.
 
-But it is 1 of 3, not 3 of 3, and the earlier claim of "only one has a state" does
-not survive the other two trials. What the three trials support is narrower:
+But it is 1 of 3, not 3 of 3, and an earlier version of this file said "only one
+has a state" on the strength of that one trial. What the three support is
+narrower:
 
 - every bounded trial wrote a state (3/3), so the mechanism is never inert;
 - the transcript makes maintaining one **optional** rather than useless — 2 of 3
