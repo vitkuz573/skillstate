@@ -56,8 +56,8 @@ fixture: [`tests/bench/expected.json`](./tests/bench/expected.json).
 
 ### A state can be perfect for the wrong reason
 
-The n=3 paper trial ended **30/30, total 1523** — the true sum, every §10.2 check
-green, answer also 1523. The transcript also contains:
+One n=3 paper trial ended **30/30, total 1523** — the true sum, every §10.2 check
+green, answer also 1523. Its transcript also contains:
 
 ```
 execute: {"code": "return {total: 1466 + 57};"}   ->  { "total": 1523 }
@@ -92,7 +92,7 @@ files:
 | paper | 37 | 29 | 8 (22%) | 43 | 2 (5%) | 0 | 3 |
 | `values` | 87 | 30 | 57 (66%) | 112 | 4 (4%) | 1 | 6 |
 
-Lag is not only wasted reads — it silently corrupts. One n=3 trial ended
+A state can also be complete and numerically wrong. One n=3 trial ended
 `{total: 1607, done: [all 30]}` against a truth of 1523, and the whole 84 is
 `REAL_15`:
 
