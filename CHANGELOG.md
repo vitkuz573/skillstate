@@ -25,6 +25,30 @@ reports the untyped writes as a finding rather than as drift; `scaffold` still
 refuses, because a spec cannot be produced that accounts for a key nobody can
 type. Where one of them reports it and the other stops is the whole design.
 
+**A mode you turned off could not be turned off.**
+
+`resolvePluginMode` ran once, inside `setup`, and the plugin lives in a long-lived
+server process. Removing a project's `skillstate.json` and restarting the CLIENT
+changed nothing at all: the next nineteen requests were still served the paper
+prompt, still printed `{state_patch, action}` into the chat, and still had the step
+loop waking the model after every step. The file was gone and the mode was still
+on, because nothing looked again.
+
+The cost of reading it per request is one small file read per model request. That
+is not free, and it is the right trade: a mode nobody can turn off without
+finding the right process to kill is a mode nobody can turn off.
+
+The tools follow the same rule. Paper mode registers none and notes mode registers
+three, so the set is re-applied when the mode changes — `editor.remove` by id,
+against the `skillstate_` prefix only, because `remove` takes an id rather than a
+predicate and a sweep across every registered tool would delete the host's and any
+other plugin's.
+
+What made this expensive to find is worth writing down: **the plugin looked
+perfectly healthy the whole time.** The tools were registered, the state file was
+being written, the model was answering, and nothing anywhere said "you changed a
+file I read once in September". Every symptom pointed at the model.
+
 **A paper-mode project drove every session on the machine, not its own.**
 
 The host's event stream is global; a plugin instance is per project directory. It

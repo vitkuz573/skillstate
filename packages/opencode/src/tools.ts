@@ -51,6 +51,16 @@ import type { ProjectStateStore, StateChanges } from './state-store.js';
  */
 export const MAX_PATCH_BYTES = 64 * 1024;
 
+/**
+ * The prefix every tool this package registers carries.
+ *
+ * Exported so a caller can tell "ours, and therefore safe to withdraw" from a
+ * tool the host or another plugin put there. `editor.remove` takes an id, not a
+ * predicate, and a broad match across every registered tool would delete other
+ * people's.
+ */
+export const SKILLSTATE_TOOL_PREFIX = 'skillstate_';
+
 /** A tool call that succeeded. */
 export interface ToolOk<T> {
   readonly ok: true;

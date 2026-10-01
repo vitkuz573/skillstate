@@ -100,7 +100,7 @@ import { StepBoundary } from './step-boundary.js';
 import { ToolActivity } from './tool-activity.js';
 import { ProjectStateStore } from './state-store.js';
 import { buildStateHint, driftNotice } from './system-hint.js';
-import { registerTools } from './tools.js';
+import { registerTools, SKILLSTATE_TOOL_PREFIX } from './tools.js';
 
 /** Stable plugin id — scopes plugin storage and identifies it in `/api/plugin`. */
 export const PLUGIN_ID = 'skillstate';
@@ -558,7 +558,20 @@ export const SkillStatePlugin = Plugin.define({
     // the stand had been seeded with an older fixture. Both were invisible.
     void writeBuildStamp(directory);
 
-    const mode: PluginMode = resolvePluginMode({ directory }).mode;
+    // ── The mode is read per request, not once per process ────────────────
+    //
+    // Read once at setup, it is frozen for the life of the server — and the
+    // server outlives the client by a lot. Measured here: a paper-mode project
+    // had its `skillstate.json` deleted, the user restarted the CLIENT, and
+    // every subsequent request was still served the paper prompt, the state
+    // patch, the A.4 contract and the toolless step loop. The file was gone and
+    // the mode was still on, because nothing looked again.
+    //
+    // The cost is one small file read per model request. That is not free, and
+    // it is still the right trade: a mode nobody can turn off without finding
+    // the right process to kill is a mode nobody can turn off.
+    const modeOf = (): PluginMode => resolvePluginMode({ directory }).mode;
+    const mode: PluginMode = modeOf();
     const specs = new SpecResolver();
     // Resolved in BOTH modes now, and the difference is what each one does
     // with it. Paper mode formats P into the prompt and validates every patch
@@ -686,30 +699,50 @@ export const SkillStatePlugin = Plugin.define({
     // applied". An unvalidated second writer is exactly such a path. And the
     // model does not need the tool to read: paper mode puts Sigma in the
     // prompt by construction, which is the whole of eq. 1.
-    await ctx.tool.transform((editor) => {
-      // Notes mode gets the schema when a spec was DECLARED, so the tool that
-      // writes this file validates against the same §6.2 the paper's runtime
-      // uses. A builtin spec is our own fallback, and holding a project's notes
-      // to it would reject notes that are fine — the same gate as
-      // `declaredFields`, for the same reason: a default is not a declaration.
-      // This is now literally the same flag the MCP server gates on.
-      if (mode !== 'paper') {
-        registerTools(editor, {
-          store,
-          sessions,
-          scopeFor,
-          // Every write resets the drift counter, in every mode. The paper-mode
-          // sink resets it from the event stream; this is the notes-mode path,
-          // and without it the notice is a false statement for the whole of
-          // notes mode — the state is on disk and the counter never learns it.
-          onWrite: (scope) => {
-            turnsSinceWrite.set(scope, 0);
-            stateWrites.set(scope, (stateWrites.get(scope) ?? 0) + 1);
-          },
-          ...(resolution.declared ? { schema: spec.schema } : {}),
-        });
-      }
-    });
+    // Re-evaluated on every request rather than once at setup, and the tools
+    // are removed before being re-added, because the mode can change under a
+    // server that is still running: paper mode registers no tools at all (§ the
+    // paper's §2), so a server that started in notes mode and moved to paper
+    // would keep handing the model a notes-mode tool the paper forbids, and one
+    // that started in paper mode and moved to notes would keep withholding them.
+    //
+    // Both were measured here as the same symptom — a user who changed
+    // `skillstate.json` and could not make the change take effect — which is
+    // what made it look like a mode nobody could turn off.
+    let toolsRegisteredFor: PluginMode | undefined;
+    const applyToolsForMode = async (): Promise<void> => {
+      const current = modeOf();
+      if (current === toolsRegisteredFor) return;
+      await ctx.tool.transform((editor) => {
+        for (const tool of editor.list()) {
+          if (tool.id.startsWith(SKILLSTATE_TOOL_PREFIX)) editor.remove(tool.id);
+        }
+        // Notes mode gets the schema when a spec was DECLARED, so the tool that
+        // writes this file validates against the same §6.2 the paper's runtime
+        // uses. A builtin spec is our own fallback, and holding a project's notes
+        // to it would reject notes that are fine — the same gate as
+        // `declaredFields`, for the same reason: a default is not a declaration.
+        // This is now literally the same flag the MCP server gates on.
+        if (current !== 'paper') {
+          registerTools(editor, {
+            store,
+            sessions,
+            scopeFor,
+            // Every write resets the drift counter, in every mode. The paper-mode
+            // sink resets it from the event stream; this is the notes-mode path,
+            // and without it the notice is a false statement for the whole of
+            // notes mode — the state is on disk and the counter never learns it.
+            onWrite: (scope) => {
+              turnsSinceWrite.set(scope, 0);
+              stateWrites.set(scope, (stateWrites.get(scope) ?? 0) + 1);
+            },
+            ...(resolution.declared ? { schema: spec.schema } : {}),
+          });
+        }
+      });
+      toolsRegisteredFor = current;
+    };
+    await applyToolsForMode();
 
     // ── Session tree and the paper-mode state sink ───────────────────────
     // Sub-agent sessions are created by OpenCode itself, so the parent edge
@@ -802,7 +835,13 @@ export const SkillStatePlugin = Plugin.define({
             // while the current one was still running, and the continuation was
             // consumed by a request that got superseded — measured, the
             // `[next step]` marker never reached the model at all.
-            if (mode === 'paper' && isStepEnded(event)) {
+            // `modeOf()`, not the setup-time `mode`: this is the line that kept
+            // the step loop turning. Paper mode wakes the model with an empty
+            // prompt after every step, and a project that has since left paper
+            // mode was still being driven by it, on a server that reads its mode
+            // once at startup. A user who deleted `skillstate.json` and
+            // restarted their client got nineteen more turns of it.
+            if (modeOf() === 'paper' && isStepEnded(event)) {
               const sessionID = event.data.sessionID;
               const last = lastAction.get(sessionID);
               // Consuming, and read HERE rather than inside `advance`: this
@@ -913,7 +952,12 @@ export const SkillStatePlugin = Plugin.define({
       }
       const state = store.read(scope);
 
-      if (mode === 'paper') {
+      // Live, not setup-time: this hook decides whether the model is served the
+      // paper's (P, Σₜ, Oₜ) instead of its own transcript, and a project that
+      // has left paper mode was still being served the paper prompt until the
+      // server was restarted — not the client.
+      await applyToolsForMode();
+      if (modeOf() === 'paper') {
         // ── §5.1's step boundary ──────────────────────────────────────────
         // One request may act; the next must account for it. `tools` is
         // handed to this hook on every model request, so the cycle is

@@ -55,8 +55,34 @@ export class FakeToolEditor implements ToolEditor {
     throw new Error('skillstate must not update tools owned by other plugins');
   }
 
-  remove(): void {
-    throw new Error('skillstate must not remove tools owned by other plugins');
+  /**
+   * Remove a tool.
+   *
+   * Real, not a throw. The plugin withdraws its own tools when a project leaves
+   * paper mode, and paper mode registers none — so a fake that forbade removal
+   * would have hidden the code path that makes a mode change take effect, and
+   * the one way to find out it is broken is to run it.
+   *
+   * Only ids this editor holds are affected; anything else is a no-op, which is
+   * what the host does and what keeps the plugin from deleting a tool it never
+   * registered.
+   */
+  remove(id: string): void {
+    if (!this.tools.has(id)) return;
+    this.tools.delete(id);
+    const at = this.order.indexOf(id);
+    if (at >= 0) this.order.splice(at, 1);
+  }
+
+  /**
+   * Put a tool in the registry without going through `add`.
+   *
+   * For tools this package did not register: they arrive from the host and from
+   * other plugins, and the editor has to be able to hold them so that `list`
+   * and `remove` can be exercised against a mix.
+   */
+  pushExisting(id: string): void {
+    if (!this.order.includes(id)) this.order.push(id);
   }
 
   list(): readonly (CapturedTool & { readonly id: string })[] {
@@ -98,6 +124,12 @@ export interface PluginHarness {
   capturedTools(): CapturedTools;
   /** Registered session hooks, keyed by hook name. */
   readonly hooks: Map<string, CapturedHook>;
+  /** Push more events onto the running stream. */
+  emit(events: unknown[]): void;
+  /** Ids the plugin asked the host to remove, in order. */
+  removedTools(): readonly string[];
+  /** Register a tool the plugin does not own. */
+  addForeignTool(id: string): void;
   /** Run `setup` and return its cleanup function. */
   start(): Promise<() => void>;
   /** Whether the plugin's subscription loop has exited. */
@@ -180,6 +212,12 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
   const hooks = new Map<string, CapturedHook>();
   const transformCallbacks: Array<(editor: ToolEditor) => void> = [];
   const queue: unknown[] = [...(options.events ?? [])];
+  // Tools the host or another plugin put there, so a test can prove the plugin
+  // does not sweep them up when it withdraws its own.
+  const foreignTools = new Map<string, CapturedTool>();
+  const removed: string[] = [];
+  /** Wakes a subscription that has parked with an empty queue. */
+  const wakers = new Set<() => void>();
   const prompts: string[] = options.prompts ?? [];
   const payloads: Array<{ sessionID: string; text?: unknown }> = options.payloads ?? [];
   let ended = false;
@@ -224,10 +262,24 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
               }
               const signal = subscribeOptions?.signal;
               if (signal === undefined || signal.aborted) return;
+              // Park until ABORTED **or** until more events arrive. Parking only
+              // on abort is what a long-lived stream really does, and it is
+              // exactly why a test cannot express "the loop is still running, and
+              // the world changed underneath it": a queue that runs dry ends the
+              // loop, and every later `emit` lands on a generator nobody reads.
               await new Promise<void>((resolve) => {
-                signal.addEventListener('abort', () => resolve(), { once: true });
+                const wake = (): void => {
+                  cleanup();
+                  resolve();
+                };
+                const cleanup = (): void => {
+                  signal.removeEventListener('abort', wake);
+                  wakers.delete(wake);
+                };
+                wakers.add(wake);
+                signal.addEventListener('abort', wake, { once: true });
               });
-              return;
+              if (signal.aborted) return;
             }
           } finally {
             ended = true;
@@ -240,9 +292,56 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
   return {
     ctx,
     hooks,
+    /**
+     * Push more events onto the live stream.
+     *
+     * A mode change is a change to a FILE, not to the event stream, so a test
+     * has to be able to keep feeding the subscription after it has started
+     * running. Without this the only way to express "the loop is still going,
+     * and now the config changed" is a second harness, which is a second
+     * process and a second plugin instance — and the whole claim is about what
+     * ONE instance does when the world changes under it.
+     */
+    emit(events: unknown[]): void {
+      queue.unshift(...events);
+      for (const wake of [...wakers]) wake();
+    },
+    /** Ids the plugin asked the host to remove, in order. */
+    removedTools(): readonly string[] {
+      return removed;
+    },
+    /**
+     * Register a tool the plugin does not own, so a sweep can be caught.
+     *
+     * Present because `editor.remove` takes an id rather than a predicate: the
+     * plugin has to be able to tell "mine" from "theirs", and the only way to
+     * prove it does is to put a tool in it does not own and watch it survive.
+     */
+    addForeignTool(id: string): void {
+      foreignTools.set(id, { id, name: id } as unknown as CapturedTool);
+    },
     capturedTools(): CapturedTools {
       const editor = new FakeToolEditor();
-      for (const callback of transformCallbacks) callback(editor);
+      for (const [id, tool] of foreignTools) {
+        editor.tools.set(id, tool);
+        editor.pushExisting(id);
+      }
+      for (const callback of transformCallbacks) {
+        callback(
+          new Proxy(editor, {
+            get(target, prop, receiver) {
+              if (prop === 'remove') {
+                return (id: string) => {
+                  removed.push(id);
+                  target.remove(id);
+                };
+              }
+              const value = Reflect.get(target, prop, target) as unknown;
+              return typeof value === 'function' ? (value as () => void).bind(target) : value;
+            },
+          }) as ToolEditor,
+        );
+      }
       const { tools } = editor;
       return {
         namespaces: editor.namespaces,
