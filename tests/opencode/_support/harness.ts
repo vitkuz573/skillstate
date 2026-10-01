@@ -121,13 +121,51 @@ export function fakeToolContext(
 }
 
 /** A `session.created` event as the v2 server emits it. */
+/**
+ * A `session.created` event in the shape the host publishes it.
+ *
+ * The `info` object is the part that matters and the part that is easy to omit:
+ * `info.directory` is the only place on the whole event stream that says which
+ * project a session belongs to, and the plugin skips any session it cannot place.
+ * A fixture without it produces a session the plugin must ignore, which is
+ * correct behaviour and makes every test that drives it fail for the wrong
+ * reason.
+ */
+/**
+ * Give a session event the project it belongs to, if it did not name one.
+ *
+ * The harness models ONE project — the one `projectDir` names — so a fixture
+ * that says `session.created` without `info.directory` is an incomplete event
+ * rather than a session from somewhere else. Filling it in keeps a dozen tests
+ * from having to repeat the harness's own directory at every call site, and
+ * keeps the one thing that actually matters testable: a session that names a
+ * DIFFERENT directory is still foreign, and `placeSession` does not touch it.
+ */
+function placeSession(event: unknown, projectDir: string): unknown {
+  if (typeof event !== 'object' || event === null) return event;
+  const typed = event as { type?: unknown; data?: Record<string, unknown> };
+  if (typed.type !== 'session.created' && typed.type !== 'session.updated') return event;
+  const data = typed.data;
+  if (typeof data !== 'object' || data === null) return event;
+  const info = data['info'];
+  if (typeof info === 'object' && info !== null) return event;
+  return { ...typed, data: { ...data, info: { directory: projectDir } } };
+}
+
 export function sessionCreated(
   sessionID: string,
   parentID?: string,
+  directory?: string,
 ): Record<string, unknown> {
   return {
     type: 'session.created',
-    data: { sessionID, ...(parentID === undefined ? {} : { parentID }) },
+    data: {
+      sessionID,
+      ...(parentID === undefined ? {} : { parentID }),
+      ...(directory === undefined
+        ? {}
+        : { info: { id: sessionID, projectID: 'prj_1', directory, path: directory } }),
+    },
   };
 }
 
@@ -181,7 +219,7 @@ export function createPluginHarness(options: HarnessOptions): PluginHarness {
             for (;;) {
               const next = queue.shift();
               if (next !== undefined) {
-                yield next;
+                yield placeSession(next, options.projectDir);
                 continue;
               }
               const signal = subscribeOptions?.signal;

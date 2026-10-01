@@ -25,6 +25,32 @@ reports the untyped writes as a finding rather than as drift; `scaffold` still
 refuses, because a spec cannot be produced that accounts for a key nobody can
 type. Where one of them reports it and the other stops is the whole design.
 
+**A paper-mode project drove every session on the machine, not its own.**
+
+The host's event stream is global; a plugin instance is per project directory. It
+acted on every session the stream mentioned, and on a machine with one paper-mode
+project that instance had injected **264** empty user turns into an unrelated
+session in a different project, applied that session's patches into this
+project's state file, and written a run record naming the other project's
+session. The symptom was a dialog that would not stop turning.
+
+`session.created` and `session.updated` both carry `info.directory` — the only
+place on the whole stream that says which project a session belongs to, and the
+registry was not reading it. It records the placement now, and every consumer in
+the event loop skips a session that belongs elsewhere: the sink, the runtime, the
+store, the run record.
+
+A session it cannot place is treated as foreign. That is the direction that
+matters — assuming an unknown session was its own is what produced those 264
+turns — and `session.updated` carries the same field as `created`, so a session
+already open when the plugin loaded re-announces itself within a turn.
+
+This could not have been caught by the ceiling on inactivity below, which is why
+both fixes exist: the driven session was a healthy notes-mode session calling
+tools on every turn, so "this step did nothing" was never true of it. A project
+waking a session that is working is not a stall, it is a project reaching outside
+itself, and no ceiling on progress catches it.
+
 **A paper-mode loop that spent a step per turn for ever, with the ceiling 100
 turns away and a restart having just zeroed it.**
 

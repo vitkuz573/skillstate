@@ -20,8 +20,162 @@ describe('SessionRegistry — parsing the v2 event stream', () => {
   it('registers a root session from session.created without a parentID', () => {
     const { reg } = registry();
     const record = reg.ingestEvent({ type: 'session.created', data: { sessionID: 'ses_root' } });
-    expect(record).toEqual({ id: 'ses_root', parentID: null, seenAt: 1_000 });
+    // `directory: null` is the assertion that matters here as much as the rest:
+    // an event that names no project leaves the session unplaced, and an
+    // unplaced session is one the plugin must not act on. See `isForeign`.
+    expect(record).toEqual({ id: 'ses_root', parentID: null, directory: null, seenAt: 1_000 });
     expect(reg.isSubAgent('ses_root')).toBe(false);
+  });
+
+  describe('which project a session belongs to', () => {
+    const OWN = '/projects/one';
+    const OTHER = '/projects/two';
+
+    it('reads the directory off info, which is the only place the stream names it', () => {
+      const { reg } = registry();
+      const record = reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_1', info: { id: 'ses_1', directory: OWN } },
+      });
+      expect(record?.directory).toBe(OWN);
+      expect(reg.isForeign('ses_1', OWN)).toBe(false);
+      expect(reg.isForeign('ses_1', OTHER)).toBe(true);
+    });
+
+    it('reads it off session.updated too, which is how an already-open session speaks', () => {
+      // `created` fires once, when a session is made. A plugin that loads
+      // mid-session never sees it, and `updated` is the only other event that
+      // carries the same `info.directory`.
+      const { reg } = registry();
+      const record = reg.ingestEvent({
+        type: 'session.updated',
+        data: { sessionID: 'ses_1', info: { id: 'ses_1', directory: OTHER } },
+      });
+      expect(record?.directory).toBe(OTHER);
+      expect(reg.isForeign('ses_1', OWN)).toBe(true);
+    });
+
+    it('treats a trailing separator or a dot segment as the same directory', () => {
+      // The plugin reads its own from `ctx.location.project.canonical` and a
+      // session's from the event, by two different routes. Deciding "different
+      // project" over a trailing slash would make a plugin ignore its own
+      // session, which looks exactly like paper mode silently doing nothing.
+      const { reg } = registry();
+      reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_1', info: { id: 'ses_1', directory: `${OWN}/` } },
+      });
+      expect(reg.isForeign('ses_1', OWN)).toBe(false);
+    });
+
+    it('treats a session it cannot place as foreign, not as its own', () => {
+      // The direction that matters. A paper-mode project that assumed an
+      // unknown session was its own drove a session in another project for 264
+      // turns on one machine; the assumption was what did the damage.
+      const { reg } = registry();
+      expect(reg.isForeign('ses_never_seen', OWN)).toBe(true);
+      reg.ingestEvent({ type: 'session.created', data: { sessionID: 'ses_bare' } });
+      expect(reg.isForeign('ses_bare', OWN)).toBe(true);
+    });
+
+    it('names a session that only `info.sessionID` carries', () => {
+      // A host that stopped repeating the id at the top level would otherwise
+      // make every one of its own sessions look unplaceable, and the plugin
+      // would ignore its own project — which reads as paper mode silently doing
+      // nothing, the most expensive failure mode there is.
+      const { reg } = registry();
+      const record = reg.ingestEvent({
+        type: 'session.created',
+        data: { info: { id: 'ses_1', sessionID: 'ses_1', directory: OWN } },
+      });
+      expect(record?.id).toBe('ses_1');
+      expect(reg.isForeign('ses_1', OWN)).toBe(false);
+    });
+
+    it('reads nothing off an event that is not a shape at all', () => {
+      // The registry reads a stream it does not own, and `readSessionEvent` is
+      // called on every event the plugin sees. Every one of these must return,
+      // never throw: a throw inside the subscription loop ends the subscription
+      // for the rest of the process's life, and the plugin goes quiet in a way
+      // nothing reports.
+      const { reg } = registry();
+      for (const bad of [null, undefined, 'session.created', 42]) {
+        expect(reg.ingestEvent(bad)).toBeNull();
+      }
+      for (const bad of [null, undefined, 'nope', 7, []]) {
+        expect(reg.ingestEvent({ type: 'session.created', data: bad })).toBeNull();
+      }
+      // A bad `info` beside a good id still registers the session, and that is
+      // correct: the id is what the registry keys on, and `info` is only where
+      // it looks for the project. Registering without a placement is what makes
+      // `isForeign` answer true, which is the safe direction.
+      for (const bad of [null, undefined, 'nope', 7, []]) {
+        const record = reg.ingestEvent({
+          type: 'session.created',
+          data: { sessionID: `ses_bad_${String(bad)}`, info: bad },
+        });
+        expect(record?.directory).toBeNull();
+        expect(reg.isForeign(`ses_bad_${String(bad)}`, OWN)).toBe(true);
+      }
+      // No `type`, and a type that is not a string.
+      expect(reg.ingestEvent({ data: { sessionID: 'ses_1' } })).toBeNull();
+      expect(reg.ingestEvent({ type: 42, data: { sessionID: 'ses_1' } })).toBeNull();
+      // `info: null` with a good id, read through the same guard as every other
+      // unusable `info` — including the one `typeof` alone would have let past.
+      const nulled = reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_nulled', info: null },
+      });
+      expect(nulled?.directory).toBeNull();
+    });
+
+    it('ignores an `info` that names no session at all', () => {
+      // `info.directory` with no id anywhere: there is nothing to attach a
+      // placement to, and inventing an id from the record would register a
+      // session the host never announced.
+      const { reg } = registry();
+      expect(
+        reg.ingestEvent({
+          type: 'session.created',
+          data: { info: { directory: OWN } },
+        }),
+      ).toBeNull();
+      expect(
+        reg.ingestEvent({
+          type: 'session.created',
+          data: { info: { id: 'ses_1', directory: OWN, sessionID: '' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('reads nothing off an event whose info was emptied', () => {
+      // `info: null` and "no `info`" both leave the session unplaced, and both
+      // must say so without throwing. A record with its fields wiped is a thing
+      // a foreign store can produce, and the plugin reads a stream it does not
+      // own.
+      const { reg } = registry();
+      const record = reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_1', info: null },
+      });
+      expect(record?.directory).toBeNull();
+      expect(reg.isForeign('ses_1', OWN)).toBe(true);
+      const notAnObject = reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_2', info: 'nonsense' },
+      });
+      expect(notAnObject?.directory).toBeNull();
+    });
+
+    it('forgets the placement when the session is deleted', () => {
+      const { reg } = registry();
+      reg.ingestEvent({
+        type: 'session.created',
+        data: { sessionID: 'ses_1', info: { id: 'ses_1', directory: OTHER } },
+      });
+      reg.ingestEvent({ type: 'session.deleted', data: { sessionID: 'ses_1' } });
+      expect(reg.isForeign('ses_1', OWN)).toBe(true);
+    });
   });
 
   it('registers a sub-agent session from session.created with a parentID', () => {

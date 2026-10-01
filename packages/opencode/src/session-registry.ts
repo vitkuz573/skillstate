@@ -34,6 +34,7 @@
  * process does not accumulate one entry per session it has ever seen.
  */
 
+import * as path from 'node:path';
 import { sanitizeAgentId } from '@skillstate/core';
 
 /** How long a session stays registered after its last event. */
@@ -45,6 +46,16 @@ export interface SessionRecord {
   readonly id: string;
   /** The parent session id, or `null` for a root session. */
   readonly parentID: string | null;
+  /**
+   * The project directory this session belongs to, or `null` when the stream
+   * has not said.
+   *
+   * `session.created` and `session.updated` both carry `info.directory`. Nothing
+   * else in the ~50 session events does, which is why the registry did not
+   * record it for as long as it did — and why a paper-mode project drove every
+   * session on the machine. See {@link SessionRegistry.isForeign}.
+   */
+  readonly directory: string | null;
   /** Event receive time (epoch ms) — drives TTL eviction. */
   readonly seenAt: number;
 }
@@ -74,24 +85,94 @@ const DEFAULT_MAX_SESSIONS = 512;
  * subscription loop.
  */
 type SessionEvent =
-  | { kind: 'upsert'; id: string; parentID: string | null }
+  | { kind: 'upsert'; id: string; parentID: string | null; directory: string | null }
   | { kind: 'delete'; id: string };
+
+/**
+ * The `info` record of a session event, or `null` when it carries none.
+ *
+ * `data` is typed as the object it already is, rather than checked again here.
+ * Both callers are inside {@link readSessionEvent}, which has returned `null`
+ * for anything that is not an object, so a guard in this function would be a
+ * branch nothing could take — and a branch that cannot be taken is one more
+ * thing a reader has to reason about, on a path that decides which project a
+ * session belongs to.
+ */
+function infoOf(data: Record<string, unknown>): Record<string, unknown> | null {
+  const info = (data as { info?: unknown }).info;
+  // `info` that is null or not an object is ONE case, not two: either way the
+  // session stays unplaced, and no caller can tell them apart afterwards.
+  // `typeof` alone would let `null` through, and `null['directory']` throws
+  // inside the subscription loop.
+  if (info === null) return null;
+  if (typeof info !== 'object') return null;
+  return info as Record<string, unknown>;
+}
+
+/** The `info.directory` a session event carries, if it carries one at all. */
+function readDirectory(data: Record<string, unknown>): string | null {
+  const info = infoOf(data);
+  if (info === null) return null;
+  const directory = info['directory'];
+  return typeof directory === 'string' && directory.length > 0 ? directory : null;
+}
 
 function readSessionEvent(event: unknown): SessionEvent | null {
   if (typeof event !== 'object' || event === null) return null;
   const type = (event as { type?: unknown }).type;
   if (typeof type !== 'string') return null;
-  if (type !== 'session.created' && type !== 'session.forked' && type !== 'session.deleted') {
+  // `session.updated` joins `created` here because it is the only other event
+  // carrying `info.directory`, and a session that was already open when the
+  // plugin loaded announces itself through it rather than through `created`.
+  if (
+    type !== 'session.created' &&
+    type !== 'session.updated' &&
+    type !== 'session.forked' &&
+    type !== 'session.deleted'
+  ) {
     return null;
   }
   const data = (event as { data?: unknown }).data;
   if (typeof data !== 'object' || data === null) return null;
-  const record = data as { sessionID?: unknown; parentID?: unknown };
-  if (typeof record.sessionID !== 'string' || record.sessionID.length === 0) return null;
-  if (type === 'session.deleted') return { kind: 'delete', id: record.sessionID };
+  // Narrowed to an index-bearing object, which is what `readDirectory` and
+  // `sessionIdInside` take. `typeof` alone leaves `object`, and the two would
+  // then have to cast — and a cast at that depth is where a missing field turns
+  // into a property read on something that is not a record.
+  const record = data as Record<string, unknown>;
+  // `info.sessionID` is a fallback, not a second source of truth: the id sits
+  // at the top of `data` in every event this host has been observed sending, and
+  // a host that stopped repeating it there would leave every session of its own
+  // unplaceable — which reads as the plugin ignoring its own project.
+  const id =
+    typeof record.sessionID === 'string' && record.sessionID.length > 0
+      ? record.sessionID
+      : sessionIdInside(record);
+  if (id === null) return null;
+  if (type === 'session.deleted') return { kind: 'delete', id };
   const parent =
     typeof record.parentID === 'string' && record.parentID.length > 0 ? record.parentID : null;
-  return { kind: 'upsert', id: record.sessionID, parentID: parent };
+  return { kind: 'upsert', id, parentID: parent, directory: readDirectory(record) };
+}
+
+/** `info.sessionID`, when the top of `data` did not carry one. */
+function sessionIdInside(data: Record<string, unknown>): string | null {
+  const info = infoOf(data);
+  if (info === null) return null;
+  const inner = info['sessionID'];
+  return typeof inner === 'string' && inner.length > 0 ? inner : null;
+}
+
+/**
+ * Compare two project directories for identity.
+ *
+ * `path.resolve` rather than `===`, because the two sides arrive by different
+ * routes: the plugin reads its own from `ctx.location.project.canonical` and a
+ * session's from the event's `info.directory`. One may carry a trailing slash
+ * or a `.` segment that the other does not, and a plugin that decided "this is a
+ * different project" over a trailing separator would drive a session it owns.
+ */
+export function sameDirectory(a: string, b: string): boolean {
+  return path.resolve(a) === path.resolve(b);
 }
 
 /**
@@ -133,6 +214,7 @@ export class SessionRegistry {
     const record: SessionRecord = {
       id: parsed.id,
       parentID: parsed.parentID,
+      directory: parsed.directory,
       seenAt: this.now(),
     };
     this.sessions.set(record.id, record);
@@ -143,6 +225,39 @@ export class SessionRegistry {
   /** The recorded session, or `undefined` when it was never observed. */
   get(sessionID: string): SessionRecord | undefined {
     return this.sessions.get(sessionID);
+  }
+
+  /**
+   * Whether `sessionID` belongs to a project other than `ownDirectory`.
+   *
+   * ── Why this question exists ─────────────────────────────────────────────
+   *
+   * The event stream is global. A plugin instance is per project directory, and
+   * it used to act on every session the stream mentioned. Measured on a machine
+   * with one paper-mode project: that instance had injected **264** empty user
+   * turns into an unrelated session in a different project, applied its patches
+   * into the wrong project's state file, and written a run record naming the
+   * other project's session. The user saw a dialog that would not stop turning.
+   *
+   * It never stopped, and the fix that stopped the spin could not have caught
+   * it: the driven session was doing real work — it was a healthy notes-mode
+   * session calling tools every turn — so a ceiling on *inactivity* correctly
+   * never fired. A project waking a session that is working is not a stall; it
+   * is a project reaching outside itself, and the only cure is not to.
+   *
+   * ── Why an unknown session is NOT foreign ────────────────────────────────
+   *
+   * Unknown means the stream has not said, and the two safe answers are "ours"
+   * and "not ours". "Not ours" is chosen, because the failure of guessing wrong
+   * in that direction is silence until the session next announces itself — and
+   * `session.updated` carries the same `info.directory` as `created`, so a live
+   * session re-announces itself within a turn. Guessing "ours" instead is what
+   * produced 264 turns against someone else's conversation.
+   */
+  isForeign(sessionID: string, ownDirectory: string): boolean {
+    const record = this.sessions.get(sessionID);
+    if (record === undefined || record.directory === null) return true;
+    return !sameDirectory(record.directory, ownDirectory);
   }
 
   /**

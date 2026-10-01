@@ -128,8 +128,23 @@ function actingTurn(ordinal: number, sessionID = 'ses_root'): unknown[] {
   ];
 }
 
-function eventsFor(turns: unknown[][]): unknown[] {
-  return turns.flat();
+/** The session this harness drives, announced as belonging to this project. */
+/**
+ * A session announced for this project.
+ *
+ * `info: null` is a real case, not a shape to be tidy about: the plugin reads a
+ * stream it does not own, and an event whose record has been emptied must leave
+ * the session unplaced rather than throw inside the subscription loop.
+ */
+function announce(projectDir: string, sessionID = 'ses_root'): unknown[] {
+  return [
+    { type: 'session.created', data: { sessionID, info: { id: sessionID, directory: projectDir } } },
+    { type: 'session.created', data: { sessionID: `${sessionID}_emptied`, info: null } },
+  ];
+}
+
+function eventsFor(projectDir: string, turns: unknown[][]): unknown[] {
+  return [...announce(projectDir), ...turns.flat()];
 }
 
 describe('the step loop, end to end', () => {
@@ -141,7 +156,7 @@ describe('the step loop, end to end', () => {
       prompts,
       // Eight toolless turns — more than the ceiling. Under the old wiring the
       // loop asked for all eight and was still on its way to the hundredth.
-      events: eventsFor([0, 1, 2, 3, 4, 5, 6, 7].map((i) => patchTurn(i))),
+      events: eventsFor(projectDir, [0, 1, 2, 3, 4, 5, 6, 7].map((i) => patchTurn(i))),
     });
     cleanups.push(await harness.start());
 
@@ -165,7 +180,7 @@ describe('the step loop, end to end', () => {
     const harness = createPluginHarness({
       projectDir,
       prompts,
-      events: eventsFor([0, 1, 2, 3, 4, 5, 6, 7].map((i) => actingTurn(i))),
+      events: eventsFor(projectDir, [0, 1, 2, 3, 4, 5, 6, 7].map((i) => actingTurn(i))),
     });
     cleanups.push(await harness.start());
 
@@ -184,7 +199,7 @@ describe('the step loop, end to end', () => {
     const harness = createPluginHarness({
       projectDir,
       prompts,
-      events: eventsFor([
+      events: eventsFor(projectDir, [
         patchTurn(0),
         patchTurn(1),
         actingTurn(2),
@@ -215,7 +230,7 @@ describe('the step loop, end to end', () => {
     const harness = createPluginHarness({
       projectDir,
       prompts,
-      events: eventsFor([0, 1, 2, 3].map((i) => patchTurn(i))),
+      events: eventsFor(projectDir, [0, 1, 2, 3].map((i) => patchTurn(i))),
     });
     cleanups.push(await harness.start());
 

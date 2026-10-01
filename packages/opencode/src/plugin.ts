@@ -245,6 +245,41 @@ function isStepEnded(event: unknown): event is { type: 'session.step.ended'; dat
 }
 
 /**
+ * The session an event concerns, from wherever this one names it.
+ *
+ * `sessionID` at the top of `data` for most events, and `info.sessionID` for the
+ * two that carry the whole session record. Both spellings occur on the same
+ * stream, and an event that names neither is not about a session — the
+ * permission and file events are — so `undefined` is a real answer here rather
+ * than a gap.
+ */
+function sessionIdOf(event: unknown): string | undefined {
+  // `session.created` and `session.updated` carry the whole record under `info`
+  // and only repeat the id at `data.sessionID`, but the shape is not a promise
+  // — the stream is the host's, and an event is free to name its session in
+  // either place or in neither. Both are read, and `info.sessionID` is read as
+  // well because a host that stopped repeating the id at the top level would
+  // otherwise make every one of its own sessions look unplaceable, and the
+  // plugin would then ignore its own project entirely.
+  if (typeof event !== 'object' || event === null) return undefined;
+  const data = (event as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  const record = data as { sessionID?: unknown; info?: unknown };
+  const top = record.sessionID;
+  if (typeof top === 'string' && top.length > 0) return top;
+  // `info.sessionID` is a fallback for the same reason the registry reads it:
+  // the id sits at the top of `data` in every event this host has been observed
+  // sending, and a host that stopped repeating it there would leave every
+  // session of its own looking unplaceable — which reads as the plugin ignoring
+  // its own project, the most expensive way to be wrong here.
+  const info = record.info;
+  if (info === null || typeof info !== 'object') return undefined;
+  const inner = (info as { sessionID?: unknown }).sessionID;
+  if (typeof inner === 'string' && inner.length > 0) return inner;
+  return undefined;
+}
+
+/**
  * Record a failed step request, so "the host declined" is not a guess.
  *
  * @non-paper diagnostics. Enabled by `SKILLSTATE_DEBUG_PROMPT`, appended to
@@ -694,6 +729,28 @@ export const SkillStatePlugin = Plugin.define({
               (event as { type?: unknown }).type as string,
             );
             sessions.ingestEvent(event);
+            // ── This project only ──────────────────────────────────────────
+            //
+            // The stream is GLOBAL; this instance belongs to one project
+            // directory. Measured on a machine with a single paper-mode project:
+            // that instance had injected 264 empty user turns into an unrelated
+            // session in a DIFFERENT project, applied that session's patches to
+            // this project's state file, and written a run record naming the
+            // other project's session. The user saw a dialog that would not stop
+            // turning.
+            //
+            // It could not have been caught by the ceiling on inactivity: the
+            // driven session was a healthy notes-mode session calling tools on
+            // every turn, so "this step did nothing" was never true. A project
+            // waking a session that is working is not a stall, it is a project
+            // reaching outside itself, and the cure is not to.
+            //
+            // Placed after `ingestEvent` and before EVERY consumer, so a
+            // foreign session cannot reach the sink, the runtime or the store.
+            const eventSession = sessionIdOf(event);
+            if (eventSession !== undefined && sessions.isForeign(eventSession, directory)) {
+              continue;
+            }
             // Folded in on the way past, not in the step handler: the tool part
             // arrives DURING the step, and the handler runs at the end of it. A
             // tracker consulted only there would be asked about a window it had

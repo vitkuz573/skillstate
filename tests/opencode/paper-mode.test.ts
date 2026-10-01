@@ -990,6 +990,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       prompts,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1016,6 +1017,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       promptRefuses: true,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1102,6 +1104,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       prompts,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1135,6 +1138,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
         projectDir,
         promptRefuses: true,
         events: [
+        sessionCreated('ses_root', undefined, projectDir),
           {
             type: 'session.text.ended',
             data: {
@@ -1236,6 +1240,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
         projectDir,
         promptThrowsString: true,
         events: [
+        sessionCreated('ses_root', undefined, projectDir),
           {
             type: 'session.text.ended',
             data: {
@@ -1262,6 +1267,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
         projectDir: again,
         promptThrowsString: true,
         events: [
+        sessionCreated('ses_root', undefined, again),
           {
             type: 'session.text.ended',
             data: {
@@ -1296,6 +1302,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       payloads,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1329,6 +1336,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       projectDir,
       prompts,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         null as never,
         'session.step.ended' as never,
         { type: 'session.step.ended' } as never,
@@ -1364,6 +1372,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
         projectDir,
         prompts: [],
         events: [
+        sessionCreated('ses_root', undefined, projectDir),
           {
             type: 'session.text.ended',
             data: {
@@ -1403,7 +1412,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       const harness = createPluginHarness({
         projectDir,
         prompts: [],
-        events: [{ type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
+        events: [sessionCreated('ses_root', undefined, projectDir), { type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
       });
       cleanups.push(await harness.start());
       await waitFor(
@@ -1434,7 +1443,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
       const harness = createPluginHarness({
         projectDir,
         prompts: [],
-        events: [{ type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
+        events: [sessionCreated('ses_root', undefined, projectDir), { type: 'session.step.ended', data: { sessionID: 'ses_root' } }],
       });
       cleanups.push(await harness.start());
       await waitFor(
@@ -1468,6 +1477,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
         projectDir,
         prompts,
         events: [
+        sessionCreated('ses_root', undefined, projectDir),
           {
             type: 'session.text.ended',
             data: {
@@ -1501,6 +1511,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1550,6 +1561,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1579,6 +1591,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1627,6 +1640,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1666,6 +1680,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1698,6 +1713,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1739,6 +1755,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1772,6 +1789,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1803,6 +1821,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -1828,6 +1847,7 @@ describe('the plugin closes the paper transition from the event stream', () => {
     const harness = createPluginHarness({
       projectDir,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         { type: 'session.text.ended', data: { sessionID: 'ses_root', assistantMessageID: 'a', ordinal: 0, text: 'no json here' } },
         { type: 'session.step.ended', data: { sessionID: 'ses_root' } },
         sessionCreated('ses_child', 'ses_root'),
@@ -1865,8 +1885,12 @@ describe('§6.4 end to end: a step that spent every attempt', () => {
   // the queue alone, because the thing that can go wrong is the two never
   // meeting: a correction recorded on one turn and an observation owed on the
   // next.
-  function threeFailures(): unknown[] {
-    const events: unknown[] = [];
+  function threeFailures(projectDir: string): unknown[] {
+    // The session is announced first, or the plugin has no project to place it
+    // in and skips every one of these three failures — a loop that never ran
+    // reports "the model never failed", which is the opposite of what this is
+    // about.
+    const events: unknown[] = [sessionCreated('ses_root', undefined, projectDir)];
     for (let i = 0; i < 3; i += 1) {
       events.push({
         type: 'session.text.ended',
@@ -1884,7 +1908,7 @@ describe('§6.4 end to end: a step that spent every attempt', () => {
 
   it('tells the model the step is over, and how many attempts it took', async () => {
     const projectDir = paperProjectWithSpec({ step: 1 });
-    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures() });
+    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures(projectDir) });
     cleanups.push(await harness.start());
     // The queue is drained and the invalidation recorded before the next prompt.
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -1900,7 +1924,7 @@ describe('§6.4 end to end: a step that spent every attempt', () => {
     // nothing to undo. Three failures must leave the file exactly as it was.
     const projectDir = paperProjectWithSpec({ step: 7 });
     const before = fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8');
-    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures() });
+    const harness = createPluginHarness({ projectDir, prompts: [], events: threeFailures(projectDir) });
     cleanups.push(await harness.start());
     await new Promise((resolve) => setTimeout(resolve, 60));
     const after = fs.readFileSync(path.join(projectDir, '.skillstate', 'skillstate.json'), 'utf-8');
@@ -1928,6 +1952,7 @@ describe('Oₜ carries the environment reply, never the model\'s own action', ()
         projectDir,
         prompts: asked,
         events: [
+        sessionCreated('ses_root', undefined, projectDir),
           {
             type: 'session.text.ended',
             data: {
@@ -2063,7 +2088,13 @@ describe('the run record', () => {
   // stopped at the ceiling leaves a transcript indistinguishable from a run that
   // finished. Measured: a 90-file run stopped at step 100, mid-file-79, and was
   // read as a model that had lost track of its running sum at file 78.
-  const patchEvent = (action: string): unknown[] => [
+  // The session announcement comes first: the plugin now refuses to act on a
+  // session it cannot place in a project directory, so a fixture that only
+  // describes a step is a session from nowhere and is correctly ignored.
+  const patchEvent = (action: string, projectDir?: string): unknown[] => [
+    ...(projectDir === undefined
+      ? []
+      : [sessionCreated('ses_root', undefined, projectDir)]),
     {
       type: 'session.text.ended',
       data: {
@@ -2092,7 +2123,7 @@ describe('the run record', () => {
 
   it('says terminal when the model ended the run -- a real finish', async () => {
     const projectDir = paperProjectWithSpec({ step: 0 });
-    const harness = createPluginHarness({ projectDir, events: patchEvent('done') });
+    const harness = createPluginHarness({ projectDir, events: patchEvent('done', projectDir) });
     cleanups.push(await harness.start());
     const record = await awaitRun(projectDir);
     expect((record['stop'] as Record<string, unknown>)['reason']).toBe('terminal');
@@ -2105,7 +2136,7 @@ describe('the run record', () => {
     const harness = createPluginHarness({
       projectDir,
       promptRefuses: true,
-      events: patchEvent('read src/cfg2.ts'),
+      events: patchEvent('read src/cfg2.ts', projectDir),
     });
     cleanups.push(await harness.start());
     const record = await awaitRun(projectDir);
@@ -2132,6 +2163,7 @@ describe('the run record', () => {
       projectDir,
       promptRefuses: true,
       events: [
+        sessionCreated('ses_root', undefined, projectDir),
         {
           type: 'session.text.ended',
           data: {
@@ -2172,7 +2204,7 @@ describe('the run record', () => {
     const harness = createPluginHarness({
       projectDir,
       promptRefuses: true,
-      events: patchEvent('read src/cfg2.ts'),
+      events: patchEvent('read src/cfg2.ts', projectDir),
     });
     cleanups.push(await harness.start());
     // Give the deferred write time to fail, then confirm the session is intact.
@@ -2191,7 +2223,7 @@ describe('the run record', () => {
     // none. A budget counts steps the loop spent, not work the model did -- and a
     // record reporting 1 would be counting something the loop never did.
     const projectDir = paperProjectWithSpec({ step: 0 });
-    const harness = createPluginHarness({ projectDir, events: patchEvent('done') });
+    const harness = createPluginHarness({ projectDir, events: patchEvent('done', projectDir) });
     cleanups.push(await harness.start());
     const record = await awaitRun(projectDir);
     expect(record['maxSteps']).toBe(100);
